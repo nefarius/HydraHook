@@ -60,39 +60,39 @@ The core library logs its progress and potential errors to `HydraHook.log`. It t
 
 ## Demos
 
-The following screenshots show [imgui](https://github.com/ocornut/imgui) being rendered in foreign processes using different versions of DirectX.
+The following demo videos show [imgui](https://github.com/ocornut/imgui) being rendered in foreign processes using different versions of DirectX. Click a thumbnail to watch the video.
 
 ### DirectX 9
 
 Half-Life 2, 32-Bit
 
-![Half-Life 2](https://placehold.co/640x360/e8e8e8/999999?text=Half-Life+2+Demo+Screenshot+%28placeholder%29)
+[![Half-Life 2 Demo](https://placehold.co/640x360/e8e8e8/999999?text=Half-Life+2+%28click+to+watch%29)](https://sharex.nefarius.at/u/hl2.mp4)
 
 ### DirectX 9 Ex
 
 Castlevania: Lords of Shadow, 32-Bit
 
-![Castlevania: Lords of Shadow](https://placehold.co/640x360/e8e8e8/999999?text=Castlevania+Lords+of+Shadow+Demo+Screenshot+%28placeholder%29)
+[![Castlevania: Lords of Shadow Demo](https://placehold.co/640x360/e8e8e8/999999?text=Castlevania+%28click+to+watch%29)](https://sharex.nefarius.at/u/CastlevaniaLoSUE.mp4)
 
 ### DirectX 10
 
 Bioshock 2, 32-Bit
 
-![Bioshock2_2017-08-10_14-48-38.png](https://lh3.googleusercontent.com/-oWNHhCbWBLo/WYxWJ0l6qqI/AAAAAAAAAK0/2yTiRcSeH-I-6YUmsGfPimBSti4VobfQgCHMYCw/s0/Bioshock2_2017-08-10_14-48-38.png)
+[![Bioshock 2 Demo](https://placehold.co/640x360/e8e8e8/999999?text=Bioshock+2+%28click+to+watch%29)](https://sharex.nefarius.at/u/BioShock2.mp4)
 
 ### DirectX 11
 
-Ryse: Son of Rome, 64-Bit
-
-![Ryse_2017-08-09_21-48-57.png](https://lh3.googleusercontent.com/-A1Yj4RE07C4/WYtnLFgGg3I/AAAAAAAAAKk/ZMEfZNAQ670XR4vtRtO0Yy3vN2EXwXKygCHMYCw/s0/Ryse_2017-08-09_21-48-57.png)
-
 Road Redemption, 64-Bit
 
-![RoadRedemptionEarlyAccess_2017-08-14_14-06-21.png](https://lh3.googleusercontent.com/-v2Ao0kCoTvg/WZGSQeniK8I/AAAAAAAAAN0/TXpCVv8pLFoGsuKlwnBRufFuG_ZXaZmRACHMYCw/s0/RoadRedemptionEarlyAccess_2017-08-14_14-06-21.png)
+[![Road Redemption Demo](https://placehold.co/640x360/e8e8e8/999999?text=Road+Redemption+%28click+to+watch%29)](https://sharex.nefarius.at/u/RoadRedemption.mp4)
 
 ### DirectX 12
 
 Supported on 64-bit builds. The ImGui sample automatically detects and hooks DX12 games.
+
+BEHEMOTH, 64-Bit
+
+[![BEHEMOTH Demo](https://placehold.co/640x360/e8e8e8/999999?text=BEHEMOTH+%28click+to+watch%29)](https://sharex.nefarius.at/u/BEHEMOTH.mp4)
 
 ## Sources
 
