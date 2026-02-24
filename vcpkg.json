@@ -20,6 +20,6 @@
       "name": "directxtk",
       "features": [ "tools" ]
     },
-    "opencv"
+    "opencv2"
   ]
 }
