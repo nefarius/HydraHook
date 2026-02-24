@@ -58,6 +58,15 @@ static void D3D12_CleanupInitResources();
 static void D3D12_WaitForGpu();
 static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain);
 
+/* Forward declarations for HydraHook callbacks */
+static void EvtHydraHookGameHooked(PHYDRAHOOK_ENGINE EngineHandle, const HYDRAHOOK_D3D_VERSION GameVersion);
+static void EvtHydraHookD3D11PrePresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags, PHYDRAHOOK_EVT_PRE_EXTENSION Extension);
+static void EvtHydraHookD3D11PreResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags, PHYDRAHOOK_EVT_PRE_EXTENSION Extension);
+static void EvtHydraHookD3D11PostResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags, PHYDRAHOOK_EVT_POST_EXTENSION Extension);
+static void EvtHydraHookD3D12PrePresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags, PHYDRAHOOK_EVT_PRE_EXTENSION Extension);
+static void EvtHydraHookD3D12PreResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags, PHYDRAHOOK_EVT_PRE_EXTENSION Extension);
+static void EvtHydraHookD3D12PostResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags, PHYDRAHOOK_EVT_POST_EXTENSION Extension);
+
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 {
 	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
@@ -88,7 +97,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 	return TRUE;
 }
 
-void EvtHydraHookGameHooked(
+static void EvtHydraHookGameHooked(
 	PHYDRAHOOK_ENGINE EngineHandle,
 	const HYDRAHOOK_D3D_VERSION GameVersion
 )
@@ -123,7 +132,7 @@ void EvtHydraHookGameHooked(
 
 #pragma region D3D11
 
-void EvtHydraHookD3D11PrePresent(
+static void EvtHydraHookD3D11PrePresent(
 	IDXGISwapChain* pSwapChain,
 	UINT SyncInterval,
 	UINT Flags,
@@ -177,7 +186,7 @@ void EvtHydraHookD3D11PrePresent(
 	pDevice->Release();
 }
 
-void EvtHydraHookD3D11PreResizeBuffers(
+static void EvtHydraHookD3D11PreResizeBuffers(
 	IDXGISwapChain* pSwapChain,
 	UINT BufferCount,
 	UINT Width,
@@ -196,7 +205,7 @@ void EvtHydraHookD3D11PreResizeBuffers(
 	(void)Extension;
 }
 
-void EvtHydraHookD3D11PostResizeBuffers(
+static void EvtHydraHookD3D11PostResizeBuffers(
 	IDXGISwapChain* pSwapChain,
 	UINT BufferCount,
 	UINT Width,
@@ -303,7 +312,7 @@ static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain)
 	return true;
 }
 
-void EvtHydraHookD3D12PrePresent(
+static void EvtHydraHookD3D12PrePresent(
 	IDXGISwapChain* pSwapChain,
 	UINT SyncInterval,
 	UINT Flags,
@@ -421,7 +430,7 @@ void EvtHydraHookD3D12PrePresent(
 	});
 }
 
-void EvtHydraHookD3D12PreResizeBuffers(
+static void EvtHydraHookD3D12PreResizeBuffers(
 	IDXGISwapChain* pSwapChain,
 	UINT BufferCount,
 	UINT Width,
@@ -443,7 +452,7 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	D3D12_CleanupOverlayResources();
 }
 
-void EvtHydraHookD3D12PostResizeBuffers(
+static void EvtHydraHookD3D12PostResizeBuffers(
 	IDXGISwapChain* pSwapChain,
 	UINT BufferCount,
 	UINT Width,
