@@ -41,6 +41,7 @@ SOFTWARE.
 
 #include <dxgi1_4.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -240,6 +241,12 @@ static void RunPerceptionPipeline(cv::Mat& frame)
 	const int minFeatures = 8;
 	const int maxPoseTrailLen = 100;
 
+	if (frame.empty() || !frame.isContinuous())
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: RunPerceptionPipeline received empty or non-continuous frame");
+		return;
+	}
+
 	static cv::Mat prevGray, currGray;
 	static std::vector<cv::Point2f> prevPts, currPts;
 	static cv::Ptr<cv::ORB> orb = cv::ORB::create(500);
@@ -247,10 +254,18 @@ static void RunPerceptionPipeline(cv::Mat& frame)
 	static bool needReinit = true;
 
 	cv::Mat gray;
-	if (frame.channels() == 3)
-		cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-	else
-		gray = frame;
+	try
+	{
+		if (frame.channels() == 3)
+			cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+		else
+			gray = frame;
+	}
+	catch (const cv::Exception& ex)
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: cvtColor failed: %s (ch=%d)", ex.what(), frame.channels());
+		return;
+	}
 
 	currGray = gray;
 	PerceptionResults out;
@@ -275,12 +290,30 @@ static void RunPerceptionPipeline(cv::Mat& frame)
 	{
 		std::vector<uchar> status;
 		std::vector<float> err;
-		cv::calcOpticalFlowPyrLK(prevGray, currGray, prevPts, currPts, status, err,
-			cv::Size(21, 21), 3,
-			cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01));
+		try
+		{
+			cv::calcOpticalFlowPyrLK(prevGray, currGray, prevPts, currPts, status, err,
+				cv::Size(21, 21), 3,
+				cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01));
+		}
+		catch (const cv::Exception& ex)
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: calcOpticalFlowPyrLK failed: %s", ex.what());
+			needReinit = true;
+			out.prevPts = prevPts;
+			out.currPts = currPts;
+			out.featureCount = (int)prevPts.size();
+			out.valid = false;
+			{
+				std::lock_guard<std::mutex> lock(g_resultsMutex);
+				g_results = out;
+			}
+			return;
+		}
 
 		std::vector<cv::Point2f> goodPrev, goodCurr;
-		for (size_t i = 0; i < status.size(); i++)
+		const size_t n = (std::min)(status.size(), (std::min)(prevPts.size(), currPts.size()));
+		for (size_t i = 0; i < n; i++)
 		{
 			if (status[i])
 			{
@@ -301,49 +334,99 @@ static void RunPerceptionPipeline(cv::Mat& frame)
 		{
 			const int w = frame.cols;
 			const int h = frame.rows;
-			double fx = (double)w;
-			double fy = (double)w;
-			double cx = w / 2.0;
-			double cy = h / 2.0;
-			cv::Mat K = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
-
-			cv::Mat E, R, t;
-			std::vector<int> inlierMask;
-			E = cv::findEssentialMat(goodPrev, goodCurr, K, cv::RANSAC, 0.999, 1.0, inlierMask);
-
-			int inliers = 0;
-			for (int m : inlierMask)
-				if (m) inliers++;
-
-			if (inliers >= minFeatures)
+			if (w <= 0 || h <= 0)
 			{
-				std::vector<cv::Point2f> inlierPrev, inlierCurr;
-				for (size_t i = 0; i < inlierMask.size(); i++)
+				HydraHookEngineLogError("HydraHook-OpenCV: Invalid frame size %dx%d, skipping perception", w, h);
+				needReinit = true;
+				out.prevPts = prevPts;
+				out.currPts = currPts;
+				out.featureCount = (int)currPts.size();
+				out.valid = false;
+			}
+			else if (goodPrev.size() != goodCurr.size())
+			{
+				HydraHookEngineLogError("HydraHook-OpenCV: Point count mismatch prev=%zu curr=%zu", goodPrev.size(), goodCurr.size());
+				needReinit = true;
+				out.prevPts = prevPts;
+				out.currPts = currPts;
+				out.featureCount = (int)currPts.size();
+				out.valid = false;
+			}
+			else
+			{
+				double fx = (double)w;
+				double fy = (double)w;
+				double cx = w / 2.0;
+				double cy = h / 2.0;
+				cv::Mat K = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+
+				cv::Mat E, R, t;
+				std::vector<int> inlierMask;
+				try
 				{
-					if (inlierMask[i])
+					E = cv::findEssentialMat(goodPrev, goodCurr, K, cv::RANSAC, 0.999, 1.0, inlierMask);
+				}
+				catch (const cv::Exception& ex)
+				{
+					HydraHookEngineLogError("HydraHook-OpenCV: findEssentialMat failed: %s (prev=%zu curr=%zu)", ex.what(), goodPrev.size(), goodCurr.size());
+					needReinit = true;
+					out.prevPts = goodPrev;
+					out.currPts = goodCurr;
+					out.featureCount = (int)goodCurr.size();
+					out.valid = true;
+					goto skip_essential;
+				}
+
+				if (E.empty())
+				{
+					HydraHookEngineLogError("HydraHook-OpenCV: findEssentialMat returned empty matrix");
+				}
+				else
+				{
+					int inliers = 0;
+					for (int m : inlierMask)
+						if (m) inliers++;
+
+					if (inliers >= minFeatures)
 					{
-						inlierPrev.push_back(goodPrev[i]);
-						inlierCurr.push_back(goodCurr[i]);
+						std::vector<cv::Point2f> inlierPrev, inlierCurr;
+						for (size_t i = 0; i < inlierMask.size(); i++)
+						{
+							if (inlierMask[i])
+							{
+								inlierPrev.push_back(goodPrev[i]);
+								inlierCurr.push_back(goodCurr[i]);
+							}
+						}
+						try
+						{
+							int recovered = cv::recoverPose(E, inlierPrev, inlierCurr, K, R, t);
+							if (recovered > 0 && !t.empty() && t.rows >= 3 && t.cols >= 1)
+							{
+								poseTrail.push_back(cv::Vec3f((float)t.at<double>(0), (float)t.at<double>(1), (float)t.at<double>(2)));
+								if (poseTrail.size() > (size_t)maxPoseTrailLen)
+									poseTrail.erase(poseTrail.begin());
+								out.R = R;
+								out.t = t;
+								out.poseTrail = poseTrail;
+								out.inliers = inliers;
+							}
+						}
+						catch (const cv::Exception& ex)
+						{
+							HydraHookEngineLogError("HydraHook-OpenCV: recoverPose failed: %s", ex.what());
+						}
 					}
 				}
-				cv::recoverPose(E, inlierPrev, inlierCurr, K, R, t);
 
-				poseTrail.push_back(cv::Vec3f((float)t.at<double>(0), (float)t.at<double>(1), (float)t.at<double>(2)));
-				if (poseTrail.size() > (size_t)maxPoseTrailLen)
-					poseTrail.erase(poseTrail.begin());
-
-				out.R = R;
-				out.t = t;
-				out.poseTrail = poseTrail;
-				out.inliers = inliers;
+			skip_essential:
+				prevPts = currPts;
+				prevGray = currGray.clone();
+				out.prevPts = goodPrev;
+				out.currPts = goodCurr;
+				out.featureCount = (int)goodCurr.size();
+				out.valid = true;
 			}
-
-			prevPts = currPts;
-			prevGray = currGray.clone();
-			out.prevPts = goodPrev;
-			out.currPts = goodCurr;
-			out.featureCount = (int)goodCurr.size();
-			out.valid = true;
 		}
 	}
 
