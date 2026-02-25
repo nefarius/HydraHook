@@ -100,10 +100,14 @@ BEHEMOTH, 64-Bit
 
 This project uses the following libraries (via [vcpkg](https://github.com/microsoft/vcpkg)):
 
+**Core library only:**
 - [spdlog](https://github.com/gabime/spdlog) – Fast C++ logging library
 - [Microsoft Detours](https://github.com/microsoft/Detours) – API hooking library
+
+**Sample projects only:**
 - [Dear ImGui](https://github.com/ocornut/imgui) – Immediate mode GUI
 - [DirectXTK](https://github.com/microsoft/DirectXTK) – DirectX Toolkit
+- [OpenCV](https://github.com/opencv/opencv) – Computer vision library
 
 ### References & inspiration
 
