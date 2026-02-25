@@ -889,6 +889,11 @@ static void EvtHydraHookD3D12PrePresent(
 
 	ID3D12Resource* pBackBufferRes = g_d3d12_mainRenderTargetResource[backBufferIdx];
 
+	if (g_d3d12_pFence->GetCompletedValue() < g_d3d12_fenceLastSignaledValue && g_d3d12_hFenceEvent)
+	{
+		g_d3d12_pFence->SetEventOnCompletion(g_d3d12_fenceLastSignaledValue, g_d3d12_hFenceEvent);
+		WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
+	}
 	g_d3d12_pCommandAllocator->Reset();
 	g_d3d12_pCommandList->Reset(g_d3d12_pCommandAllocator, nullptr);
 
