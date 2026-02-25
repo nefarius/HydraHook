@@ -22,6 +22,8 @@ configuration:
 - Release_LIB
 install:
 - cmd: git submodule update --init --recursive
+# Source: https://gist.github.com/nefarius/b60a498b0229b5cf0e338b7a39460b80
+- ps: Setup-VS2022 $env:PLATFORM
 before_build:
 - cmd: .\prepare-deps.bat %PLATFORM%
 - cmd: dotnet tool install Nefarius.Tools.Vpatch --tool-path .\tools
@@ -63,5 +65,3 @@ deploy:
   name: BUILDBOT
   on:
     appveyor_repo_tag: true
-cache:
-- vcpkg_installed
