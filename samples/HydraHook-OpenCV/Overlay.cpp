@@ -26,6 +26,7 @@ SOFTWARE.
 #include <Windows.h>
 
 #include "Overlay.h"
+#include <unordered_map>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 
@@ -57,18 +58,21 @@ void Overlay_HookWindowProc(HWND hWnd)
 
 void Overlay_ToggleState(int key, bool& toggle)
 {
-	static bool pressedPast = false, pressedNow = false;
+	static std::unordered_map<int, bool> pressedPast;
+	static std::unordered_map<int, bool> pressedNow;
+	bool& past = pressedPast[key];
+	bool& now = pressedNow[key];
 	if (GetAsyncKeyState(key) & 0x8000)
-		pressedNow = true;
+		now = true;
 	else
 	{
-		pressedPast = false;
-		pressedNow = false;
+		past = false;
+		now = false;
 	}
-	if (!pressedPast && pressedNow)
+	if (!past && now)
 	{
 		toggle = !toggle;
-		pressedPast = true;
+		past = true;
 	}
 }
 

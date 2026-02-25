@@ -210,11 +210,12 @@ static void WorkerThreadProc()
 			g_d3d12_pFence->SetEventOnCompletion(d3d12FenceVal, g_d3d12_hFenceEvent);
 			WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
 
-			D3D12_RANGE readRange = { 0, 0 };
+			const UINT rp = (rowPitch != 0) ? rowPitch : (width * 4);
+			const SIZE_T readSize = (SIZE_T)height * (SIZE_T)rp;
+			D3D12_RANGE readRange = { 0, readSize };
 			void* pData = nullptr;
 			if (SUCCEEDED(pD3D12Readback->Map(0, &readRange, &pData)))
 			{
-				const UINT rp = (rowPitch != 0) ? rowPitch : (width * 4);
 				frame.create((int)height, (int)width, CV_8UC3);
 				for (UINT y = 0; y < height; y++)
 				{
@@ -289,6 +290,13 @@ void Capture_Shutdown()
 		delete g_workerThread;
 		g_workerThread = nullptr;
 	}
+	if (g_d3d11_mainRTV)
+	{
+		g_d3d11_mainRTV->Release();
+		g_d3d11_mainRTV = nullptr;
+	}
+	D3D11_ReleaseCaptureResources();
+	D3D12_CleanupInitResources();
 }
 
 void Capture_GetResults(PerceptionResults& out)
@@ -404,16 +412,18 @@ static void EvtHydraHookD3D11PrePresent(
 	if (g_d3d11_captureWidth != width || g_d3d11_captureHeight != height)
 		D3D11_CreateCaptureResources(pDevice, width, height);
 
-	if (!g_d3d11_mainRTV)
+	if (g_d3d11_mainRTV)
 	{
-		HRESULT hr = pDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_d3d11_mainRTV);
-		if (FAILED(hr) || !g_d3d11_mainRTV)
-		{
-			pBackBuffer->Release();
-			pDevice->Release();
-			pContext->Release();
-			return;
-		}
+		g_d3d11_mainRTV->Release();
+		g_d3d11_mainRTV = nullptr;
+	}
+	HRESULT hr = pDevice->CreateRenderTargetView(pBackBuffer, nullptr, &g_d3d11_mainRTV);
+	if (FAILED(hr) || !g_d3d11_mainRTV)
+	{
+		pBackBuffer->Release();
+		pDevice->Release();
+		pContext->Release();
+		return;
 	}
 
 	const UINT bufIdx = g_d3d11_frameCounter % CAPTURE_NUM_BUFFERS;
@@ -665,6 +675,7 @@ static void D3D12_SrvDescriptorAlloc(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DE
 	(void)info;
 	if (g_d3d12_srvDescriptorCount >= D3D12_SRV_HEAP_SIZE)
 	{
+		HydraHookEngineLogError("HydraHook-OpenCV: D3D12_SrvDescriptorAlloc descriptor exhaustion (count=%u, heap_size=%u)", (unsigned)g_d3d12_srvDescriptorCount, (unsigned)D3D12_SRV_HEAP_SIZE);
 		*out_cpu = {};
 		*out_gpu = {};
 		return;

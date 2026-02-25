@@ -42,17 +42,19 @@ void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out)
 
 	out.valid = false;
 
-	if (frame.empty() || !frame.isContinuous())
-	{
-		HydraHookEngineLogError("HydraHook-OpenCV: RunPerceptionPipeline received empty or non-continuous frame");
-		return;
-	}
-
+	/* Static locals (prevGray, currGray, prevPts, currPts, orb, poseTrail, needReinit) are intentionally
+	   non-reentrant; RunPerceptionPipeline must only be called from the single Capture worker thread. */
 	static cv::Mat prevGray, currGray;
 	static std::vector<cv::Point2f> prevPts, currPts;
 	static cv::Ptr<cv::ORB> orb = cv::ORB::create(500);
 	static std::vector<cv::Vec3f> poseTrail;
 	static bool needReinit = true;
+
+	if (frame.empty() || !frame.isContinuous())
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: RunPerceptionPipeline received empty or non-continuous frame");
+		return;
+	}
 
 	cv::Mat gray;
 	try
@@ -150,7 +152,7 @@ void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out)
 			else
 			{
 				double fx = (double)w;
-				double fy = (double)w;
+				double fy = (double)h;
 				double cx = w / 2.0;
 				double cy = h / 2.0;
 				cv::Mat K = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
@@ -215,7 +217,7 @@ void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out)
 				}
 
 			skip_essential:
-				prevPts = currPts;
+				prevPts = goodCurr;
 				prevGray = currGray.clone();
 				out.prevPts = goodPrev;
 				out.currPts = goodCurr;

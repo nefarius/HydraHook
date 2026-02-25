@@ -38,23 +38,22 @@ static void EvtHydraHookGameHooked(
 
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 {
-	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-	HYDRAHOOK_ENGINE_CONFIG cfg;
-	HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-	cfg.Direct3D.HookDirect3D11 = TRUE;
-	cfg.Direct3D.HookDirect3D12 = TRUE;
-	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
-		(void)HydraHookEngineCreate(
-			static_cast<HMODULE>(hInstance),
-			&cfg,
-			NULL
-		);
+		DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
+		{
+			HYDRAHOOK_ENGINE_CONFIG cfg;
+			HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
+			cfg.Direct3D.HookDirect3D11 = TRUE;
+			cfg.Direct3D.HookDirect3D12 = TRUE;
+			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+			(void)HydraHookEngineCreate(
+				static_cast<HMODULE>(hInstance),
+				&cfg,
+				NULL
+			);
+		}
 		break;
 	case DLL_PROCESS_DETACH:
 		Capture_Shutdown();

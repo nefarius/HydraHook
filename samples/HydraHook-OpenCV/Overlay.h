@@ -24,6 +24,9 @@ SOFTWARE.
 
 #pragma once
 
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+
 #include "Perception.h"
 
 void Overlay_Render(float displayWidth, float displayHeight, const PerceptionResults& res);
