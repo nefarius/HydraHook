@@ -22,47 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
+#pragma once
 
-#include "Capture.h"
-#include <HydraHook/Engine/HydraHookCore.h>
+#include "Perception.h"
 
-static void EvtHydraHookGameHooked(
-	PHYDRAHOOK_ENGINE EngineHandle,
-	const HYDRAHOOK_D3D_VERSION GameVersion
-)
-{
-	Capture_SetupCallbacks(EngineHandle, GameVersion);
-}
-
-BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
-{
-	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-	HYDRAHOOK_ENGINE_CONFIG cfg;
-	HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-	cfg.Direct3D.HookDirect3D11 = TRUE;
-	cfg.Direct3D.HookDirect3D12 = TRUE;
-	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-
-	switch (dwReason)
-	{
-	case DLL_PROCESS_ATTACH:
-		(void)HydraHookEngineCreate(
-			static_cast<HMODULE>(hInstance),
-			&cfg,
-			NULL
-		);
-		break;
-	case DLL_PROCESS_DETACH:
-		Capture_Shutdown();
-		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
-		break;
-	default:
-		break;
-	}
-
-	return TRUE;
-}
+void Overlay_Render(float displayWidth, float displayHeight, const PerceptionResults& res);
+void Overlay_DrawDebugHUD(const PerceptionResults& res);
+void Overlay_HookWindowProc(HWND hWnd);
+void Overlay_ToggleState(int key, bool& toggle);

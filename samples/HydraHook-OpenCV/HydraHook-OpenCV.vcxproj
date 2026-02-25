@@ -167,10 +167,14 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Capture.h" />
+    <ClInclude Include="Overlay.h" />
+    <ClInclude Include="Perception.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Capture.cpp" />
     <ClCompile Include="dllmain.cpp">
       <CompileAsManaged Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</CompileAsManaged>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -185,6 +189,8 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Overlay.cpp" />
+    <ClCompile Include="Perception.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\HydraHook\HydraHook.vcxproj">

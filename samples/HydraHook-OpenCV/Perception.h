@@ -22,47 +22,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
+#pragma once
 
-#include "Capture.h"
-#include <HydraHook/Engine/HydraHookCore.h>
+#include <opencv2/core.hpp>
+#include <vector>
 
-static void EvtHydraHookGameHooked(
-	PHYDRAHOOK_ENGINE EngineHandle,
-	const HYDRAHOOK_D3D_VERSION GameVersion
-)
+struct PerceptionResults
 {
-	Capture_SetupCallbacks(EngineHandle, GameVersion);
-}
+	std::vector<cv::Point2f> prevPts;
+	std::vector<cv::Point2f> currPts;
+	cv::Mat R;
+	cv::Mat t;
+	std::vector<cv::Vec3f> poseTrail;
+	bool valid = false;
+	int featureCount = 0;
+	int inliers = 0;
+};
 
-BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
-{
-	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-	HYDRAHOOK_ENGINE_CONFIG cfg;
-	HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-	cfg.Direct3D.HookDirect3D11 = TRUE;
-	cfg.Direct3D.HookDirect3D12 = TRUE;
-	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-
-	switch (dwReason)
-	{
-	case DLL_PROCESS_ATTACH:
-		(void)HydraHookEngineCreate(
-			static_cast<HMODULE>(hInstance),
-			&cfg,
-			NULL
-		);
-		break;
-	case DLL_PROCESS_DETACH:
-		Capture_Shutdown();
-		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
-		break;
-	default:
-		break;
-	}
-
-	return TRUE;
-}
+void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out);
