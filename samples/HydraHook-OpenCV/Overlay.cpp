@@ -26,6 +26,7 @@ SOFTWARE.
 #include <Windows.h>
 
 #include "Overlay.h"
+#include <HydraHook/Engine/HydraHookCore.h>
 #include <unordered_map>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -53,16 +54,28 @@ void Overlay_HookWindowProc(HWND hWnd)
 	WNDPROC current = (WNDPROC)GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
 	if (current == OverlayWndProc)
 		return;
+	SetLastError(0);
+	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)OverlayWndProc);
+	if (GetLastError() != 0)
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: SetWindowLongPtrW hook failed (error=%lu)", (unsigned long)GetLastError());
+		return;
+	}
 	g_originalWndProc = (WndProc_t)current;
 	g_hookedWindow = hWnd;
-	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)OverlayWndProc);
 }
 
 void Overlay_UnhookWindowProc(void)
 {
 	if (g_hookedWindow && g_originalWndProc)
 	{
+		SetLastError(0);
 		SetWindowLongPtrW(g_hookedWindow, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
+		if (GetLastError() != 0)
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: SetWindowLongPtrW unhook failed (error=%lu)", (unsigned long)GetLastError());
+			return;
+		}
 		g_originalWndProc = nullptr;
 		g_hookedWindow = nullptr;
 	}
