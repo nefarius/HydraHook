@@ -76,7 +76,17 @@ void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out)
 	{
 		std::vector<cv::KeyPoint> kps;
 		cv::Mat desc;
-		orb->detectAndCompute(currGray, cv::noArray(), kps, desc);
+		try
+		{
+			orb->detectAndCompute(currGray, cv::noArray(), kps, desc);
+		}
+		catch (const cv::Exception& ex)
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: ORB detectAndCompute failed: %s", ex.what());
+			needReinit = true;
+			out.valid = false;
+			return;
+		}
 		prevPts.clear();
 		for (const auto& kp : kps)
 			prevPts.push_back(kp.pt);

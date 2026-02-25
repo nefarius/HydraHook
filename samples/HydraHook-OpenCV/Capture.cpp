@@ -55,6 +55,7 @@ static constexpr UINT CAPTURE_NUM_BUFFERS = 2;
 static std::mutex g_resultsMutex;
 static PerceptionResults g_results;
 static std::atomic<bool> g_workerRunning{ true };
+static std::atomic<bool> g_captureShutdownDone{ false };
 static std::thread* g_workerThread = nullptr;
 static std::atomic<bool> g_showOverlay{ true };
 
@@ -106,12 +107,12 @@ static UINT64 g_pendingD3D12FenceValue = 0;
 static ID3D12Resource* g_pendingD3D12Readback = nullptr;
 static UINT g_pendingD3D12RowPitch = 0;
 
-static void D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT height);
+static bool D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT height);
 static void D3D11_ReleaseCaptureResources();
 static void D3D12_CleanupOverlayResources();
 static void D3D12_CleanupInitResources();
 static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain);
-static void D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format);
+static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format);
 static void D3D12_ReleaseCaptureResources();
 
 static void EvtHydraHookD3D11PrePresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags, PHYDRAHOOK_EVT_PRE_EXTENSION Extension);
@@ -203,12 +204,20 @@ static void WorkerThreadProc()
 			}
 			if (pCtx) pCtx->Release();
 			if (pDev) pDev->Release();
+			if (pD3D11Query) pD3D11Query->Release();
+			if (pD3D11Staging) pD3D11Staging->Release();
 		}
 #ifdef _WIN64
 		else if (api == 12 && pD3D12Readback && g_d3d12_pFence && g_d3d12_hFenceEvent)
 		{
 			g_d3d12_pFence->SetEventOnCompletion(d3d12FenceVal, g_d3d12_hFenceEvent);
-			WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
+			while (g_workerRunning && WaitForSingleObject(g_d3d12_hFenceEvent, 200) == WAIT_TIMEOUT)
+				;
+			if (!g_workerRunning)
+			{
+				pD3D12Readback->Release();
+				continue;
+			}
 
 			const UINT rp = (rowPitch != 0) ? rowPitch : (width * 4);
 			const SIZE_T readSize = (SIZE_T)height * (SIZE_T)rp;
@@ -230,6 +239,7 @@ static void WorkerThreadProc()
 				}
 				pD3D12Readback->Unmap(0, nullptr);
 			}
+			pD3D12Readback->Release();
 		}
 #endif
 		if (!frame.empty())
@@ -248,10 +258,15 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 {
 	HydraHookEngineLogInfo("HydraHook-OpenCV: Loading");
 
-	static std::once_flag workerOnce;
-	std::call_once(workerOnce, []() {
-		g_workerThread = new std::thread(WorkerThreadProc);
-	});
+	{
+		std::lock_guard<std::mutex> lock(g_workerMutex);
+		if (!g_workerThread)
+		{
+			g_captureShutdownDone = false;
+			g_workerRunning = true;
+			g_workerThread = new std::thread(WorkerThreadProc);
+		}
+	}
 
 	HYDRAHOOK_D3D11_EVENT_CALLBACKS d3d11;
 	HYDRAHOOK_D3D11_EVENT_CALLBACKS_INIT(&d3d11);
@@ -281,6 +296,9 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 
 void Capture_Shutdown()
 {
+	if (g_captureShutdownDone.exchange(true))
+		return;
+	Overlay_UnhookWindowProc();
 	g_workerRunning = false;
 	g_workerCv.notify_all();
 	if (g_workerThread)
@@ -317,7 +335,7 @@ void Capture_SetShowOverlay(bool show)
 
 #pragma region D3D11
 
-static void D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT height)
+static bool D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT height)
 {
 	D3D11_TEXTURE2D_DESC td = {};
 	td.Width = width;
@@ -347,11 +365,18 @@ static void D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT
 			g_d3d11_query[i]->Release();
 			g_d3d11_query[i] = nullptr;
 		}
-		pDevice->CreateTexture2D(&td, nullptr, &g_d3d11_staging[i]);
-		pDevice->CreateQuery(&qd, &g_d3d11_query[i]);
+		HRESULT hrTex = pDevice->CreateTexture2D(&td, nullptr, &g_d3d11_staging[i]);
+		HRESULT hrQuery = pDevice->CreateQuery(&qd, &g_d3d11_query[i]);
+		if (FAILED(hrTex) || !g_d3d11_staging[i] || FAILED(hrQuery) || !g_d3d11_query[i])
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: D3D11 CreateTexture2D/CreateQuery failed (hrTex=0x%08X, hrQuery=0x%08X)", (unsigned)hrTex, (unsigned)hrQuery);
+			D3D11_ReleaseCaptureResources();
+			return false;
+		}
 	}
 	g_d3d11_captureWidth = width;
 	g_d3d11_captureHeight = height;
+	return true;
 }
 
 static void D3D11_ReleaseCaptureResources()
@@ -410,7 +435,15 @@ static void EvtHydraHookD3D11PrePresent(
 	}
 
 	if (g_d3d11_captureWidth != width || g_d3d11_captureHeight != height)
-		D3D11_CreateCaptureResources(pDevice, width, height);
+	{
+		if (!D3D11_CreateCaptureResources(pDevice, width, height))
+		{
+			pBackBuffer->Release();
+			pDevice->Release();
+			pContext->Release();
+			return;
+		}
+	}
 
 	if (g_d3d11_mainRTV)
 	{
@@ -431,18 +464,20 @@ static void EvtHydraHookD3D11PrePresent(
 	pContext->End(g_d3d11_query[bufIdx]);
 
 	if (g_d3d11_frameCounter >= 1)
-	{
-		const UINT prevIdx = (g_d3d11_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
 		{
-			std::lock_guard<std::mutex> lock(g_workerMutex);
-			g_pendingApi = 11;
-			g_pendingD3D11Query = g_d3d11_query[prevIdx];
-			g_pendingD3D11Staging = g_d3d11_staging[prevIdx];
-			g_pendingWidth = g_d3d11_captureWidth;
-			g_pendingHeight = g_d3d11_captureHeight;
+			const UINT prevIdx = (g_d3d11_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
+			{
+				std::lock_guard<std::mutex> lock(g_workerMutex);
+				g_pendingApi = 11;
+				g_pendingD3D11Query = g_d3d11_query[prevIdx];
+				g_pendingD3D11Staging = g_d3d11_staging[prevIdx];
+				if (g_pendingD3D11Query) g_pendingD3D11Query->AddRef();
+				if (g_pendingD3D11Staging) g_pendingD3D11Staging->AddRef();
+				g_pendingWidth = g_d3d11_captureWidth;
+				g_pendingHeight = g_d3d11_captureHeight;
+			}
+			g_workerCv.notify_one();
 		}
-		g_workerCv.notify_one();
-	}
 	g_d3d11_frameCounter++;
 
 	pBackBuffer->Release();
@@ -552,11 +587,11 @@ static void D3D12_ReleaseCaptureResources()
 	g_d3d12_captureHeight = 0;
 }
 
-static void D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format)
+static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format)
 {
 	D3D12_ReleaseCaptureResources();
 	if (!g_d3d12_pDevice)
-		return;
+		return false;
 
 	D3D12_RESOURCE_DESC texDesc = {};
 	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -595,12 +630,21 @@ static void D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT fo
 	resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
 	for (UINT i = 0; i < CAPTURE_NUM_BUFFERS; i++)
-		g_d3d12_pDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
+	{
+		HRESULT hr = g_d3d12_pDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
 			D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_d3d12_readback[i]));
+		if (FAILED(hr) || !g_d3d12_readback[i])
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: D3D12 CreateCommittedResource readback[%u] failed (hr=0x%08X)", (unsigned)i, (unsigned)hr);
+			D3D12_ReleaseCaptureResources();
+			return false;
+		}
+	}
 
 	g_d3d12_captureWidth = width;
 	g_d3d12_captureHeight = height;
 	g_d3d12_captureRowPitch = (UINT)footprint.Footprint.RowPitch;
+	return true;
 }
 
 static void D3D12_CleanupInitResources()
@@ -791,7 +835,10 @@ static void EvtHydraHookD3D12PrePresent(
 	const UINT height = sd.BufferDesc.Height;
 
 	if (g_d3d12_captureWidth != width || g_d3d12_captureHeight != height)
-		D3D12_CreateCaptureResources(width, height, sd.BufferDesc.Format);
+	{
+		if (!D3D12_CreateCaptureResources(width, height, sd.BufferDesc.Format))
+			return;
+	}
 
 #ifdef _WIN64
 	if (!g_d3d12_imguiInitialized)
@@ -911,6 +958,7 @@ static void EvtHydraHookD3D12PrePresent(
 			g_pendingApi = 12;
 			g_pendingD3D12FenceValue = g_d3d12_fenceValueForReadback[prevIdx];
 			g_pendingD3D12Readback = g_d3d12_readback[prevIdx];
+			if (g_pendingD3D12Readback) g_pendingD3D12Readback->AddRef();
 			g_pendingD3D12RowPitch = g_d3d12_captureRowPitch;
 			g_pendingWidth = g_d3d12_captureWidth;
 			g_pendingHeight = g_d3d12_captureHeight;

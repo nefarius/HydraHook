@@ -36,6 +36,12 @@ static void EvtHydraHookGameHooked(
 	Capture_SetupCallbacks(EngineHandle, GameVersion);
 }
 
+static void EvtHydraHookGamePreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
+{
+	(void)EngineHandle;
+	Capture_Shutdown();
+}
+
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 {
 	switch (dwReason)
@@ -48,6 +54,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 			cfg.Direct3D.HookDirect3D11 = TRUE;
 			cfg.Direct3D.HookDirect3D12 = TRUE;
 			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+			cfg.EvtHydraHookGamePreUnhook = EvtHydraHookGamePreUnhook;
 			(void)HydraHookEngineCreate(
 				static_cast<HMODULE>(hInstance),
 				&cfg,

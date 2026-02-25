@@ -37,6 +37,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg
 
 typedef LRESULT(CALLBACK* WndProc_t)(HWND, UINT, WPARAM, LPARAM);
 static WndProc_t g_originalWndProc = nullptr;
+static HWND g_hookedWindow = nullptr;
 
 static LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -53,7 +54,18 @@ void Overlay_HookWindowProc(HWND hWnd)
 	if (current == OverlayWndProc)
 		return;
 	g_originalWndProc = (WndProc_t)current;
+	g_hookedWindow = hWnd;
 	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)OverlayWndProc);
+}
+
+void Overlay_UnhookWindowProc(void)
+{
+	if (g_hookedWindow && g_originalWndProc)
+	{
+		SetWindowLongPtrW(g_hookedWindow, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
+		g_originalWndProc = nullptr;
+		g_hookedWindow = nullptr;
+	}
 }
 
 void Overlay_ToggleState(int key, bool& toggle)
