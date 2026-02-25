@@ -4,6 +4,9 @@ Skeleton sample demonstrating OpenCV integration with DirectX 11 and DirectX 12 
 
 ## About
 
+> [!CAUTION]
+> This sample app is still rough around the edges and hasn't been tested thoroughly with many games yet. Use with caution (or help finishing it) when testing!
+
 This sample wires up HydraHook's D3D11 and D3D12 Present hooks with minimal OpenCV usage. It clears the back buffer to a teal color as a visual proof that the overlay is rendering. OpenCV is consumed via vcpkg.
 
 ## Building
