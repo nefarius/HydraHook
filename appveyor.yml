@@ -1,5 +1,6 @@
 version: 4.0.{build}.0
-image: Visual Studio 2022
+build_cloud: WIN-LKR467JS4GL
+image: Windows
 skip_commits:
   files:
     - '**/*.md'
