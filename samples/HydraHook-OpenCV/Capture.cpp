@@ -301,6 +301,12 @@ void Capture_Shutdown()
 	Overlay_UnhookWindowProc();
 	g_workerRunning = false;
 	g_workerCv.notify_all();
+	{
+		std::lock_guard<std::mutex> lock(g_workerMutex);
+		if (g_pendingD3D11Query) { g_pendingD3D11Query->Release(); g_pendingD3D11Query = nullptr; }
+		if (g_pendingD3D11Staging) { g_pendingD3D11Staging->Release(); g_pendingD3D11Staging = nullptr; }
+		if (g_pendingD3D12Readback) { g_pendingD3D12Readback->Release(); g_pendingD3D12Readback = nullptr; }
+	}
 	if (g_workerThread)
 	{
 		if (g_workerThread->joinable())
@@ -468,6 +474,8 @@ static void EvtHydraHookD3D11PrePresent(
 			const UINT prevIdx = (g_d3d11_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
 			{
 				std::lock_guard<std::mutex> lock(g_workerMutex);
+				if (g_pendingD3D11Query) { g_pendingD3D11Query->Release(); g_pendingD3D11Query = nullptr; }
+				if (g_pendingD3D11Staging) { g_pendingD3D11Staging->Release(); g_pendingD3D11Staging = nullptr; }
 				g_pendingApi = 11;
 				g_pendingD3D11Query = g_d3d11_query[prevIdx];
 				g_pendingD3D11Staging = g_d3d11_staging[prevIdx];
@@ -955,6 +963,7 @@ static void EvtHydraHookD3D12PrePresent(
 		const UINT prevIdx = (g_d3d12_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
 		{
 			std::lock_guard<std::mutex> lock(g_workerMutex);
+			if (g_pendingD3D12Readback) { g_pendingD3D12Readback->Release(); g_pendingD3D12Readback = nullptr; }
 			g_pendingApi = 12;
 			g_pendingD3D12FenceValue = g_d3d12_fenceValueForReadback[prevIdx];
 			g_pendingD3D12Readback = g_d3d12_readback[prevIdx];
