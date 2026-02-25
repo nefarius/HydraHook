@@ -99,8 +99,7 @@ static UINT g_d3d12_srvDescriptorCount = 0;
 static std::condition_variable g_workerCv;
 static std::mutex g_workerMutex;
 static int g_pendingApi = 0;
-static ID3D11Query* g_pendingD3D11Query = nullptr;
-static ID3D11Texture2D* g_pendingD3D11Staging = nullptr;
+static cv::Mat g_pendingD3D11Frame;
 static UINT g_pendingWidth = 0;
 static UINT g_pendingHeight = 0;
 static UINT64 g_pendingD3D12FenceValue = 0;
@@ -127,8 +126,6 @@ static void WorkerThreadProc()
 	while (g_workerRunning)
 	{
 		int api = 0;
-		ID3D11Query* pD3D11Query = nullptr;
-		ID3D11Texture2D* pD3D11Staging = nullptr;
 		UINT64 d3d12FenceVal = 0;
 		ID3D12Resource* pD3D12Readback = nullptr;
 		UINT width = 0, height = 0;
@@ -148,12 +145,7 @@ static void WorkerThreadProc()
 				rowPitch = g_pendingD3D12RowPitch;
 			g_pendingApi = 0;
 
-			if (api == 11)
-			{
-				pD3D11Query = g_pendingD3D11Query;
-				pD3D11Staging = g_pendingD3D11Staging;
-			}
-			else if (api == 12)
+			if (api == 12)
 			{
 				d3d12FenceVal = g_pendingD3D12FenceValue;
 				pD3D12Readback = g_pendingD3D12Readback;
@@ -165,47 +157,16 @@ static void WorkerThreadProc()
 
 		cv::Mat frame;
 
-		if (api == 11 && pD3D11Query && pD3D11Staging)
+		if (api == 11)
 		{
-			ID3D11Device* pDev = nullptr;
-			ID3D11DeviceContext* pCtx = nullptr;
-			pD3D11Staging->GetDevice(&pDev);
-			if (pDev)
-				pDev->GetImmediateContext(&pCtx);
-			if (pCtx)
 			{
-				while (pCtx->GetData(pD3D11Query, nullptr, 0, 0) != S_OK)
+				std::lock_guard<std::mutex> lock(g_workerMutex);
+				if (!g_pendingD3D11Frame.empty())
 				{
-					if (!g_workerRunning)
-						break;
-					Sleep(0);
+					frame = g_pendingD3D11Frame;
+					g_pendingD3D11Frame.release();
 				}
 			}
-			if (!g_workerRunning)
-				break;
-
-			D3D11_MAPPED_SUBRESOURCE mapped = {};
-			if (pDev && pCtx && SUCCEEDED(pCtx->Map(pD3D11Staging, 0, D3D11_MAP_READ, 0, &mapped)))
-			{
-				frame.create((int)height, (int)width, CV_8UC3);
-				const UINT rp = mapped.RowPitch;
-				for (UINT y = 0; y < height; y++)
-				{
-					const uint8_t* src = (const uint8_t*)mapped.pData + y * rp;
-					uint8_t* dst = frame.ptr((int)y);
-					for (UINT x = 0; x < width; x++)
-					{
-						dst[x * 3 + 0] = src[x * 4 + 2];
-						dst[x * 3 + 1] = src[x * 4 + 1];
-						dst[x * 3 + 2] = src[x * 4 + 0];
-					}
-				}
-				pCtx->Unmap(pD3D11Staging, 0);
-			}
-			if (pCtx) pCtx->Release();
-			if (pDev) pDev->Release();
-			if (pD3D11Query) pD3D11Query->Release();
-			if (pD3D11Staging) pD3D11Staging->Release();
 		}
 #ifdef _WIN64
 		else if (api == 12 && pD3D12Readback && g_d3d12_pFence && g_d3d12_hFenceEvent)
@@ -300,6 +261,12 @@ void Capture_Shutdown()
 		return;
 	Overlay_UnhookWindowProc();
 	g_workerRunning = false;
+	{
+		std::lock_guard<std::mutex> lock(g_workerMutex);
+		g_pendingApi = 0;
+		g_pendingD3D11Frame.release();
+		if (g_pendingD3D12Readback) { g_pendingD3D12Readback->Release(); g_pendingD3D12Readback = nullptr; }
+	}
 	g_workerCv.notify_all();
 	if (g_workerThread)
 	{
@@ -464,20 +431,40 @@ static void EvtHydraHookD3D11PrePresent(
 	pContext->End(g_d3d11_query[bufIdx]);
 
 	if (g_d3d11_frameCounter >= 1)
+	{
+		const UINT prevIdx = (g_d3d11_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
+		/* Non-blocking: GetData returns S_FALSE if GPU not ready. Blocking would freeze the display. */
+		if (pContext->GetData(g_d3d11_query[prevIdx], nullptr, 0, 0) == S_OK)
 		{
-			const UINT prevIdx = (g_d3d11_frameCounter - 1) % CAPTURE_NUM_BUFFERS;
+			D3D11_MAPPED_SUBRESOURCE mapped = {};
+			if (SUCCEEDED(pContext->Map(g_d3d11_staging[prevIdx], 0, D3D11_MAP_READ, 0, &mapped)))
 			{
-				std::lock_guard<std::mutex> lock(g_workerMutex);
-				g_pendingApi = 11;
-				g_pendingD3D11Query = g_d3d11_query[prevIdx];
-				g_pendingD3D11Staging = g_d3d11_staging[prevIdx];
-				if (g_pendingD3D11Query) g_pendingD3D11Query->AddRef();
-				if (g_pendingD3D11Staging) g_pendingD3D11Staging->AddRef();
-				g_pendingWidth = g_d3d11_captureWidth;
-				g_pendingHeight = g_d3d11_captureHeight;
+				cv::Mat frame;
+				frame.create((int)height, (int)width, CV_8UC3);
+				const UINT rp = mapped.RowPitch;
+				for (UINT y = 0; y < height; y++)
+				{
+					const uint8_t* src = (const uint8_t*)mapped.pData + y * rp;
+					uint8_t* dst = frame.ptr((int)y);
+					for (UINT x = 0; x < width; x++)
+					{
+						dst[x * 3 + 0] = src[x * 4 + 2];
+						dst[x * 3 + 1] = src[x * 4 + 1];
+						dst[x * 3 + 2] = src[x * 4 + 0];
+					}
+				}
+				pContext->Unmap(g_d3d11_staging[prevIdx], 0);
+				{
+					std::lock_guard<std::mutex> lock(g_workerMutex);
+					g_pendingD3D11Frame = frame;
+					g_pendingApi = 11;
+					g_pendingWidth = g_d3d11_captureWidth;
+					g_pendingHeight = g_d3d11_captureHeight;
+				}
+				g_workerCv.notify_one();
 			}
-			g_workerCv.notify_one();
 		}
+	}
 	g_d3d11_frameCounter++;
 
 	pBackBuffer->Release();
