@@ -218,9 +218,24 @@ static void WorkerThreadProc()
 				pD3D12Readback->Release();
 				continue;
 			}
+			if (!g_d3d12_pDevice)
+			{
+				pD3D12Readback->Release();
+				continue;
+			}
+			if (width == 0 || height == 0 || width > 16384 || height > 16384)
+			{
+				pD3D12Readback->Release();
+				continue;
+			}
 
 			const UINT rp = (rowPitch != 0) ? rowPitch : (width * 4);
 			const SIZE_T readSize = (SIZE_T)height * (SIZE_T)rp;
+			if (readSize == 0 || readSize > (SIZE_T)16384 * (SIZE_T)16384 * 4)
+			{
+				pD3D12Readback->Release();
+				continue;
+			}
 			D3D12_RANGE readRange = { 0, readSize };
 			void* pData = nullptr;
 			if (SUCCEEDED(pD3D12Readback->Map(0, &readRange, &pData)))
