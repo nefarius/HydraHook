@@ -796,6 +796,20 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 UINT Flags
                 ) -> HRESULT
             {
+                ID3D11Device* pD11Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
+                {
+                    if (pD11Device)
+                    {
+                        pD11Device->Release();
+                    }
+                    return swapChainPresent11Hook.call_orig(chain, SyncInterval, Flags);
+                }
+                if (pD11Device)
+                {
+                    pD11Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, [&pChain = chain]()
                 {
@@ -841,6 +855,20 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 const DXGI_MODE_DESC* pNewTargetParameters
                 ) -> HRESULT
             {
+                ID3D11Device* pD11Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
+                {
+                    if (pD11Device)
+                    {
+                        pD11Device->Release();
+                    }
+                    return swapChainResizeTarget11Hook.call_orig(chain, pNewTargetParameters);
+                }
+                if (pD11Device)
+                {
+                    pD11Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, []()
                 {
@@ -884,6 +912,21 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 UINT            SwapChainFlags
                 ) -> HRESULT
             {
+                ID3D11Device* pD11Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
+                {
+                    if (pD11Device)
+                    {
+                        pD11Device->Release();
+                    }
+                    return swapChainResizeBuffers11Hook.call_orig(chain,
+                        BufferCount, Width, Height, NewFormat, SwapChainFlags);
+                }
+                if (pD11Device)
+                {
+                    pD11Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, []()
                 {
@@ -1038,6 +1081,20 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 UINT Flags
                 ) -> HRESULT
             {
+                ID3D12Device* pD12Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
+                {
+                    if (pD12Device)
+                    {
+                        pD12Device->Release();
+                    }
+                    return swapChainPresent12Hook.call_orig(chain, SyncInterval, Flags);
+                }
+                if (pD12Device)
+                {
+                    pD12Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, [&pChain = chain]()
                 {
@@ -1069,6 +1126,20 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 const DXGI_MODE_DESC* pNewTargetParameters
                 ) -> HRESULT
             {
+                ID3D12Device* pD12Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
+                {
+                    if (pD12Device)
+                    {
+                        pD12Device->Release();
+                    }
+                    return swapChainResizeTarget12Hook.call_orig(chain, pNewTargetParameters);
+                }
+                if (pD12Device)
+                {
+                    pD12Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, []()
                 {
@@ -1100,6 +1171,21 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
                 UINT            SwapChainFlags
                 ) -> HRESULT
             {
+                ID3D12Device* pD12Device = nullptr;
+                if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
+                {
+                    if (pD12Device)
+                    {
+                        pD12Device->Release();
+                    }
+                    return swapChainResizeBuffers12Hook.call_orig(chain,
+                        BufferCount, Width, Height, NewFormat, SwapChainFlags);
+                }
+                if (pD12Device)
+                {
+                    pD12Device->Release();
+                }
+
                 static std::once_flag flag;
                 std::call_once(flag, []()
                 {
