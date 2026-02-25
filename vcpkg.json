@@ -8,17 +8,18 @@
       "name": "imgui",
       "platform": "x86",
       "default-features": false,
-      "features": ["dx9-binding", "dx10-binding", "dx11-binding", "win32-binding"]
+      "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "win32-binding" ]
     },
     {
       "name": "imgui",
       "platform": "!x86",
       "default-features": false,
-      "features": ["dx9-binding", "dx10-binding", "dx11-binding", "dx12-binding", "win32-binding"]
+      "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "dx12-binding", "win32-binding" ]
     },
     {
       "name": "directxtk",
-      "features": ["tools"]
-    }
+      "features": [ "tools" ]
+    },
+    "opencv4"
   ]
 }
