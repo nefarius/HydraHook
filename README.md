@@ -42,6 +42,8 @@ Dependencies (spdlog, detours, imgui, directxtk) are declared in `vcpkg.json` an
 
 ### Pre-built binaries
 
+![Last updated](https://buildbot.nefarius.at/builds/HydraHook/latest/LAST_UPDATED_AT.svg)
+
 Pre-built binaries are available from the [buildbot](https://buildbot.nefarius.at/builds/HydraHook/latest/). Note: these builds may be outdated; for the latest code, build from source.
 
 ## How to use
