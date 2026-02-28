@@ -30,6 +30,7 @@ SOFTWARE.
 #include "Game.h"
 #include "Global.h"
 #include "Exceptions.hpp"
+#include "CrashHandler.h"
 using namespace HydraHook::Core::Exceptions;
 
 //
@@ -132,6 +133,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
     auto logger = spdlog::get("HYDRAHOOK")->clone("game");
     static auto engine = reinterpret_cast<PHYDRAHOOK_ENGINE>(Params);
     const auto& config = engine->EngineConfig;
+
+    if (config.CrashHandler.IsEnabled) {
+        HydraHookCrashHandlerInstallThreadSEH();
+        logger->info("Per-thread SEH translator installed on engine worker thread");
+    }
 
     logger->info("Library loaded into {}", HydraHook::Core::Util::process_name());
 

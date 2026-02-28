@@ -52,6 +52,7 @@ typedef struct _HYDRAHOOK_ENGINE
     HANDLE EngineThread;                     /**< Hook worker thread. */
     HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
     PVOID CustomContext;                     /**< User-allocated context. */
+    BOOL CrashHandlerInstalled;              /**< TRUE if this instance enabled the crash handler. */
 
     union
     {

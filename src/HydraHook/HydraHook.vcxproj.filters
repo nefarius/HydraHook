@@ -29,6 +29,7 @@
     <ClCompile Include="Game\Hook\AudioRenderClientHook.cpp">
       <Filter>Game\Hook\CoreAudio</Filter>
     </ClCompile>
+    <ClCompile Include="CrashHandler.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Game">
@@ -131,6 +132,7 @@
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookCoreAudio.h">
       <Filter>Shared\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="CrashHandler.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="HydraHook.rc" />

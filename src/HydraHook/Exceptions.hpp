@@ -124,6 +124,21 @@ namespace HydraHook
                     COMInterfaceException(msg, result)
                 { }
             };
+
+            class SehException : public RuntimeException
+            {
+                DWORD code_;
+                EXCEPTION_POINTERS* info_;
+
+            public:
+                SehException(DWORD code, EXCEPTION_POINTERS* info) :
+                    RuntimeException("Structured exception"),
+                    code_(code), info_(info)
+                { }
+
+                DWORD code() const { return code_; }
+                EXCEPTION_POINTERS* exception_pointers() const { return info_; }
+            };
         };
     };
 };
