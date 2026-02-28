@@ -36,7 +36,7 @@ build:
   project: $(APPVEYOR_BUILD_FOLDER)\HydraHook.sln
 after_build:
 - ps: |
-    $injectorVersion = "v1.4.0"
+    $injectorVersion = "v1.5.0"
     $zipUrl = "https://github.com/nefarius/Injector/releases/download/$injectorVersion/Injector_x86_amd64_arm64.zip"
     $zipPath = "$env:TEMP\Injector.zip"
     $downloadParams = @{ Uri = $zipUrl; OutFile = $zipPath; UseBasicParsing = $true }
