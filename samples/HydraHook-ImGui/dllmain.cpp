@@ -82,6 +82,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 #endif
 
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+	cfg.CrashHandler.IsEnabled = TRUE;
 
 	switch (dwReason)
 	{

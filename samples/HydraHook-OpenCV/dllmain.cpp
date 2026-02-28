@@ -55,6 +55,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 			cfg.Direct3D.HookDirect3D12 = TRUE;
 			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
 			cfg.EvtHydraHookGamePreUnhook = EvtHydraHookGamePreUnhook;
+			cfg.CrashHandler.IsEnabled = TRUE;
 			(void)HydraHookEngineCreate(
 				static_cast<HMODULE>(hInstance),
 				&cfg,

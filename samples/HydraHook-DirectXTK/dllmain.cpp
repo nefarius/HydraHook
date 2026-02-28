@@ -115,6 +115,8 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
 	// Called after hooks have been removed
 	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGamePostUnhooked;
+	// Crash dump logic
+	cfg.CrashHandler.IsEnabled = TRUE;
 
 	switch (dwReason)
 	{
