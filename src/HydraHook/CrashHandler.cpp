@@ -19,6 +19,11 @@
 #pragma comment(lib, "DbgHelp.lib")
 
 #include "HydraHook/Engine/HydraHookCore.h"
+#include "HydraHook/Engine/HydraHookDirect3D9.h"
+#include "HydraHook/Engine/HydraHookDirect3D10.h"
+#include "HydraHook/Engine/HydraHookDirect3D11.h"
+#include "HydraHook/Engine/HydraHookDirect3D12.h"
+#include "HydraHook/Engine/HydraHookCoreAudio.h"
 #include "Engine.h"
 #include "CrashHandler.h"
 #include "Exceptions.hpp"
