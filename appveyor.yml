@@ -31,6 +31,7 @@ before_build:
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\src\HydraHook\HydraHook.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-ImGui\HydraHook-ImGui.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc" --resource.file-version --resource.product-version
+- cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-OpenCV\HydraHook-OpenCV.rc" --resource.file-version --resource.product-version
 build:
   project: $(APPVEYOR_BUILD_FOLDER)\HydraHook.sln
 after_build:
