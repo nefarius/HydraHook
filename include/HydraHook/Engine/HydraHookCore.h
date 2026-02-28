@@ -150,6 +150,30 @@ extern "C" {
         Extension->Context = Context;
     }
 
+    /**
+     * @brief Minidump verbosity levels for the crash handler.
+     */
+    typedef enum _HYDRAHOOK_DUMP_TYPE {
+        HydraHookDumpTypeMinimal = 0,  /**< Threads + stacks only (small). */
+        HydraHookDumpTypeNormal  = 1,  /**< + data segments, handles, unloaded modules. */
+        HydraHookDumpTypeFull    = 2   /**< Full process memory (large). */
+    } HYDRAHOOK_DUMP_TYPE;
+
+    /**
+     * @brief Crash handler callback invoked before a minidump is written.
+     * @return TRUE to proceed with dump file creation, FALSE to skip it.
+     */
+    typedef
+        _Function_class_(EVT_HYDRAHOOK_CRASH_HANDLER)
+        BOOL
+        EVT_HYDRAHOOK_CRASH_HANDLER(
+            PHYDRAHOOK_ENGINE EngineHandle,
+            DWORD ExceptionCode,
+            struct _EXCEPTION_POINTERS* ExceptionInfo
+        );
+
+    typedef EVT_HYDRAHOOK_CRASH_HANDLER *PFN_HYDRAHOOK_CRASH_HANDLER;
+
     /** @brief Callback invoked when a render API has been hooked successfully. */
     typedef
         _Function_class_(EVT_HYDRAHOOK_GAME_HOOKED)
@@ -209,6 +233,14 @@ extern "C" {
             BOOL IsEnabled;       /**< TRUE to enable logging. */
             PCSTR FilePath;      /**< Fallback log path (e.g. %TEMP%\\HydraHook.log); used if process/DLL dirs fail. */
         } Logging;
+
+        struct
+        {
+            BOOL IsEnabled;                          /**< TRUE to enable crash handler (opt-in). */
+            PCSTR DumpDirectoryPath;                 /**< Directory for dump files; NULL = use log file directory. */
+            HYDRAHOOK_DUMP_TYPE DumpType;            /**< Minidump verbosity (default: HydraHookDumpTypeNormal). */
+            PFN_HYDRAHOOK_CRASH_HANDLER EvtCrashHandler; /**< Optional pre-dump callback; return FALSE to skip dump. */
+        } CrashHandler;
 
     } HYDRAHOOK_ENGINE_CONFIG, *PHYDRAHOOK_ENGINE_CONFIG;
 

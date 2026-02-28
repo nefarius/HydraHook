@@ -365,6 +365,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="CrashHandler.cpp" />
     <ClCompile Include="Engine.cpp" />
     <ClCompile Include="Game\Hook\AudioRenderClientHook.cpp" />
     <ClCompile Include="Game\Hook\Direct3D11.cpp" />
@@ -383,6 +384,7 @@
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookDirect3D11.h" />
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookDirect3D12.h" />
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookDirect3D9.h" />
+    <ClInclude Include="CrashHandler.h" />
     <ClInclude Include="Engine.h" />
     <ClInclude Include="Exceptions.hpp" />
     <ClInclude Include="Game\Hook\AudioRenderClientHook.h" />

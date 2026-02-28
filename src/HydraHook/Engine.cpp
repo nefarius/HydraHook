@@ -51,6 +51,7 @@ SOFTWARE.
 // Internal
 // 
 #include "Engine.h"
+#include "CrashHandler.h"
 #include "Game/Game.h"
 #include "Global.h"
 
@@ -169,6 +170,14 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	logger = spdlog::get("HYDRAHOOK")->clone("api");
 
 	//
+	// Install crash handler if enabled
+	//
+	if (EngineConfig->CrashHandler.IsEnabled) {
+		HydraHookCrashHandlerInstall(engine);
+		engine->CrashHandlerInstalled = TRUE;
+	}
+
+	//
 	// Event to notify engine thread about termination
 	// 
 	engine->EngineCancellationEvent = CreateEvent(
@@ -225,6 +234,11 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
 
 	logger->info("Freeing remaining resources");
+
+	if (engine->CrashHandlerInstalled) {
+		HydraHookCrashHandlerUninstall();
+		engine->CrashHandlerInstalled = FALSE;
+	}
 
 	CloseHandle(engine->EngineCancellationEvent);
 	CloseHandle(engine->EngineThread);
