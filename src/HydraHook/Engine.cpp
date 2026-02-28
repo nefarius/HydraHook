@@ -190,6 +190,11 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	if (engine->EngineCancellationEvent == INVALID_HANDLE_VALUE
 		|| engine->EngineCancellationEvent == NULL) {
 		logger->error("Failed to create the Engine Cancellation Event: {}", GetLastError());
+		if (engine->CrashHandlerInstalled) {
+			HydraHookCrashHandlerUninstall(engine);
+			engine->CrashHandlerInstalled = FALSE;
+		}
+		free(engine);
 		return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED;
 	}
 
@@ -209,6 +214,12 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 
 	if (!engine->EngineThread) {
 		logger->error("Could not create main thread, library unusable");
+		if (engine->CrashHandlerInstalled) {
+			HydraHookCrashHandlerUninstall(engine);
+			engine->CrashHandlerInstalled = FALSE;
+		}
+		CloseHandle(engine->EngineCancellationEvent);
+		free(engine);
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
 	}
 
@@ -230,21 +241,21 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
 	}
 
-	const auto& engine = g_EngineHostInstances[HostInstance];
+	const auto engine = g_EngineHostInstances[HostInstance];
 	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
 
 	logger->info("Freeing remaining resources");
 
 	if (engine->CrashHandlerInstalled) {
-		HydraHookCrashHandlerUninstall();
+		HydraHookCrashHandlerUninstall(engine);
 		engine->CrashHandlerInstalled = FALSE;
 	}
 
 	CloseHandle(engine->EngineCancellationEvent);
 	CloseHandle(engine->EngineThread);
 
-	const auto it = g_EngineHostInstances.find(HostInstance);
-	g_EngineHostInstances.erase(it);
+	g_EngineHostInstances.erase(HostInstance);
+	free(engine);
 
 	logger->info("Engine shutdown complete");
 	logger->flush();

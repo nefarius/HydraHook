@@ -38,8 +38,18 @@ static _purecall_handler             s_prevPurecallHandler   = nullptr;
 static std::atomic<int> s_refCount{ 0 };
 static std::mutex       s_installMutex;
 
-// The engine whose config drives dump output; first installer wins
-static PHYDRAHOOK_ENGINE s_crashEngine = nullptr;
+// Self-contained snapshot of crash config, independent of any engine's lifetime.
+// The crash path reads this atomically without locks to avoid deadlock.
+struct CrashConfigSnapshot
+{
+	std::string DumpDirectoryPath;
+	HMODULE HostInstance;
+	HYDRAHOOK_DUMP_TYPE DumpType;
+	PFN_HYDRAHOOK_CRASH_HANDLER EvtCrashHandler;
+	PHYDRAHOOK_ENGINE OwnerEngine;  // only valid while owner is alive; used for callback arg
+};
+
+static std::atomic<CrashConfigSnapshot*> s_snapshot{ nullptr };
 
 // ---------------------------------------------------------------------------
 // Exception code to symbolic name
@@ -125,14 +135,12 @@ static MINIDUMP_TYPE GetMiniDumpTypeFlags(HYDRAHOOK_DUMP_TYPE type)
 // ---------------------------------------------------------------------------
 // Build dump directory path, falling back through configured -> log dir -> %TEMP%
 // ---------------------------------------------------------------------------
-static std::string ResolveDumpDirectory()
+static std::string ResolveDumpDirectory(const CrashConfigSnapshot* snap)
 {
-	if (s_crashEngine &&
-		s_crashEngine->EngineConfig.CrashHandler.DumpDirectoryPath &&
-		s_crashEngine->EngineConfig.CrashHandler.DumpDirectoryPath[0] != '\0')
+	if (snap && !snap->DumpDirectoryPath.empty())
 	{
 		std::string path = HydraHook::Core::Util::expand_environment_variables(
-			s_crashEngine->EngineConfig.CrashHandler.DumpDirectoryPath);
+			snap->DumpDirectoryPath);
 		if (!path.empty())
 		{
 			if (path.back() != '\\' && path.back() != '/')
@@ -145,9 +153,9 @@ static std::string ResolveDumpDirectory()
 	if (!dir.empty())
 		return dir;
 
-	if (s_crashEngine)
+	if (snap && snap->HostInstance)
 	{
-		dir = HydraHook::Core::Util::get_module_directory(s_crashEngine->HostInstance);
+		dir = HydraHook::Core::Util::get_module_directory(snap->HostInstance);
 		if (!dir.empty())
 			return dir;
 	}
@@ -177,6 +185,9 @@ static std::string GetProcessBaseName()
 // ---------------------------------------------------------------------------
 static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 {
+	// Atomic snapshot load -- no lock, safe even if crash fires during install/uninstall
+	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
+
 	auto logger = spdlog::get("HYDRAHOOK");
 	if (!logger)
 		return;
@@ -229,12 +240,10 @@ static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 
 	crashLog->flush();
 
-	// Invoke user callback if registered
-	if (s_crashEngine &&
-		s_crashEngine->EngineConfig.CrashHandler.EvtCrashHandler)
+	// Invoke user callback if registered (uses snapshot-owned data only)
+	if (snap && snap->EvtCrashHandler)
 	{
-		if (!s_crashEngine->EngineConfig.CrashHandler.EvtCrashHandler(
-			s_crashEngine, exCode, exInfo))
+		if (!snap->EvtCrashHandler(snap->OwnerEngine, exCode, exInfo))
 		{
 			crashLog->critical("User crash callback returned FALSE, skipping dump file");
 			crashLog->flush();
@@ -247,7 +256,7 @@ static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 	GetLocalTime(&st);
 
 	std::string processName = GetProcessBaseName();
-	std::string dumpDir = ResolveDumpDirectory();
+	std::string dumpDir = ResolveDumpDirectory(snap);
 
 	char dumpPath[MAX_PATH]{};
 	_snprintf_s(dumpPath, _TRUNCATE,
@@ -280,9 +289,7 @@ static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 	mdei.ExceptionPointers = exInfo;
 	mdei.ClientPointers = FALSE;
 
-	HYDRAHOOK_DUMP_TYPE dumpType = s_crashEngine
-		? s_crashEngine->EngineConfig.CrashHandler.DumpType
-		: HydraHookDumpTypeNormal;
+	HYDRAHOOK_DUMP_TYPE dumpType = snap ? snap->DumpType : HydraHookDumpTypeNormal;
 
 	const BOOL success = MiniDumpWriteDump(
 		GetCurrentProcess(),
@@ -386,13 +393,35 @@ static void HydraHookSehTranslator(unsigned int code, EXCEPTION_POINTERS* info)
 // Public interface
 // ---------------------------------------------------------------------------
 
+static CrashConfigSnapshot* MakeSnapshot(PHYDRAHOOK_ENGINE engine)
+{
+	auto* snap = new (std::nothrow) CrashConfigSnapshot();
+	if (!snap)
+		return nullptr;
+
+	const auto& cfg = engine->EngineConfig.CrashHandler;
+	snap->DumpDirectoryPath = cfg.DumpDirectoryPath ? cfg.DumpDirectoryPath : "";
+	snap->HostInstance = engine->HostInstance;
+	snap->DumpType = cfg.DumpType;
+	snap->EvtCrashHandler = cfg.EvtCrashHandler;
+	snap->OwnerEngine = engine;
+	return snap;
+}
+
 void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 {
+	if (!engine)
+		return;
+
 	std::lock_guard<std::mutex> lock(s_installMutex);
+
+	auto* newSnap = MakeSnapshot(engine);
 
 	if (s_refCount.fetch_add(1) == 0)
 	{
-		s_crashEngine = engine;
+		// First installer: publish the snapshot and register global handlers
+		auto* old = s_snapshot.exchange(newSnap, std::memory_order_release);
+		delete old;
 
 		s_prevUnhandledFilter = SetUnhandledExceptionFilter(HydraHookUnhandledExceptionFilter);
 		s_prevTerminateHandler = std::set_terminate(HydraHookTerminateHandler);
@@ -404,14 +433,39 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 			logger->clone("crash")->info("Crash handler installed (dump type: {})",
 				static_cast<int>(engine->EngineConfig.CrashHandler.DumpType));
 	}
+	else
+	{
+		// Additional installer: keep as a potential replacement but don't publish yet.
+		// The snapshot is ready if the current owner uninstalls first.
+		delete newSnap;
+	}
 }
 
-void HydraHookCrashHandlerUninstall()
+void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 {
 	std::lock_guard<std::mutex> lock(s_installMutex);
 
-	if (s_refCount.fetch_sub(1) == 1)
+	int expected = s_refCount.load(std::memory_order_relaxed);
+	do {
+		if (expected <= 0)
+			return;
+	} while (!s_refCount.compare_exchange_weak(expected, expected - 1,
+		std::memory_order_acq_rel, std::memory_order_relaxed));
+
+	const int prev = expected;
+
+	// If the uninstalling engine owns the current snapshot, clear it now --
+	// before the engine struct can be freed -- so the crash path never sees a stale pointer.
+	CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
+	if (snap && snap->OwnerEngine == engine)
 	{
+		auto* old = s_snapshot.exchange(nullptr, std::memory_order_release);
+		delete old;
+	}
+
+	if (prev == 1)
+	{
+		// Last uninstaller: restore all previous handlers
 		SetUnhandledExceptionFilter(s_prevUnhandledFilter);
 		std::set_terminate(s_prevTerminateHandler);
 		_set_invalid_parameter_handler(s_prevInvalidParamHandler);
@@ -421,7 +475,6 @@ void HydraHookCrashHandlerUninstall()
 		s_prevTerminateHandler = nullptr;
 		s_prevInvalidParamHandler = nullptr;
 		s_prevPurecallHandler = nullptr;
-		s_crashEngine = nullptr;
 
 		auto logger = spdlog::get("HYDRAHOOK");
 		if (logger)

@@ -27,9 +27,13 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine);
 /**
  * @brief Decrements the crash handler reference count.
  *
- * When the last engine uninstalls, restores all previous handlers.
+ * If the uninstalling engine owns the active crash config snapshot, the
+ * snapshot is cleared immediately so the crash path never sees a stale
+ * pointer. When the last engine uninstalls, restores all previous handlers.
+ *
+ * @param engine The engine that is being destroyed.
  */
-void HydraHookCrashHandlerUninstall();
+void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine);
 
 /**
  * @brief Installs the per-thread SEH-to-C++ translator on the calling thread.

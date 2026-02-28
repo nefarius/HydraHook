@@ -256,6 +256,8 @@ extern "C" {
 
         EngineConfig->Logging.IsEnabled = TRUE;
         EngineConfig->Logging.FilePath = "%TEMP%\\HydraHook.log";
+
+        EngineConfig->CrashHandler.DumpType = HydraHookDumpTypeNormal;
     }
 
     /**
