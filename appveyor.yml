@@ -1,4 +1,4 @@
-version: 4.0.{build}.0
+version: 4.1.{build}.0
 build_cloud: WIN-LKR467JS4GL
 image: Windows
 skip_commits:
