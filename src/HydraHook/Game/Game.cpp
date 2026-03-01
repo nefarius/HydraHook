@@ -139,18 +139,18 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 
 	if (origin == ShutdownOrigin::ExitProcessHook)
 	{
-		g_postQuitMessageHook.remove();
-		g_freeLibraryHook.remove();
+		g_postQuitMessageHook.remove_nothrow();
+		g_freeLibraryHook.remove_nothrow();
 	}
 	else if (origin == ShutdownOrigin::PostQuitMessageHook)
 	{
-		g_exitProcessHook.remove();
-		g_freeLibraryHook.remove();
+		g_exitProcessHook.remove_nothrow();
+		g_freeLibraryHook.remove_nothrow();
 	}
 	else if (origin == ShutdownOrigin::FreeLibraryHook)
 	{
-		g_postQuitMessageHook.remove();
-		g_exitProcessHook.remove();
+		g_postQuitMessageHook.remove_nothrow();
+		g_exitProcessHook.remove_nothrow();
 	}
 	else if (origin == ShutdownOrigin::DllMainProcessDetach)
 	{
@@ -2078,13 +2078,13 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	else
 	{
 		logger->info("All in-flight hook callbacks drained");
-	}
 
-	ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
-	ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
-	ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
-	ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
-	ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
+		ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
+		ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
+		ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
+		ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
+		ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
+	}
 
 	//
 	// Notify host that we released all render pipeline hooks
