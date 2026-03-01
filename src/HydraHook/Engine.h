@@ -73,16 +73,69 @@ typedef struct _HYDRAHOOK_ENGINE
 } HYDRAHOOK_ENGINE;
 
 /**
- * @brief Placeholder for shutdown drain; kept for API compatibility.
+ * @brief Lock-free tracker for in-flight hook lambda invocations.
  *
- * @param timeout_ms Maximum time to wait in milliseconds (ignored).
- * @return Always true.
+ * Allows the engine thread to wait for all render-thread callbacks to
+ * complete before unloading the DLL.  The hot path is two atomic
+ * increments/decrements (lock xadd on x86-64) and one flag load -- no
+ * mutex, no kernel transition.
  */
 struct HookActivityTracker
 {
+    static inline std::atomic<int32_t> s_active{0};
+    static inline std::atomic<bool> s_shutting_down{false};
+
+    /**
+     * @brief RAII guard placed at the top of every hook lambda.
+     *
+     * Increments the in-flight count on construction, decrements on
+     * destruction.  The @c invoke flag is captured once so that pre-
+     * and post-callbacks are always symmetric (both run or neither).
+     */
+    struct Guard
+    {
+        bool invoke;
+
+        Guard() noexcept
+        {
+            s_active.fetch_add(1, std::memory_order_seq_cst);
+            invoke = !s_shutting_down.load(std::memory_order_seq_cst);
+        }
+
+        ~Guard() noexcept
+        {
+            s_active.fetch_sub(1, std::memory_order_seq_cst);
+        }
+
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+    };
+
+    /** @brief Sets the shutdown flag so new Guard instances skip callbacks. */
+    static void shutdown() noexcept
+    {
+        s_shutting_down.store(true, std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief Spin-waits until every in-flight lambda has returned.
+     *
+     * Only called once at shutdown, after all hooks have been removed
+     * (so no new entries are possible).  Yields the time-slice on each
+     * iteration to avoid burning a core.
+     *
+     * @param timeout_ms Maximum time to wait.
+     * @return true if drained, false on timeout.
+     */
     static bool drain(DWORD timeout_ms = 5000) noexcept
     {
-        (void)timeout_ms;
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        while (s_active.load(std::memory_order_seq_cst) > 0)
+        {
+            if (GetTickCount64() >= deadline)
+                return false;
+            SwitchToThread();
+        }
         return true;
     }
 };
