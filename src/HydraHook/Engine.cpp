@@ -88,7 +88,7 @@ static std::map<HMODULE, PHYDRAHOOK_ENGINE> g_EngineHostInstances;
  * @param Engine Optional out parameter that receives the allocated engine handle on success.
  * @return HYDRAHOOK_ERROR_NONE on success.
  * @return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED if an engine is already created for HostInstance.
- * @return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED if the host DLL module handle could not be obtained.
+ * @return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED if the host DLL module handle could not be obtained.
  * @return HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED if engine memory allocation failed.
  * @return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED if a suitable logger could not be created or obtained.
  * @return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED if the engine cancellation event could not be created.

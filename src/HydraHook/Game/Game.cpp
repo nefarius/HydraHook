@@ -335,37 +335,57 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	 * which might otherwise become victim to a termination race condition and DLL
 	 * loader-lock restrictions.
 	 */
-	g_exitProcessHook.apply((size_t)ExitProcess, [](UINT uExitCode)
-		{
-			PerformShutdownCleanup(engine, ShutdownOrigin::ExitProcessHook);
-			// Call native API. After this it becomes unsafe to use any remaining library resources!
-			g_exitProcessHook.call_orig(uExitCode);
-		});
+	try
+	{
+		g_exitProcessHook.apply((size_t)ExitProcess, [](UINT uExitCode)
+			{
+				PerformShutdownCleanup(engine, ShutdownOrigin::ExitProcessHook);
+				g_exitProcessHook.call_orig(uExitCode);
+			});
+	}
+	catch (DetourException& ex)
+	{
+		logger->error("Failed to hook ExitProcess: {}", ex.what());
+	}
 
 	/*
 	 * Hooking PostQuitMessage in addition to ExitProcess should be practically
 	 * more reliable since a game is expected to have at least one main window
 	 * which _should_ receive the WM_QUIT message upon application shutdown.
 	 */
-	g_postQuitMessageHook.apply((size_t)PostQuitMessage, [](int nExitCode)
-		{
-			PerformShutdownCleanup(engine, ShutdownOrigin::PostQuitMessageHook);
-			g_postQuitMessageHook.call_orig(nExitCode);
-		});
+	try
+	{
+		g_postQuitMessageHook.apply((size_t)PostQuitMessage, [](int nExitCode)
+			{
+				PerformShutdownCleanup(engine, ShutdownOrigin::PostQuitMessageHook);
+				g_postQuitMessageHook.call_orig(nExitCode);
+			});
+	}
+	catch (DetourException& ex)
+	{
+		logger->error("Failed to hook PostQuitMessage: {}", ex.what());
+	}
 
 	/*
 	 * Hooking FreeLibrary allows detection of explicit host-initiated DLL unload.
 	 * When the host calls FreeLibrary on our module, we perform graceful shutdown
 	 * before the actual unload, avoiding loader-lock and termination race issues.
 	 */
-	g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
-		{
-			if (hLibModule == engine->DllModule)
+	try
+	{
+		g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
 			{
-				PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
-			}
-			return g_freeLibraryHook.call_orig(hLibModule);
-		});
+				if (hLibModule == engine->DllModule)
+				{
+					PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
+				}
+				return g_freeLibraryHook.call_orig(hLibModule);
+			});
+	}
+	catch (DetourException& ex)
+	{
+		logger->error("Failed to hook FreeLibrary: {}", ex.what());
+	}
 
 #pragma region D3D9
 
@@ -1874,7 +1894,10 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		logger->error("Unhooking failed: {}", pex.what());
 	}
 
-	HookActivityTracker::drain();
+	if (!HookActivityTracker::drain())
+	{
+		logger->error("Timed out waiting for in-flight callbacks to drain");
+	}
 
 	//
 	// Notify host that we released all render pipeline hooks

@@ -288,7 +288,7 @@ public:
 
     /**
      * @brief Removes hook if applied. Never throws; safe to call under loader lock.
-     * @return true if successfully removed, false on error or if not applied.
+     * @return true if successfully removed or hook was not applied; false on error.
      */
     bool remove_nothrow() noexcept
     {

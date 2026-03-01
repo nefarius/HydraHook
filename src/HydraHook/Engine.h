@@ -91,15 +91,21 @@ struct HookActivityTracker
         Guard& operator=(const Guard&) = delete;
     };
 
-    static void drain(DWORD timeout_ms = 5000) noexcept
+    /**
+     * @brief Spins until all in-flight callbacks have returned.
+     * @param timeout_ms Maximum time to wait in milliseconds.
+     * @return true if all callbacks drained, false if timed out.
+     */
+    static bool drain(DWORD timeout_ms = 5000) noexcept
     {
         const DWORD start = GetTickCount();
         while (count.load(std::memory_order_acquire) > 0)
         {
             if (GetTickCount() - start > timeout_ms)
-                break;
+                return false;
             Sleep(1);
         }
+        return true;
     }
 };
 
