@@ -1847,6 +1847,10 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
 	ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
 
+	g_exitProcessHook.remove_nothrow();
+	g_postQuitMessageHook.remove_nothrow();
+	g_freeLibraryHook.remove_nothrow();
+
 	try
 	{
 #ifndef HYDRAHOOK_NO_D3D9
