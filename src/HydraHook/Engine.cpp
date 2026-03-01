@@ -127,6 +127,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	engine->HostInstance = HostInstance;
 	engine->DllModule = hMod;
 	engine->ShutdownCleanupDone.store(false);
+	engine->FreeLibraryHookActive.store(false);
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
 
 	//
