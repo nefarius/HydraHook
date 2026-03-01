@@ -1841,16 +1841,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		engine->EngineConfig.EvtHydraHookGamePreUnhook(engine);
 	}
 
-	ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
-	ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
-	ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
-	ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
-	ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
-
-	g_exitProcessHook.remove_nothrow();
-	g_postQuitMessageHook.remove_nothrow();
-	g_freeLibraryHook.remove_nothrow();
-
 	try
 	{
 #ifndef HYDRAHOOK_NO_D3D9
@@ -1902,6 +1892,12 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	{
 		logger->error("Timed out waiting for in-flight callbacks to drain");
 	}
+
+	ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
+	ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
+	ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
+	ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
+	ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
 
 	//
 	// Notify host that we released all render pipeline hooks
