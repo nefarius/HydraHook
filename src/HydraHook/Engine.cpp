@@ -323,6 +323,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineFreeCustomContext(PHYDRAHOOK_ENGINE
 	if (Engine->CustomContext)
 	{
 		free(Engine->CustomContext);
+		Engine->CustomContext = NULL;
 	}
 
 	return HYDRAHOOK_ERROR_NONE;
