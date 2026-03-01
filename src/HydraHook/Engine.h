@@ -57,6 +57,7 @@ typedef struct _HYDRAHOOK_ENGINE
     PVOID CustomContext;                     /**< User-allocated context. */
     BOOL CrashHandlerInstalled;              /**< TRUE if this instance enabled the crash handler. */
     std::atomic<bool> ShutdownCleanupDone;   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
+    std::atomic<bool> FreeLibraryHookActive; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
 
     union
     {

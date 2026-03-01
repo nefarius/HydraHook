@@ -377,7 +377,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		{
 			if (hLibModule == engine->DllModule)
 			{
+				engine->FreeLibraryHookActive.store(true, std::memory_order_release);
 				PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
+				FreeLibraryAndExitThread(hLibModule, 0);
 			}
 			return g_freeLibraryHook.call_orig(hLibModule);
 		});
@@ -2096,10 +2098,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 	logger->info("Exiting worker thread");
 
-	//
-	// Decrease host DLL reference count and exit thread
-	// 
-	FreeLibraryAndExitThread(engine->HostInstance, 0);
+	if (engine->FreeLibraryHookActive.load(std::memory_order_acquire))
+	{
+		ExitThread(0);
+	}
+	else
+	{
+		FreeLibraryAndExitThread(engine->HostInstance, 0);
+	}
 }
 
 /**
