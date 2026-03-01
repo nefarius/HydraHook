@@ -133,7 +133,11 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		g_postQuitMessageHook.remove();
 	else if (origin == ShutdownOrigin::PostQuitMessageHook)
 		g_exitProcessHook.remove();
-	// DllMainProcessDetach: do not remove hooks (unsafe under loader lock)
+	else if (origin == ShutdownOrigin::DllMainProcessDetach)
+	{
+		g_postQuitMessageHook.remove_nothrow();
+		g_exitProcessHook.remove_nothrow();
+	}
 
 	if (origin != ShutdownOrigin::DllMainProcessDetach && engine->EngineConfig.EvtHydraHookGamePreExit)
 	{
@@ -159,13 +163,13 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->info("Thread shutdown complete");
 		break;
 	case WAIT_TIMEOUT:
-#ifndef _DEBUG
+//#ifndef _DEBUG
 		if (origin != ShutdownOrigin::DllMainProcessDetach)
 		{
 			TerminateThread(engine->EngineThread, 0);
 			logger->error("Thread hasn't finished clean-up within expected time, terminating");
 		}
-#endif
+//#endif
 		break;
 	case WAIT_FAILED:
 		logger->error("Unknown error, host process might crash");

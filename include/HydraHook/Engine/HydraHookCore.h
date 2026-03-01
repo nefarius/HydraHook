@@ -71,6 +71,7 @@ extern "C" {
         HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED = 0xE0000007, /**< Custom context allocation failed. */
         HYDRAHOOK_ERROR_CREATE_EVENT_FAILED = 0xE0000008,       /**< CreateEvent failed for cancellation. */
         HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED = 0xE0000009,      /**< Failed to create fallback logger. */
+        HYDRAHOOK_ERROR_NO_LOADER_LOCK = 0xE000000A,            /**< Initialization attempted outside of loader lock. */
 
     } HYDRAHOOK_ERROR;
 

@@ -267,6 +267,14 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
 	}
 
+	//
+	// This is expected to be called within the context of DllMain
+	//
+	if (!HydraHook::Core::Util::IsLoaderLockHeld())
+	{
+		return HYDRAHOOK_ERROR_NO_LOADER_LOCK;
+	}
+
 	const auto engine = g_EngineHostInstances[HostInstance];
 	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
 
