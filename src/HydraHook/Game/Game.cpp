@@ -1373,6 +1373,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
             {
                 ID3D12Device* pD12Device = nullptr;
                 ID3D11Device* pD11Device = nullptr;
+                ID3D10Device* pD10Device = nullptr;
 
                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) && pD12Device)
                 {
@@ -1424,6 +1425,28 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
                     INVOKE_D3D11_CALLBACK(engine, EvtHydraHookD3D11PostResizeBuffers, chain,
                         BufferCount, Width, Height, NewFormat, SwapChainFlags, &post);
+
+                    return ret;
+                }
+
+                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) && pD10Device)
+                {
+                    pD10Device->Release();
+
+                    static std::once_flag flag;
+                    std::call_once(flag, []()
+                    {
+                        spdlog::get("HYDRAHOOK")->clone("d3d10")->info("++ IDXGISwapChain3::ResizeBuffers1 called (D3D10)");
+                    });
+
+                    INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PreResizeBuffers, chain,
+                        BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+                    const auto ret = swapChainResizeBuffers1Hook.call_orig(chain,
+                        BufferCount, Width, Height, NewFormat, SwapChainFlags, pCreationNodeMask, ppPresentQueue);
+
+                    INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PostResizeBuffers, chain,
+                        BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
                     return ret;
                 }
