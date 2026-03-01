@@ -30,6 +30,7 @@
       <Filter>Game\Hook\CoreAudio</Filter>
     </ClCompile>
     <ClCompile Include="CrashHandler.cpp" />
+    <ClCompile Include="LdrLock.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Game">
@@ -133,6 +134,7 @@
       <Filter>Shared\Engine</Filter>
     </ClInclude>
     <ClInclude Include="CrashHandler.h" />
+    <ClInclude Include="LdrLock.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="HydraHook.rc" />

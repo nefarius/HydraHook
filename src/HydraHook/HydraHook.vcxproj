@@ -384,6 +384,7 @@
     <ClCompile Include="Game\Hook\Direct3D9Ex.cpp" />
     <ClCompile Include="Game\Game.cpp" />
     <ClCompile Include="Game\Hook\Window.cpp" />
+    <ClCompile Include="LdrLock.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookCore.h" />
@@ -405,6 +406,7 @@
     <ClInclude Include="Game\Hook\Direct3D9.h" />
     <ClInclude Include="Game\Hook\Direct3D9Ex.h" />
     <ClInclude Include="Game\Game.h" />
+    <ClInclude Include="LdrLock.h" />
     <ClInclude Include="Utils\Global.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="Utils\Hook.h" />

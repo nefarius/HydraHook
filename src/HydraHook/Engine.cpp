@@ -54,6 +54,7 @@ SOFTWARE.
 #include "CrashHandler.h"
 #include "Game/Game.h"
 #include "Utils/Global.h"
+#include "LdrLock.h"
 
 //
 // Logging
