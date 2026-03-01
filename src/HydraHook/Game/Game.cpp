@@ -122,6 +122,10 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logChannel = "quit";
 		logMessage = "WM_QUIT was fired, performing pre-DLL-detach clean-up tasks";
 		break;
+	case ShutdownOrigin::FreeLibraryHook:
+		logChannel = "unload";
+		logMessage = "FreeLibrary called for HydraHook DLL, performing pre-unload clean-up tasks";
+		break;
 	case ShutdownOrigin::DllMainProcessDetach:
 		logChannel = "detach";
 		break;
@@ -134,6 +138,10 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		g_postQuitMessageHook.remove();
 	else if (origin == ShutdownOrigin::PostQuitMessageHook)
 		g_exitProcessHook.remove();
+	else if (origin == ShutdownOrigin::FreeLibraryHook)
+	{
+		// nothing to do for now
+	}
 	else if (origin == ShutdownOrigin::DllMainProcessDetach)
 	{
 		g_postQuitMessageHook.remove_nothrow();
@@ -337,6 +345,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			g_postQuitMessageHook.call_orig(nExitCode);
 		});
 
+	/*
+	 * Hooking FreeLibrary allows detection of explicit host-initiated DLL unload.
+	 * When the host calls FreeLibrary on our module, we perform graceful shutdown
+	 * before the actual unload, avoiding loader-lock and termination race issues.
+	 */
 	g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
 		{
 			if (hLibModule == engine->DllModule)
