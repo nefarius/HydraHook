@@ -28,6 +28,7 @@ SOFTWARE.
 #include <Utils/Hook.h>
 
 #include "Game.h"
+#include "Shutdown.h"
 #include "Utils/Global.h"
 #include "Exceptions.hpp"
 #include "CrashHandler.h"
@@ -99,6 +100,89 @@ static void D3D12_ReleaseQueueMaps()
 	g_d3d12DeviceToQueue.clear();
 }
 #endif
+
+//
+// Internal flow-control hooks (file scope for PerformShutdownCleanup access)
+//
+static Hook<CallConvention::stdcall_t, VOID, UINT> g_exitProcessHook;
+static Hook<CallConvention::stdcall_t, void, int> g_postQuitMessageHook;
+
+void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
+{
+	const char* logChannel = "shutdown";
+	const char* logMessage = "Performing pre-DLL-detach clean-up tasks";
+	switch (origin)
+	{
+	case ShutdownOrigin::ExitProcessHook:
+		logChannel = "process";
+		logMessage = "Host process is terminating, performing pre-DLL-detach clean-up tasks";
+		break;
+	case ShutdownOrigin::PostQuitMessageHook:
+		logChannel = "quit";
+		logMessage = "WM_QUIT was fired, performing pre-DLL-detach clean-up tasks";
+		break;
+	case ShutdownOrigin::DllMainProcessDetach:
+		logChannel = "detach";
+		break;
+	}
+
+	auto logger = spdlog::get("HYDRAHOOK")->clone(logChannel);
+	logger->info(logMessage);
+
+	if (origin == ShutdownOrigin::ExitProcessHook)
+		g_postQuitMessageHook.remove();
+	else if (origin == ShutdownOrigin::PostQuitMessageHook)
+		g_exitProcessHook.remove();
+	// DllMainProcessDetach: do not remove hooks (unsafe under loader lock)
+
+	if (origin != ShutdownOrigin::DllMainProcessDetach && engine->EngineConfig.EvtHydraHookGamePreExit)
+	{
+		engine->EngineConfig.EvtHydraHookGamePreExit(engine);
+	}
+
+	const auto ret = SetEvent(engine->EngineCancellationEvent);
+	if (!ret)
+	{
+		logger->error("SetEvent failed: {}", GetLastError());
+	}
+
+	// wait on thread shutdown or check state
+	const DWORD waitTimeout = (origin == ShutdownOrigin::DllMainProcessDetach) ? 0 : 3000;
+	const auto result = WaitForSingleObject(engine->EngineThread, waitTimeout);
+
+	switch (result)
+	{
+	case WAIT_ABANDONED:
+		logger->error("Unknown state, host process might crash");
+		break;
+	case WAIT_OBJECT_0:
+		logger->info("Thread shutdown complete");
+		break;
+	case WAIT_TIMEOUT:
+#ifndef _DEBUG
+		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		{
+			TerminateThread(engine->EngineThread, 0);
+			logger->error("Thread hasn't finished clean-up within expected time, terminating");
+		}
+#endif
+		break;
+	case WAIT_FAILED:
+		logger->error("Unknown error, host process might crash");
+		break;
+	default:
+		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		{
+			TerminateThread(engine->EngineThread, 0);
+		}
+		logger->error("Unexpected return value, terminating");
+		break;
+	}
+
+	// decrease ref-count we incremented on engine initialization
+	if (engine->HostModule)
+		FreeLibrary(engine->HostModule);
+}
 
 // NOTE: DirectInput hooking is technically implemented but not really useful
 // #define HOOK_DINPUT8
@@ -227,12 +311,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	logger->info("Core Audio hooking disabled at compile time");
 #endif
 
-	//
-	// Internal flow-control hooks
-	// 
-	static Hook<CallConvention::stdcall_t, VOID, UINT> exitProcessHook;
-	static Hook<CallConvention::stdcall_t, void, int> postQuitMessageHook;
-
 	/*
 	 * This is a bit of a gamble but ExitProcess is expected to be implicitly called
 	 * _before_ the injected DLL gets unloaded (without proper call to FreeLibrary)
@@ -240,126 +318,23 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	 * which might otherwise become victim to a termination race condition and DLL
 	 * loader-lock restrictions.
 	 */
-	exitProcessHook.apply((size_t)ExitProcess, [](
-	                      UINT uExitCode
-                      )
-	                      {
-		                      auto logger = spdlog::get("HYDRAHOOK")->clone("process");
-
-		                      logger->info("Host process is terminating, performing pre-DLL-detach clean-up tasks");
-
-		                      // avoid cleaning up multiple times
-		                      postQuitMessageHook.remove();
-
-		                      if (engine->EngineConfig.EvtHydraHookGamePreExit)
-		                      {
-			                      engine->EngineConfig.EvtHydraHookGamePreExit(engine);
-		                      }
-
-		                      //
-		                      // This will instruct the main thread to gracefully end
-		                      // 
-		                      const auto ret = SetEvent(engine->EngineCancellationEvent);
-
-		                      if (!ret)
-		                      {
-			                      logger->error("SetEvent failed: {}", GetLastError());
-		                      }
-
-		                      //
-		                      // Give the thread a short breather to end gracefully
-		                      // 
-		                      const auto result = WaitForSingleObject(engine->EngineThread, 3000);
-
-		                      switch (result)
-		                      {
-		                      case WAIT_ABANDONED:
-			                      logger->error("Unknown state, host process might crash");
-			                      break;
-		                      case WAIT_OBJECT_0:
-			                      logger->info("Thread shutdown complete");
-			                      break;
-		                      case WAIT_TIMEOUT:
-#ifndef _DEBUG
-			                      TerminateThread(engine->EngineThread, 0);
-			                      logger->error("Thread hasn't finished clean-up within expected time, terminating");
-#endif
-			                      break;
-		                      case WAIT_FAILED:
-			                      logger->error("Unknown error, host process might crash");
-			                      break;
-		                      default:
-			                      TerminateThread(engine->EngineThread, 0);
-			                      logger->error("Unexpected return value, terminating");
-			                      break;
-		                      }
-
-		                      // Call native API. After this it becomes unsafe to use any remaining library resources!
-		                      exitProcessHook.call_orig(uExitCode);
-	                      });
+	g_exitProcessHook.apply((size_t)ExitProcess, [](UINT uExitCode)
+		{
+			PerformShutdownCleanup(engine, ShutdownOrigin::ExitProcessHook);
+			// Call native API. After this it becomes unsafe to use any remaining library resources!
+			g_exitProcessHook.call_orig(uExitCode);
+		});
 
 	/*
 	 * Hooking PostQuitMessage in addition to ExitProcess should be practically
 	 * more reliable since a game is expected to have at least one main window
 	 * which _should_ receive the WM_QUIT message upon application shutdown.
 	 */
-	postQuitMessageHook.apply((size_t)PostQuitMessage, [](
-	                          int nExitCode
-                          )
-	                          {
-		                          auto logger = spdlog::get("HYDRAHOOK")->clone("quit");
-
-		                          logger->info("WM_QUIT was fired, performing pre-DLL-detach clean-up tasks");
-
-		                          // avoid cleaning up multiple times
-		                          exitProcessHook.remove();
-
-		                          if (engine->EngineConfig.EvtHydraHookGamePreExit)
-		                          {
-			                          engine->EngineConfig.EvtHydraHookGamePreExit(engine);
-		                          }
-
-		                          //
-		                          // This will instruct the main thread to gracefully end
-		                          // 
-		                          const auto ret = SetEvent(engine->EngineCancellationEvent);
-
-		                          if (!ret)
-		                          {
-			                          logger->error("SetEvent failed: {}", GetLastError());
-		                          }
-
-		                          //
-		                          // Give the thread a short breather to end gracefully
-		                          // 
-		                          const auto result = WaitForSingleObject(engine->EngineThread, 3000);
-
-		                          switch (result)
-		                          {
-		                          case WAIT_ABANDONED:
-			                          logger->error("Unknown state, host process might crash");
-			                          break;
-		                          case WAIT_OBJECT_0:
-			                          logger->info("Thread shutdown complete");
-			                          break;
-		                          case WAIT_TIMEOUT:
-#ifndef _DEBUG
-			                          TerminateThread(engine->EngineThread, 0);
-			                          logger->error(
-				                          "Thread hasn't finished clean-up within expected time, terminating");
-#endif
-			                          break;
-		                          case WAIT_FAILED:
-			                          logger->error("Unknown error, host process might crash");
-			                          break;
-		                          default:
-			                          TerminateThread(engine->EngineThread, 0);
-			                          logger->error("Unexpected return value, terminating");
-			                          break;
-		                          }
-
-		                          postQuitMessageHook.call_orig(nExitCode);
-	                          });
+	g_postQuitMessageHook.apply((size_t)PostQuitMessage, [](int nExitCode)
+		{
+			PerformShutdownCleanup(engine, ShutdownOrigin::PostQuitMessageHook);
+			g_postQuitMessageHook.call_orig(nExitCode);
+		});
 
 
 #pragma region D3D9

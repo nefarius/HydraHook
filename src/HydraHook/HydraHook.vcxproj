@@ -406,6 +406,7 @@
     <ClInclude Include="Game\Hook\Direct3D9.h" />
     <ClInclude Include="Game\Hook\Direct3D9Ex.h" />
     <ClInclude Include="Game\Game.h" />
+    <ClInclude Include="Game\Shutdown.h" />
     <ClInclude Include="LdrLock.h" />
     <ClInclude Include="Utils\Global.h" />
     <ClInclude Include="resource.h" />

@@ -53,6 +53,7 @@ SOFTWARE.
 #include "Engine.h"
 #include "CrashHandler.h"
 #include "Game/Game.h"
+#include "Game/Shutdown.h"
 #include "Utils/Global.h"
 #include "LdrLock.h"
 
@@ -107,10 +108,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	//
 	// Increase host DLL reference count
 	// 
-	HMODULE hmod;
+	HMODULE hMod;
 	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
 	                       reinterpret_cast<LPCTSTR>(HostInstance),
-	                       &hmod))
+	                       &hMod))
 	{
 		return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED;
 	}
@@ -127,6 +128,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	// 
 	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
+	engine->HostModule = hMod;
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));
 
 	//
@@ -267,6 +269,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 
 	const auto engine = g_EngineHostInstances[HostInstance];
 	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
+
+	PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
 
 	logger->info("Freeing remaining resources");
 
