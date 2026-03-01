@@ -1821,6 +1821,12 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		engine->EngineConfig.EvtHydraHookGamePreUnhook(engine);
 	}
 
+	ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
+	ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
+	ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
+	ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
+	ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
+
 	try
 	{
 #ifndef HYDRAHOOK_NO_D3D9
@@ -1867,6 +1873,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	{
 		logger->error("Unhooking failed: {}", pex.what());
 	}
+
+	HookActivityTracker::drain();
 
 	//
 	// Notify host that we released all render pipeline hooks
