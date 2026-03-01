@@ -53,7 +53,7 @@ SOFTWARE.
 #include "Engine.h"
 #include "CrashHandler.h"
 #include "Game/Game.h"
-#include "Global.h"
+#include "Utils/Global.h"
 
 //
 // Logging

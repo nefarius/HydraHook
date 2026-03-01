@@ -28,7 +28,7 @@ SOFTWARE.
 #include <Utils/Hook.h>
 
 #include "Game.h"
-#include "Global.h"
+#include "Utils/Global.h"
 #include "Exceptions.hpp"
 #include "CrashHandler.h"
 using namespace HydraHook::Core::Exceptions;

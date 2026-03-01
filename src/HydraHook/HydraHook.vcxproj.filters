@@ -103,7 +103,7 @@
     <ClInclude Include="Game\Hook\Direct3D12.h">
       <Filter>Game\Hook\D3D12</Filter>
     </ClInclude>
-    <ClInclude Include="Global.h">
+    <ClInclude Include="Utils\Global.h">
       <Filter>Utils</Filter>
     </ClInclude>
     <ClInclude Include="..\..\include\HydraHook\Engine\HydraHookCore.h">
