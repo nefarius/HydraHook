@@ -73,38 +73,16 @@ typedef struct _HYDRAHOOK_ENGINE
 } HYDRAHOOK_ENGINE;
 
 /**
- * @brief Tracks in-flight user callback executions for safe shutdown.
+ * @brief Placeholder for shutdown drain; kept for API compatibility.
  *
- * Each INVOKE_*_CALLBACK macro creates an RAII Guard while the user callback
- * is executing. During shutdown, drain() spins until all guards are destroyed,
- * guaranteeing no thread is inside consumer code when the DLL is unloaded.
+ * @param timeout_ms Maximum time to wait in milliseconds (ignored).
+ * @return Always true.
  */
 struct HookActivityTracker
 {
-    static inline std::atomic<int32_t> count{0};
-
-    struct Guard
-    {
-        Guard() noexcept { count.fetch_add(1, std::memory_order_relaxed); }
-        ~Guard() noexcept { count.fetch_sub(1, std::memory_order_release); }
-        Guard(const Guard&) = delete;
-        Guard& operator=(const Guard&) = delete;
-    };
-
-    /**
-     * @brief Spins until all in-flight callbacks have returned.
-     * @param timeout_ms Maximum time to wait in milliseconds.
-     * @return true if all callbacks drained, false if timed out.
-     */
     static bool drain(DWORD timeout_ms = 5000) noexcept
     {
-        const DWORD start = GetTickCount();
-        while (count.load(std::memory_order_acquire) > 0)
-        {
-            if (GetTickCount() - start > timeout_ms)
-                return false;
-            Sleep(1);
-        }
+        (void)timeout_ms;
         return true;
     }
 };
@@ -115,52 +93,37 @@ struct HookActivityTracker
                                     (_engine_)->EngineConfig.EvtHydraHookGameHooked(_engine_, _version_) : \
                                     (void)0)
 
-/** @brief Invokes D3D9 callback if registered, with activity tracking for safe shutdown. */
+/** @brief Invokes D3D9 callback if registered. */
 #define INVOKE_D3D9_CALLBACK(_engine_, _callback_, ...)              \
     do {                                                             \
         const auto _pfn_ = (_engine_)->EventsD3D9._callback_;       \
-        if (_pfn_) {                                                 \
-            HookActivityTracker::Guard _guard_;                      \
-            _pfn_(##__VA_ARGS__);                                    \
-        }                                                            \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
     } while(0)
 
-/** @brief Invokes D3D10 callback if registered, with activity tracking for safe shutdown. */
+/** @brief Invokes D3D10 callback if registered. */
 #define INVOKE_D3D10_CALLBACK(_engine_, _callback_, ...)             \
     do {                                                             \
         const auto _pfn_ = (_engine_)->EventsD3D10._callback_;      \
-        if (_pfn_) {                                                 \
-            HookActivityTracker::Guard _guard_;                      \
-            _pfn_(##__VA_ARGS__);                                    \
-        }                                                            \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
     } while(0)
 
-/** @brief Invokes D3D11 callback if registered, with activity tracking for safe shutdown. */
+/** @brief Invokes D3D11 callback if registered. */
 #define INVOKE_D3D11_CALLBACK(_engine_, _callback_, ...)             \
     do {                                                             \
         const auto _pfn_ = (_engine_)->EventsD3D11._callback_;      \
-        if (_pfn_) {                                                 \
-            HookActivityTracker::Guard _guard_;                      \
-            _pfn_(##__VA_ARGS__);                                    \
-        }                                                            \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
     } while(0)
 
-/** @brief Invokes D3D12 callback if registered, with activity tracking for safe shutdown. */
+/** @brief Invokes D3D12 callback if registered. */
 #define INVOKE_D3D12_CALLBACK(_engine_, _callback_, ...)             \
     do {                                                             \
         const auto _pfn_ = (_engine_)->EventsD3D12._callback_;      \
-        if (_pfn_) {                                                 \
-            HookActivityTracker::Guard _guard_;                      \
-            _pfn_(##__VA_ARGS__);                                    \
-        }                                                            \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
     } while(0)
 
-/** @brief Invokes Core Audio callback if registered, with activity tracking for safe shutdown. */
+/** @brief Invokes Core Audio callback if registered. */
 #define INVOKE_ARC_CALLBACK(_engine_, _callback_, ...)               \
     do {                                                             \
         const auto _pfn_ = (_engine_)->EventsARC._callback_;        \
-        if (_pfn_) {                                                 \
-            HookActivityTracker::Guard _guard_;                      \
-            _pfn_(##__VA_ARGS__);                                    \
-        }                                                            \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
     } while(0)
