@@ -92,12 +92,14 @@ static std::map<HMODULE, PHYDRAHOOK_ENGINE> g_EngineHostInstances;
  * @return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED if the engine cancellation event could not be created.
  * @return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED if the engine main thread could not be created.
  */
-HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRAHOOK_ENGINE_CONFIG EngineConfig, PHYDRAHOOK_ENGINE * Engine)
+HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRAHOOK_ENGINE_CONFIG EngineConfig,
+                                                    PHYDRAHOOK_ENGINE* Engine)
 {
 	//
 	// Check if we got initialized for this instance before
 	// 
-	if (g_EngineHostInstances.count(HostInstance)) {
+	if (g_EngineHostInstances.count(HostInstance))
+	{
 		return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
 	}
 
@@ -106,14 +108,16 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	// 
 	HMODULE hmod;
 	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-		reinterpret_cast<LPCTSTR>(HostInstance),
-		&hmod)) {
+	                       reinterpret_cast<LPCTSTR>(HostInstance),
+	                       &hmod))
+	{
 		return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED;
 	}
 
 	const auto engine = static_cast<PHYDRAHOOK_ENGINE>(malloc(sizeof(HYDRAHOOK_ENGINE)));
 
-	if (!engine) {
+	if (!engine)
+	{
 		return HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED;
 	}
 
@@ -131,26 +135,38 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	std::string dllDir = HydraHook::Core::Util::get_module_directory(HostInstance);
 	std::string tempPath = HydraHook::Core::Util::expand_environment_variables(EngineConfig->Logging.FilePath);
 
-	auto tryCreateLogger = [](const std::string& path) -> bool {
-		try {
+	auto tryCreateLogger = [](const std::string& path) -> bool
+	{
+		try
+		{
 			(void)spdlog::basic_logger_mt("HYDRAHOOK", path);
 			return true;
 		}
-		catch (const std::exception&) {
+		catch (const std::exception&)
+		{
 			return false;
 		}
 	};
 
-	if (!processDir.empty() && tryCreateLogger(processDir + "HydraHook.log")) { /* ok */ }
-	else if (!dllDir.empty() && tryCreateLogger(dllDir + "HydraHook.log")) { /* ok */ }
+	if (!processDir.empty() && tryCreateLogger(processDir + "HydraHook.log"))
+	{
+		/* ok */
+	}
+	else if (!dllDir.empty() && tryCreateLogger(dllDir + "HydraHook.log"))
+	{
+		/* ok */
+	}
 	else { tryCreateLogger(tempPath); }
 
 	auto logger = spdlog::get("HYDRAHOOK");
-	if (!logger) {
-		try {
+	if (!logger)
+	{
+		try
+		{
 			logger = spdlog::stdout_color_mt("HYDRAHOOK");
 		}
-		catch (const std::exception&) {
+		catch (const std::exception&)
+		{
 			free(engine);
 			return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED;
 		}
@@ -163,7 +179,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	logger->flush_on(spdlog::level::info);
 #endif
 
-	if (EngineConfig->Logging.IsEnabled) {
+	if (EngineConfig->Logging.IsEnabled)
+	{
 		spdlog::set_default_logger(logger);
 	}
 
@@ -172,7 +189,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	//
 	// Install crash handler if enabled
 	//
-	if (EngineConfig->CrashHandler.IsEnabled) {
+	if (EngineConfig->CrashHandler.IsEnabled)
+	{
 		HydraHookCrashHandlerInstall(engine);
 		engine->CrashHandlerInstalled = TRUE;
 	}
@@ -188,9 +206,11 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	);
 
 	if (engine->EngineCancellationEvent == INVALID_HANDLE_VALUE
-		|| engine->EngineCancellationEvent == NULL) {
+		|| engine->EngineCancellationEvent == NULL)
+	{
 		logger->error("Failed to create the Engine Cancellation Event: {}", GetLastError());
-		if (engine->CrashHandlerInstalled) {
+		if (engine->CrashHandlerInstalled)
+		{
 			HydraHookCrashHandlerUninstall(engine);
 			engine->CrashHandlerInstalled = FALSE;
 		}
@@ -212,9 +232,11 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		nullptr
 	);
 
-	if (!engine->EngineThread) {
+	if (!engine->EngineThread)
+	{
 		logger->error("Could not create main thread, library unusable");
-		if (engine->CrashHandlerInstalled) {
+		if (engine->CrashHandlerInstalled)
+		{
 			HydraHookCrashHandlerUninstall(engine);
 			engine->CrashHandlerInstalled = FALSE;
 		}
@@ -237,7 +259,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 {
-	if (!g_EngineHostInstances.count(HostInstance)) {
+	if (!g_EngineHostInstances.count(HostInstance))
+	{
 		return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
 	}
 
@@ -246,7 +269,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 
 	logger->info("Freeing remaining resources");
 
-	if (engine->CrashHandlerInstalled) {
+	if (engine->CrashHandlerInstalled)
+	{
 		HydraHookCrashHandlerUninstall(engine);
 		engine->CrashHandlerInstalled = FALSE;
 	}
@@ -263,19 +287,23 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	return HYDRAHOOK_ERROR_NONE;
 }
 
-HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGINE Engine, PVOID* Context, size_t ContextSize)
+HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGINE Engine, PVOID* Context,
+                                                                size_t ContextSize)
 {
-	if (!Engine) {
+	if (!Engine)
+	{
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext) {
+	if (Engine->CustomContext)
+	{
 		HydraHookEngineFreeCustomContext(Engine);
 	}
 
 	Engine->CustomContext = malloc(ContextSize);
 
-	if (!Engine->CustomContext) {
+	if (!Engine->CustomContext)
+	{
 		return HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED;
 	}
 
@@ -287,11 +315,13 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGIN
 
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineFreeCustomContext(PHYDRAHOOK_ENGINE Engine)
 {
-	if (!Engine) {
+	if (!Engine)
+	{
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext) {
+	if (Engine->CustomContext)
+	{
 		free(Engine->CustomContext);
 	}
 
@@ -300,7 +330,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineFreeCustomContext(PHYDRAHOOK_ENGINE
 
 HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 {
-	if (!Engine) {
+	if (!Engine)
+	{
 		return nullptr;
 	}
 
@@ -309,9 +340,11 @@ HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 
 #ifndef HYDRAHOOK_NO_D3D9
 
-HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine, PHYDRAHOOK_D3D9_EVENT_CALLBACKS Callbacks)
+HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine,
+                                                        PHYDRAHOOK_D3D9_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine) {
+	if (Engine)
+	{
 		Engine->EventsD3D9 = *Callbacks;
 	}
 }
@@ -322,7 +355,8 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9Device == Device) {
+		if (engine->RenderPipeline.pD3D9Device == Device)
+		{
 			return engine;
 		}
 	}
@@ -336,7 +370,8 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIREC
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9ExDevice == Device) {
+		if (engine->RenderPipeline.pD3D9ExDevice == Device)
+		{
 			return engine;
 		}
 	}
@@ -348,9 +383,11 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIREC
 
 #ifndef HYDRAHOOK_NO_D3D10
 
-HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engine, PHYDRAHOOK_D3D10_EVENT_CALLBACKS Callbacks)
+HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engine,
+                                                         PHYDRAHOOK_D3D10_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine) {
+	if (Engine)
+	{
 		Engine->EventsD3D10 = *Callbacks;
 	}
 }
@@ -359,9 +396,11 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engin
 
 #ifndef HYDRAHOOK_NO_D3D11
 
-HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engine, PHYDRAHOOK_D3D11_EVENT_CALLBACKS Callbacks)
+HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engine,
+                                                         PHYDRAHOOK_D3D11_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine) {
+	if (Engine)
+	{
 		Engine->EventsD3D11 = *Callbacks;
 	}
 }
@@ -378,9 +417,11 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engin
  * @param Engine Pointer to the engine whose D3D12 callbacks will be updated. If `nullptr`, the function does nothing.
  * @param Callbacks Pointer to the callback table to copy from.
  */
-HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(PHYDRAHOOK_ENGINE Engine, PHYDRAHOOK_D3D12_EVENT_CALLBACKS Callbacks)
+HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(PHYDRAHOOK_ENGINE Engine,
+                                                         PHYDRAHOOK_D3D12_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine) {
+	if (Engine)
+	{
 		Engine->EventsD3D12 = *Callbacks;
 	}
 }
@@ -400,9 +441,11 @@ HYDRAHOOK_API ID3D12CommandQueue* HydraHookEngineGetD3D12CommandQueue(IDXGISwapC
 
 #ifndef HYDRAHOOK_NO_COREAUDIO
 
-HYDRAHOOK_API VOID HydraHookEngineSetARCEventCallbacks(PHYDRAHOOK_ENGINE Engine, PHYDRAHOOK_ARC_EVENT_CALLBACKS Callbacks)
+HYDRAHOOK_API VOID HydraHookEngineSetARCEventCallbacks(PHYDRAHOOK_ENGINE Engine,
+                                                       PHYDRAHOOK_ARC_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine) {
+	if (Engine)
+	{
 		Engine->EventsARC = *Callbacks;
 	}
 }
@@ -423,11 +466,13 @@ static std::shared_ptr<spdlog::logger> GetHostLogger()
 	static std::shared_ptr<spdlog::logger> logger;
 
 	std::lock_guard<std::mutex> lock(mtx);
-	if (logger) {
+	if (logger)
+	{
 		return logger;
 	}
 	auto base = spdlog::get("HYDRAHOOK");
-	if (base) {
+	if (base)
+	{
 		logger = base->clone("host");
 		return logger;
 	}
@@ -448,7 +493,8 @@ static std::shared_ptr<spdlog::logger> GetHostLogger()
 static void HydraHookEngineLogImpl(spdlog::level::level_enum level, LPCSTR Format, va_list args)
 {
 	auto logger = GetHostLogger();
-	if (!logger || !logger->should_log(level)) {
+	if (!logger || !logger->should_log(level))
+	{
 		return;
 	}
 	char buf[256];
