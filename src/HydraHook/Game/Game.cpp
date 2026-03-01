@@ -182,10 +182,6 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->error("Unexpected return value, terminating");
 		break;
 	}
-
-	// decrease ref-count we incremented on engine initialization
-	if (engine->HostModule)
-		FreeLibrary(engine->HostModule);
 }
 
 // NOTE: DirectInput hooking is technically implemented but not really useful

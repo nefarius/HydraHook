@@ -105,17 +105,6 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
 	}
 
-	//
-	// Increase host DLL reference count
-	// 
-	HMODULE hMod;
-	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-	                       reinterpret_cast<LPCTSTR>(HostInstance),
-	                       &hMod))
-	{
-		return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED;
-	}
-
 	const auto engine = static_cast<PHYDRAHOOK_ENGINE>(malloc(sizeof(HYDRAHOOK_ENGINE)));
 
 	if (!engine)
@@ -128,7 +117,6 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	// 
 	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
-	engine->HostModule = hMod;
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));
 
 	//
