@@ -799,6 +799,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
             auto vtable = d3d11->vtable();
             const size_t d3d11PresentAddress = vtable[DXGIHooking::Present];
 
+            if (dxgiPresent1Address == 0 && vtable.size() > static_cast<size_t>(DXGIHooking::DXGI1::DXGISwapChain1VTbl::Present1))
+                dxgiPresent1Address = vtable[DXGIHooking::DXGI1::Present1];
+            if (dxgiResizeBuffers1Address == 0 && vtable.size() > static_cast<size_t>(DXGIHooking::DXGI3::ResizeBuffers1))
+                dxgiResizeBuffers1Address = vtable[DXGIHooking::DXGI3::ResizeBuffers1];
+
             // D3D10 and D3D11 share the same DXGI swap chain implementation. Applying both would
             // create a duplicate hook chain; the D3D10 hook already handles both via device detection.
             if (dxgiPresentAddress != 0 && d3d11PresentAddress == dxgiPresentAddress)
