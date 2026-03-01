@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include "Direct3D10.h"
 #include <vector>
+#include <dxgi1_4.h>
 #include "DXGI.h"
 #include "Exceptions.hpp"
 
@@ -137,6 +138,13 @@ Direct3D10Hooking::Direct3D10::Direct3D10() :
 
 std::vector<size_t> Direct3D10Hooking::Direct3D10::vtable() const
 {
+	IDXGISwapChain3* pSC3 = nullptr;
+	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&pSC3))))
+	{
+		pSC3->Release();
+		return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
+		                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChain3VTableElements);
+	}
 	return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
 	                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChainVTableElements);
 }

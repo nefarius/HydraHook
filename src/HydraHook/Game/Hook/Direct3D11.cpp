@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "Direct3D11.h"
+#include <dxgi1_4.h>
 #include "DXGI.h"
 #include "Exceptions.hpp"
 
@@ -115,6 +116,13 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 
 std::vector<size_t> Direct3D11Hooking::Direct3D11::vtable() const
 {
+	IDXGISwapChain3* pSC3 = nullptr;
+	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&pSC3))))
+	{
+		pSC3->Release();
+		return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
+		                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChain3VTableElements);
+	}
 	return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
 	                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChainVTableElements);
 }
