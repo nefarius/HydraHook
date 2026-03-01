@@ -36,12 +36,15 @@ SOFTWARE.
 
 #pragma once
 
+#include <atomic>
+
 /**
  * @brief Internal engine instance structure (opaque in public API).
  */
 typedef struct _HYDRAHOOK_ENGINE
 {
     HMODULE HostInstance;                    /**< Host DLL module handle. */
+    HMODULE DllModule;
     HYDRAHOOK_D3D_VERSION GameVersion;       /**< Detected render API version. */
     HYDRAHOOK_ENGINE_CONFIG EngineConfig;   /**< Configuration at creation. */
     HYDRAHOOK_D3D9_EVENT_CALLBACKS EventsD3D9;   /**< D3D9 callbacks. */
@@ -53,6 +56,7 @@ typedef struct _HYDRAHOOK_ENGINE
     HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
     PVOID CustomContext;                     /**< User-allocated context. */
     BOOL CrashHandlerInstalled;              /**< TRUE if this instance enabled the crash handler. */
+    std::atomic<bool> ShutdownCleanupDone;   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
 
     union
     {
@@ -68,6 +72,74 @@ typedef struct _HYDRAHOOK_ENGINE
 
 } HYDRAHOOK_ENGINE;
 
+/**
+ * @brief Lock-free tracker for in-flight hook lambda invocations.
+ *
+ * Allows the engine thread to wait for all render-thread callbacks to
+ * complete before unloading the DLL.  The hot path is two atomic
+ * increments/decrements (lock xadd on x86-64) and one flag load -- no
+ * mutex, no kernel transition.
+ */
+struct HookActivityTracker
+{
+    static inline std::atomic<int32_t> s_active{0};
+    static inline std::atomic<bool> s_shutting_down{false};
+
+    /**
+     * @brief RAII guard placed at the top of every hook lambda.
+     *
+     * Increments the in-flight count on construction, decrements on
+     * destruction.  The @c invoke flag is captured once so that pre-
+     * and post-callbacks are always symmetric (both run or neither).
+     */
+    struct Guard
+    {
+        bool invoke;
+
+        Guard() noexcept
+        {
+            s_active.fetch_add(1, std::memory_order_seq_cst);
+            invoke = !s_shutting_down.load(std::memory_order_seq_cst);
+        }
+
+        ~Guard() noexcept
+        {
+            s_active.fetch_sub(1, std::memory_order_seq_cst);
+        }
+
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+    };
+
+    /** @brief Sets the shutdown flag so new Guard instances skip callbacks. */
+    static void shutdown() noexcept
+    {
+        s_shutting_down.store(true, std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief Spin-waits until every in-flight lambda has returned.
+     *
+     * Only called once at shutdown, after all hooks have been removed
+     * (so no new entries are possible).  Yields the time-slice on each
+     * iteration to avoid burning a core.
+     *
+     * @param timeout_ms Maximum time to wait.
+     * @return true if drained, false on timeout.
+     */
+    static bool drain(DWORD timeout_ms = 5000) noexcept
+    {
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        while (s_active.load(std::memory_order_seq_cst) > 0)
+        {
+            if (GetTickCount64() >= deadline)
+                return false;
+            SwitchToThread();
+        }
+        return true;
+    }
+};
+
 /** @brief Invokes EvtHydraHookGameHooked if non-NULL. */
 #define INVOKE_HYDRAHOOK_GAME_HOOKED(_engine_, _version_)    \
                                     ((_engine_)->EngineConfig.EvtHydraHookGameHooked ? \
@@ -75,31 +147,36 @@ typedef struct _HYDRAHOOK_ENGINE
                                     (void)0)
 
 /** @brief Invokes D3D9 callback if registered. */
-#define INVOKE_D3D9_CALLBACK(_engine_, _callback_, ...)     \
-                            ((_engine_)->EventsD3D9._callback_ ? \
-                            (_engine_)->EventsD3D9._callback_(##__VA_ARGS__) : \
-                            (void)0)
+#define INVOKE_D3D9_CALLBACK(_engine_, _callback_, ...)              \
+    do {                                                             \
+        const auto _pfn_ = (_engine_)->EventsD3D9._callback_;       \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
+    } while(0)
 
 /** @brief Invokes D3D10 callback if registered. */
-#define INVOKE_D3D10_CALLBACK(_engine_, _callback_, ...)     \
-                             ((_engine_)->EventsD3D10._callback_ ? \
-                             (_engine_)->EventsD3D10._callback_(##__VA_ARGS__) : \
-                             (void)0)
+#define INVOKE_D3D10_CALLBACK(_engine_, _callback_, ...)             \
+    do {                                                             \
+        const auto _pfn_ = (_engine_)->EventsD3D10._callback_;      \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
+    } while(0)
 
 /** @brief Invokes D3D11 callback if registered. */
-#define INVOKE_D3D11_CALLBACK(_engine_, _callback_, ...)     \
-                             ((_engine_)->EventsD3D11._callback_ ? \
-                             (_engine_)->EventsD3D11._callback_(##__VA_ARGS__) : \
-                             (void)0)
+#define INVOKE_D3D11_CALLBACK(_engine_, _callback_, ...)             \
+    do {                                                             \
+        const auto _pfn_ = (_engine_)->EventsD3D11._callback_;      \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
+    } while(0)
 
 /** @brief Invokes D3D12 callback if registered. */
-#define INVOKE_D3D12_CALLBACK(_engine_, _callback_, ...)     \
-                             ((_engine_)->EventsD3D12._callback_ ? \
-                             (_engine_)->EventsD3D12._callback_(##__VA_ARGS__) : \
-                             (void)0)
+#define INVOKE_D3D12_CALLBACK(_engine_, _callback_, ...)             \
+    do {                                                             \
+        const auto _pfn_ = (_engine_)->EventsD3D12._callback_;      \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
+    } while(0)
 
 /** @brief Invokes Core Audio callback if registered. */
-#define INVOKE_ARC_CALLBACK(_engine_, _callback_, ...)     \
-                             ((_engine_)->EventsARC._callback_ ? \
-                             (_engine_)->EventsARC._callback_(##__VA_ARGS__) : \
-                             (void)0)
+#define INVOKE_ARC_CALLBACK(_engine_, _callback_, ...)               \
+    do {                                                             \
+        const auto _pfn_ = (_engine_)->EventsARC._callback_;        \
+        if (_pfn_) _pfn_(##__VA_ARGS__);                             \
+    } while(0)

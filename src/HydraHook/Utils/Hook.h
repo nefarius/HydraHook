@@ -286,6 +286,42 @@ public:
         transaction_commit();
     }
 
+    /**
+     * @brief Removes hook if applied. Never throws; safe to call under loader lock.
+     * @return true if successfully removed or hook was not applied; false on error.
+     */
+    bool remove_nothrow() noexcept
+    {
+        if (!is_applied_)
+            return true;
+
+        if (DetourTransactionBegin() != NO_ERROR)
+            return false;
+
+        if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR)
+        {
+            DetourTransactionAbort();
+            return false;
+        }
+
+        const auto result = DetourDetach(reinterpret_cast<void **>(&orig_), reinterpret_cast<void *>(detour_));
+
+        if (result != NO_ERROR)
+        {
+            DetourTransactionAbort();
+            return false;
+        }
+
+        if (DetourTransactionCommit() != NO_ERROR)
+        {
+            DetourTransactionAbort();
+            return false;
+        }
+
+        is_applied_ = false;
+        return true;
+    }
+
     /** @brief Calls the original (unhooked) function. */
     retn call_orig(args ... p)
     {

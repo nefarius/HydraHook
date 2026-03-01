@@ -53,6 +53,7 @@ SOFTWARE.
 #include "Engine.h"
 #include "CrashHandler.h"
 #include "Game/Game.h"
+#include "Game/Shutdown.h"
 #include "Utils/Global.h"
 #include "LdrLock.h"
 
@@ -87,7 +88,7 @@ static std::map<HMODULE, PHYDRAHOOK_ENGINE> g_EngineHostInstances;
  * @param Engine Optional out parameter that receives the allocated engine handle on success.
  * @return HYDRAHOOK_ERROR_NONE on success.
  * @return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED if an engine is already created for HostInstance.
- * @return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED if the host DLL module handle could not be obtained.
+ * @return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED if the host DLL module handle could not be obtained.
  * @return HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED if engine memory allocation failed.
  * @return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED if a suitable logger could not be created or obtained.
  * @return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED if the engine cancellation event could not be created.
@@ -104,15 +105,12 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
 	}
 
-	//
-	// Increase host DLL reference count
-	// 
-	HMODULE hmod;
-	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-	                       reinterpret_cast<LPCTSTR>(HostInstance),
-	                       &hmod))
+	HMODULE hMod;
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCTSTR>(HostInstance),
+		&hMod))
 	{
-		return HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED;
+		return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED;
 	}
 
 	const auto engine = static_cast<PHYDRAHOOK_ENGINE>(malloc(sizeof(HYDRAHOOK_ENGINE)));
@@ -127,7 +125,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	// 
 	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
-	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));
+	engine->DllModule = hMod;
+	engine->ShutdownCleanupDone.store(false);
+	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
 
 	//
 	// Set up logging: try process directory first, then DLL directory, then %TEMP%
@@ -267,6 +267,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 
 	const auto engine = g_EngineHostInstances[HostInstance];
 	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
+
+	PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
 
 	logger->info("Freeing remaining resources");
 

@@ -67,10 +67,12 @@ extern "C" {
         HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED = 0xE0000003,   /**< Failed to allocate engine structure. */
         HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED = 0xE0000004,  /**< Engine already created for this HMODULE. */
         HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE = 0xE0000005,    /**< HMODULE not associated with an engine. */
-        HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED = 0xE0000006, /**< GetModuleHandleEx failed. */
+        HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED = 0xE0000006,  /**< GetModuleHandleEx failed. */
+        HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED = HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED, /**< @deprecated Use HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED. */
         HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED = 0xE0000007, /**< Custom context allocation failed. */
         HYDRAHOOK_ERROR_CREATE_EVENT_FAILED = 0xE0000008,       /**< CreateEvent failed for cancellation. */
         HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED = 0xE0000009,      /**< Failed to create fallback logger. */
+        HYDRAHOOK_ERROR_NO_LOADER_LOCK = 0xE000000A,            /**< Initialization attempted outside of loader lock. */
 
     } HYDRAHOOK_ERROR;
 
@@ -271,7 +273,7 @@ extern "C" {
      * @param[out] Engine Optional; receives the engine handle on success.
      * @retval HYDRAHOOK_ERROR_NONE Success.
      * @retval HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED Engine already exists for this HMODULE.
-     * @retval HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED GetModuleHandleEx failed.
+     * @retval HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED GetModuleHandleEx failed (deprecated alias: HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED).
      * @retval HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED malloc failed.
      * @retval HYDRAHOOK_ERROR_CREATE_EVENT_FAILED CreateEvent failed.
      * @retval HYDRAHOOK_ERROR_CREATE_THREAD_FAILED CreateThread failed.

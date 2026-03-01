@@ -27,7 +27,7 @@
 #include "Engine.h"
 #include "CrashHandler.h"
 #include "Exceptions.hpp"
-#include "Global.h"
+#include "Utils/Global.h"
 
 #include <spdlog/spdlog.h>
 
