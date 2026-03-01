@@ -572,7 +572,7 @@ void EvtHydraHookD3D11PostResizeBuffers(
 
 #ifdef _WIN64
 
-static constexpr UINT D3D12_NUM_BACK_BUFFERS = 2;
+static constexpr UINT D3D12_NUM_BACK_BUFFERS = 3;
 static constexpr UINT D3D12_NUM_FRAMES_IN_FLIGHT = 2;
 static constexpr UINT D3D12_SRV_HEAP_SIZE = 64;
 

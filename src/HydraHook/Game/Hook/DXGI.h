@@ -112,11 +112,37 @@ namespace DXGIHooking
         };
     }
 
+    namespace DXGI2
+    {
+        /** @brief IDXGISwapChain2 vtable indices (extends IDXGISwapChain1). */
+        enum DXGISwapChain2VTbl : short
+        {
+            SetSourceSize = 29,
+            GetSourceSize = 30,
+            SetMaximumFrameLatency = 31,
+            GetMaximumFrameLatency = 32,
+            GetFrameLatencyWaitableObject = 33
+        };
+    }
+
+    namespace DXGI3
+    {
+        /** @brief IDXGISwapChain3 vtable indices (extends IDXGISwapChain2). */
+        enum DXGISwapChain3VTbl : short
+        {
+            GetCurrentBackBufferIndex = 34,
+            CheckColorSpaceSupport = 35,
+            SetColorSpace1 = 36,
+            ResizeBuffers1 = 37
+        };
+    }
+
     /** @brief DXGI vtable size constants. */
     class DXGI
     {
     public:
-        static const int SwapChainVTableElements = 18;   /**< IDXGISwapChain method count. */
+        static const int SwapChainVTableElements = 18;    /**< IDXGISwapChain method count. */
         static const int SwapChain1VTableElements = 29;   /**< IDXGISwapChain1 method count. */
+        static const int SwapChain3VTableElements = 38;   /**< IDXGISwapChain3 method count. */
     };
 }

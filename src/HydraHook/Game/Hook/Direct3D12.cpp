@@ -126,6 +126,13 @@ Direct3D12Hooking::Direct3D12::Direct3D12() :
 
 std::vector<size_t> Direct3D12Hooking::Direct3D12::vtable() const
 {
+	IDXGISwapChain3* pSC3 = nullptr;
+	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&pSC3))))
+	{
+		pSC3->Release();
+		return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
+		                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChain3VTableElements);
+	}
 	return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
 	                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChainVTableElements);
 }
