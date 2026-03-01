@@ -126,6 +126,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
 	engine->DllModule = hMod;
+	engine->ShutdownCleanupDone.store(false);
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
 
 	//
@@ -262,14 +263,6 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (!g_EngineHostInstances.count(HostInstance))
 	{
 		return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
-	}
-
-	//
-	// This is expected to be called within the context of DllMain
-	//
-	if (!HydraHook::Core::Util::IsLoaderLockHeld())
-	{
-		return HYDRAHOOK_ERROR_NO_LOADER_LOCK;
 	}
 
 	const auto engine = g_EngineHostInstances[HostInstance];

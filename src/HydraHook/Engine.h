@@ -36,6 +36,8 @@ SOFTWARE.
 
 #pragma once
 
+#include <atomic>
+
 /**
  * @brief Internal engine instance structure (opaque in public API).
  */
@@ -54,6 +56,7 @@ typedef struct _HYDRAHOOK_ENGINE
     HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
     PVOID CustomContext;                     /**< User-allocated context. */
     BOOL CrashHandlerInstalled;              /**< TRUE if this instance enabled the crash handler. */
+    std::atomic<bool> ShutdownCleanupDone;   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
 
     union
     {

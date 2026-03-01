@@ -110,6 +110,9 @@ static Hook<CallConvention::stdcall_t, BOOL, HMODULE> g_freeLibraryHook;
 
 void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 {
+	if (engine->ShutdownCleanupDone.exchange(true))
+		return;
+
 	const char* logChannel = "shutdown";
 	const char* logMessage = "Performing pre-DLL-detach clean-up tasks";
 	switch (origin)
@@ -135,12 +138,19 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 	logger->info(logMessage);
 
 	if (origin == ShutdownOrigin::ExitProcessHook)
+	{
 		g_postQuitMessageHook.remove();
+		g_freeLibraryHook.remove();
+	}
 	else if (origin == ShutdownOrigin::PostQuitMessageHook)
+	{
 		g_exitProcessHook.remove();
+		g_freeLibraryHook.remove();
+	}
 	else if (origin == ShutdownOrigin::FreeLibraryHook)
 	{
-		// nothing to do for now
+		g_postQuitMessageHook.remove();
+		g_exitProcessHook.remove();
 	}
 	else if (origin == ShutdownOrigin::DllMainProcessDetach)
 	{
