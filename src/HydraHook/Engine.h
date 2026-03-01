@@ -42,6 +42,7 @@ SOFTWARE.
 typedef struct _HYDRAHOOK_ENGINE
 {
     HMODULE HostInstance;                    /**< Host DLL module handle. */
+    HMODULE DllModule;
     HYDRAHOOK_D3D_VERSION GameVersion;       /**< Detected render API version. */
     HYDRAHOOK_ENGINE_CONFIG EngineConfig;   /**< Configuration at creation. */
     HYDRAHOOK_D3D9_EVENT_CALLBACKS EventsD3D9;   /**< D3D9 callbacks. */

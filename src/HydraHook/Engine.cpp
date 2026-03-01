@@ -105,6 +105,14 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
 	}
 
+	HMODULE hMod;
+	if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCTSTR>(HostInstance),
+		&hMod))
+	{
+		return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED;
+	}
+
 	const auto engine = static_cast<PHYDRAHOOK_ENGINE>(malloc(sizeof(HYDRAHOOK_ENGINE)));
 
 	if (!engine)
@@ -117,7 +125,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	// 
 	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
-	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));
+	engine->DllModule = hMod;
+	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
 
 	//
 	// Set up logging: try process directory first, then DLL directory, then %TEMP%

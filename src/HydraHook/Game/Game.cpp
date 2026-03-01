@@ -106,6 +106,7 @@ static void D3D12_ReleaseQueueMaps()
 //
 static Hook<CallConvention::stdcall_t, VOID, UINT> g_exitProcessHook;
 static Hook<CallConvention::stdcall_t, void, int> g_postQuitMessageHook;
+static Hook<CallConvention::stdcall_t, BOOL, HMODULE> g_freeLibraryHook;
 
 void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 {
@@ -336,6 +337,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			g_postQuitMessageHook.call_orig(nExitCode);
 		});
 
+	g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
+		{
+			if (hLibModule == engine->DllModule)
+			{
+				PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
+			}
+			return g_freeLibraryHook.call_orig(hLibModule);
+		});
 
 #pragma region D3D9
 

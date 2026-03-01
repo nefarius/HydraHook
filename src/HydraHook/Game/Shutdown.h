@@ -20,6 +20,7 @@ enum class ShutdownOrigin
 {
 	ExitProcessHook,
 	PostQuitMessageHook,
+	FreeLibraryHook,
 	DllMainProcessDetach
 };
 

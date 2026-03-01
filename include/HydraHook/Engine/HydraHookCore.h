@@ -67,7 +67,7 @@ extern "C" {
         HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED = 0xE0000003,   /**< Failed to allocate engine structure. */
         HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED = 0xE0000004,  /**< Engine already created for this HMODULE. */
         HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE = 0xE0000005,    /**< HMODULE not associated with an engine. */
-        HYDRAHOOK_ERROR_REFERENCE_INCREMENT_FAILED = 0xE0000006, /**< GetModuleHandleEx failed. */
+        HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED = 0xE0000006,  /**< GetModuleHandleEx failed. */
         HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED = 0xE0000007, /**< Custom context allocation failed. */
         HYDRAHOOK_ERROR_CREATE_EVENT_FAILED = 0xE0000008,       /**< CreateEvent failed for cancellation. */
         HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED = 0xE0000009,      /**< Failed to create fallback logger. */
