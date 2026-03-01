@@ -172,13 +172,11 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->info("Thread shutdown complete");
 		break;
 	case WAIT_TIMEOUT:
-//#ifndef _DEBUG
 		if (origin != ShutdownOrigin::DllMainProcessDetach)
 		{
 			TerminateThread(engine->EngineThread, 0);
 			logger->error("Thread hasn't finished clean-up within expected time, terminating");
 		}
-//#endif
 		break;
 	case WAIT_FAILED:
 		logger->error("Unknown error, host process might crash");
