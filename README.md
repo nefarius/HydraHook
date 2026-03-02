@@ -10,13 +10,21 @@ API-Hooking and rendering framework for DirectX-based games.
 
 ## About
 
-`HydraHook` consists of a self-contained library (DLL) which exposes a minimalistic API for rendering custom content in foreign processes eliminating the need for in-depth knowledge about Direct3D and API-hooking. The most common use-case might be drawing custom overlays on top of your games. The framework takes care about pesky tasks like detecting the DirectX version the game was built for and supports runtime-hooking (no special launcher application required).
+`HydraHook` consists of a self-contained library (DLL) which exposes a minimalistic API for rendering custom content in foreign processes eliminating the need for in-depth knowledge about Direct3D and API-hooking. The most common use-case might be drawing custom overlays on top of your games. The framework takes care about pesky tasks like detecting the DirectX version the game was built for.
 
 > [!CAUTION]
 > Use caution when injecting HydraHook into any game protected by anti-cheat software. API hooking and DLL injection are commonly detected by anti-cheat systems and may result in permanent bans from online services. Use only with games you own and in environments where such use is permitted.
 
 > [!NOTE]
 > The authors of this project do not condone the use of HydraHook in cheating software. The project's motivation has been curiosity and education entirely.
+
+## Features
+
+- **Runtime injection and ejection** — No launcher required. Inject into any running DirectX process and eject via `FreeLibrary` when done. Supports mid-process injection (e.g. D3D12 games already running). Graceful shutdown via `ExitProcess` / `PostQuitMessage` / `FreeLibrary` hooks avoids loader-lock and unload races.
+
+- **Performance-focused** — Lock-free hot path for hook callbacks (atomic counters only; no mutex, no kernel transition). Shutdown uses loader-lock-safe `remove_nothrow` to avoid deadlocks during process exit.
+
+- **No external dependencies at runtime** — Everything needed is statically linked in. Just drop the DLL into the target process; no redistributables or runtime packages required.
 
 ## Supported DirectX versions
 
