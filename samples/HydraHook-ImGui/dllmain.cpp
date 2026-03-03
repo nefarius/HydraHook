@@ -141,7 +141,7 @@ void EvtHydraHookGameHooked(
  * \brief   Gets called when all core engine hooks have been released. At this stage it is save
  *          to remove our own additional hooks and shut down the hooking sub-system as well.
  *
- * \author  Benjamin "Nefarius" Hï¿½glinger
+ * \author  Benjamin "Nefarius" Höglinger
  * \date    16.06.2018
  */
 void EvtHydraHookGameUnhooked()
