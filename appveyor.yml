@@ -1,6 +1,8 @@
 version: 4.2.{build}.0
 build_cloud: WIN-LKR467JS4GL
 image: Windows
+environment:
+  VCPKG_CACHE_PATH: C:\vcpkg-cache
 skip_commits:
   files:
     - '**/*.md'

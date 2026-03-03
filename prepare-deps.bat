@@ -26,6 +26,11 @@ if not exist "vcpkg\vcpkg.exe" (
     )
 )
 
+REM Use persistent binary cache on CI (set VCPKG_CACHE_PATH on server or in appveyor.yml)
+if defined VCPKG_CACHE_PATH (
+    set "VCPKG_BINARY_SOURCES=clear;files,%VCPKG_CACHE_PATH%,readwrite"
+)
+
 REM vcpkg manifest mode keeps only one triplet per build; install for requested platform(s)
 if /i "%PLATFORM%"=="Win32" set "PLATFORM=x86"
 if /i "%PLATFORM%"=="x86" (
