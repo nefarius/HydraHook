@@ -263,6 +263,46 @@ extern "C" {
     }
 
     /**
+     * @brief Defines a compatible DllMain that bootstraps the HydraHook engine.
+     *
+     * Use this macro in exactly one translation unit of your hosting DLL.
+     * Requires Windows.h (or equivalent) to be included before use.
+     *
+     * @param config_init Block of statements that configure the engine config.
+     *                    The config variable is named `cfg` (HYDRAHOOK_ENGINE_CONFIG).
+     *                    Example:
+     *                    @code
+     *                    HYDRAHOOK_DEFINE_DLLMAIN(
+     *                        cfg.Direct3D.HookDirect3D11 = TRUE;
+     *                        cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+     *                        cfg.CrashHandler.IsEnabled = TRUE;
+     *                    )
+     *                    @endcode
+     */
+#define HYDRAHOOK_DEFINE_DLLMAIN(config_init) \
+BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
+{ \
+    switch (dwReason) \
+    { \
+    case DLL_PROCESS_ATTACH: \
+        DisableThreadLibraryCalls((HMODULE)(hInstance)); \
+        { \
+            HYDRAHOOK_ENGINE_CONFIG cfg; \
+            HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg); \
+            config_init \
+            (void)HydraHookEngineCreate((HMODULE)(hInstance), &cfg, NULL); \
+        } \
+        break; \
+    case DLL_PROCESS_DETACH: \
+        (void)HydraHookEngineDestroy((HMODULE)(hInstance)); \
+        break; \
+    default: \
+        break; \
+    } \
+    return TRUE; \
+}
+
+    /**
      * @brief Creates and initializes the HydraHook engine.
      *
      * Spawns a worker thread that detects and hooks the host process's render pipeline

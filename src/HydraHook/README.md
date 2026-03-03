@@ -33,7 +33,7 @@ flowchart TB
     end
 
     subgraph Hooks [Hook Installation]
-        ExitHook[ExitProcess / PostQuitMessage]
+        ExitHook[ExitProcess / PostQuitMessage / FreeLibrary]
         D3DHooks[D3D9/10/11/12 Hooks]
         AudioHooks[Core Audio Hooks]
     end
@@ -56,7 +56,7 @@ flowchart TB
 
 1. Host process loads HydraHook DLL (typically via injection).
 2. `HydraHookEngineCreate` spawns a worker thread and registers the engine in `g_EngineHostInstances`.
-3. Worker thread installs `ExitProcess` and `PostQuitMessage` hooks for graceful shutdown, then D3D and Core Audio hooks based on config.
+3. Worker thread installs `ExitProcess`, `PostQuitMessage`, and `FreeLibrary` hooks for graceful shutdown, then D3D and Core Audio hooks based on config.
 4. When the host calls hooked APIs, Detours redirects to hook lambdas, which invoke host callbacks before/after the original function.
 
 ## Directory Layout
@@ -65,9 +65,12 @@ flowchart TB
 |------|---------|
 | `Engine.cpp` / `Engine.h` | Engine lifecycle, HMODULE mapping, logging, custom context, C API implementation |
 | `Game/Game.cpp` / `Game.h` | Main hook worker thread, hook installation, shutdown handling |
-| `Game/Hook/` | Per-API vtable probing and hook targets (Direct3D9, Direct3D9Ex, Direct3D10/11/12, DXGI, AudioRenderClient) |
+| `Game/Shutdown.h` | `ShutdownOrigin` enum, `PerformShutdownCleanup` for consolidated pre-exit handling |
+| `Game/Hook/` | Per-API vtable probing and hook targets (Direct3D9, Direct3D9Ex, Direct3D10/11/12, DXGI, AudioRenderClient, DirectInput8) |
 | `Utils/Hook.h` | Detours wrapper template (stdcall/cdecl, apply/remove/call_orig) |
-| `Global.h` | `expand_environment_variables`, `process_name` |
+| `Utils/Global.h` | `expand_environment_variables`, `process_name` |
+| `CrashHandler.cpp` / `CrashHandler.h` | Ref-counted crash handler (SetUnhandledExceptionFilter, terminate, invalid_parameter, purecall); per-thread SEH translator |
+| `LdrLock.cpp` / `LdrLock.h` | `IsLoaderLockHeld` utility for loader-lock detection |
 | `Exceptions.hpp` | DetourException, ModuleNotFoundException, ARCException, etc. |
 
 ## Core Components
@@ -78,6 +81,7 @@ flowchart TB
 
 - **`g_EngineHostInstances`**: Static map from `HMODULE` to `PHYDRAHOOK_ENGINE`. Allows multiple host DLLs to each have their own engine instance.
 - **Engine creation**: `GetModuleHandleEx` to increment host DLL refcount, `malloc` for engine struct, spdlog setup, `CreateEvent` for cancellation, `CreateThread` for `HydraHookMainThread`.
+- **Engine struct fields**: `CrashHandlerInstalled`, `ShutdownCleanupDone`, `FreeLibraryHookActive` track shutdown state. `HookActivityTracker` provides lock-free in-flight callback counting for safe DLL unload.
 - **Custom context**: `HydraHookEngineAllocCustomContext` allocates host-owned memory accessible from all event callbacks via `Extension->Context` or `HydraHookEngineGetCustomContext`.
 - **Per-API callback tables**: `EventsD3D9`, `EventsD3D10`, `EventsD3D11`, `EventsD3D12`, `EventsARC` hold function pointers for pre/post hooks.
 
@@ -86,7 +90,7 @@ flowchart TB
 **Files:** [Game/Game.cpp](Game/Game.cpp), [Game/Game.h](Game/Game.h)
 
 - **`HydraHookMainThread`**: Entry point for the worker thread. Receives `PHYDRAHOOK_ENGINE` as `LPVOID`.
-- **Flow**: Install ExitProcess/PostQuitMessage hooks -> Install D3D/Audio hooks (based on config) -> `WaitForSingleObject(EngineCancellationEvent)` -> Remove hooks -> `FreeLibraryAndExitThread`.
+- **Flow**: Install ExitProcess/PostQuitMessage/FreeLibrary hooks -> Install D3D/Audio hooks (based on config) -> `WaitForSingleObject(EngineCancellationEvent)` -> Remove hooks -> `FreeLibraryAndExitThread` (unless shutdown was initiated by FreeLibrary hook).
 - **D3D10/11**: Share the same `IDXGISwapChain` vtable. The D3D10 path probes first and detects D3D11 via `GetDevice(__uuidof(ID3D11Device))` when Present is first called.
 - **D3D12**: Two capture paths for `ID3D12CommandQueue`:
   - **Early injection**: Hook `IDXGIFactory::CreateSwapChain` and `CreateSwapChainForHwnd`; `pDevice` is the command queue.
@@ -109,6 +113,7 @@ flowchart TB
 - **D3D10/11/12**: Load DXGI/D3D DLLs, create factory/device/swap chain, extract vtable from the swap chain.
 - **DXGI**: [DXGI.h](Game/Hook/DXGI.h) defines vtable indices (e.g. `Present = 8`, `ResizeBuffers = 13`, `ResizeTarget = 14`).
 - **AudioRenderClient**: Uses MMDevice API (`IMMDeviceEnumerator` -> `IMMDevice` -> `IAudioClient` -> `IAudioRenderClient`) to obtain the vtable.
+- **DirectInput8** (optional, `HOOK_DINPUT8`): Creates DirectInput8 device via `DirectInput8Create`, enumerates joysticks, extracts vtable from `IDirectInputDevice8`. Hooks Acquire, GetDeviceData, GetDeviceState, GetDeviceInfo, GetObjectInfo. Experimental; not enabled by default.
 
 ## Hooking Flow (Per Frame)
 
@@ -124,11 +129,13 @@ For a typical `IDXGISwapChain::Present` hook:
 
 ## Shutdown Handling
 
-To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess` and `PostQuitMessage`:
+To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`, `PostQuitMessage`, and `FreeLibrary`:
 
-- **On trigger**: `EvtHydraHookGamePreExit` -> `SetEvent(EngineCancellationEvent)` -> `WaitForSingleObject(EngineThread, 3000)` -> `exitProcessHook.call_orig` (or `postQuitMessageHook.call_orig`).
-- **Main thread**: Wakes from `WaitForSingleObject`, invokes `EvtHydraHookGamePreUnhook`, removes all hooks, invokes `EvtHydraHookGamePostUnhook`, then `FreeLibraryAndExitThread(engine->HostInstance, 0)`.
-- The other hook (`PostQuitMessage` or `ExitProcess`) is removed to avoid double cleanup.
+- **Shutdown.h**: `PerformShutdownCleanup(engine, ShutdownOrigin)` consolidates pre-exit handling. `ShutdownOrigin` can be `ExitProcessHook`, `PostQuitMessageHook`, `FreeLibraryHook`, or `DllMainProcessDetach`.
+- **On trigger** (ExitProcess/PostQuitMessage): `EvtHydraHookGamePreExit` -> `SetEvent(EngineCancellationEvent)` -> `WaitForSingleObject(EngineThread, 3000)` -> `call_orig`.
+- **On FreeLibrary** (host-initiated unload): `PerformShutdownCleanup` runs, then `FreeLibraryAndExitThread` (engine thread does not call it again).
+- **On DllMainProcessDetach**: No user callbacks; uses `remove_nothrow` to avoid loader-lock deadlocks.
+- **Main thread**: Wakes from `WaitForSingleObject`, invokes `EvtHydraHookGamePreUnhook`, removes all hooks, invokes `EvtHydraHookGamePostUnhook`, then `FreeLibraryAndExitThread(engine->HostInstance, 0)` (unless `FreeLibraryHookActive`).
 
 ## Build Configuration
 
@@ -139,6 +146,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess` 
   - `HYDRAHOOK_NO_D3D11`
   - `HYDRAHOOK_NO_D3D12`
   - `HYDRAHOOK_NO_COREAUDIO`
+- **Optional define** to enable: `HOOK_DINPUT8` (DirectInput8 input hooking; experimental, disabled by default).
 - **Dependencies**: vcpkg (spdlog, detours).
 - **Public headers**: `include/HydraHook/Engine/` (HydraHookCore.h, HydraHookDirect3D9.h, HydraHookDirect3D10.h, HydraHookDirect3D11.h, HydraHookDirect3D12.h, HydraHookCoreAudio.h).
 
@@ -181,11 +189,14 @@ All are caught in `Game.cpp` with `logger->error` or `logger->warn`; the engine 
 | File | Description |
 |------|-------------|
 | [Engine.cpp](Engine.cpp) | C API implementation: create, destroy, context, callbacks, logging |
-| [Engine.h](Engine.h) | Internal engine struct, callback invocation macros |
+| [Engine.h](Engine.h) | Internal engine struct, callback invocation macros, HookActivityTracker |
 | [Game/Game.cpp](Game/Game.cpp) | Main thread: hook installation, shutdown, D3D/Audio wiring |
 | [Game/Game.h](Game/Game.h) | `HydraHookMainThread` declaration, `GetD3D12CommandQueueForSwapChain` |
+| [Game/Shutdown.h](Game/Shutdown.h) | `ShutdownOrigin`, `PerformShutdownCleanup` |
 | [Utils/Hook.h](Utils/Hook.h) | Detours `Hook<>` template |
-| [Global.h](Global.h) | Environment expansion, process name |
+| [Utils/Global.h](Utils/Global.h) | Environment expansion, process name |
+| [CrashHandler.cpp](CrashHandler.cpp), [CrashHandler.h](CrashHandler.h) | Crash handler install/uninstall, per-thread SEH |
+| [LdrLock.cpp](LdrLock.cpp), [LdrLock.h](LdrLock.h) | `IsLoaderLockHeld` loader-lock detection |
 | [Exceptions.hpp](Exceptions.hpp) | Exception types |
 | [Game/Hook/Direct3DBase.h](Game/Hook/Direct3DBase.h) | Abstract base for D3D vtable probers |
 | [Game/Hook/Direct3D9.h](Game/Hook/Direct3D9.h) | D3D9 vtable indices |
@@ -196,3 +207,4 @@ All are caught in `Game.cpp` with `logger->error` or `logger->warn`; the engine 
 | [Game/Hook/DXGI.h](Game/Hook/DXGI.h) | IDXGISwapChain vtable indices |
 | [Game/Hook/Window.h](Game/Hook/Window.h), [.cpp](Game/Hook/Window.cpp) | Temporary window for D3D device creation |
 | [Game/Hook/AudioRenderClientHook.h](Game/Hook/AudioRenderClientHook.h), [.cpp](Game/Hook/AudioRenderClientHook.cpp) | Core Audio prober |
+| [Game/Hook/DirectInput8.h](Game/Hook/DirectInput8.h), [.cpp](Game/Hook/DirectInput8.cpp) | DirectInput8 prober (optional, `HOOK_DINPUT8`) |
