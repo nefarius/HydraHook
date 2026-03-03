@@ -40,14 +40,16 @@ if "%~1"=="--copy-only" (
         echo [CI] Cache path must be absolute like C:\vcpkg-hydrahook-deps - skipping
         exit /b 0
     )
-    echo [CI] Using pre-installed vcpkg dependencies from !CACHE_SRC!
-    if not exist "vcpkg_installed" mkdir "vcpkg_installed"
-    xcopy /E /I /Y /Q "!CACHE_SRC!\*" "vcpkg_installed\"
+    echo [CI] Linking pre-installed vcpkg dependencies from !CACHE_SRC!
+    if exist "vcpkg_installed" rmdir "vcpkg_installed" 2>nul
+    mklink /J "vcpkg_installed" "!CACHE_SRC!" 2>nul
     if errorlevel 1 (
-        echo [CI] Failed to copy pre-installed deps
-        exit /b 1
+        echo [CI] Junction failed - falling back to copy
+        if not exist "vcpkg_installed" mkdir "vcpkg_installed"
+        xcopy /E /I /Y /Q "!CACHE_SRC!\*" "vcpkg_installed\"
+        if errorlevel 1 exit /b 1
     )
-    echo [CI] Copied successfully - skipping vcpkg install
+    echo [CI] Ready - skipping vcpkg install
     exit /b 0
 )
 
@@ -65,20 +67,21 @@ if exist "vcpkg_installed\%TRIPLET%\include\spdlog\spdlog.h" (
     exit /b 0
 )
 
-REM Try copy from cache first (in case --copy-only wasn't run or failed)
+REM Try link/copy from cache first (in case --copy-only wasn't run or failed)
 set "CACHE_SRC="
-if exist "%CACHE_ROOT%\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=%CACHE_ROOT%"
-if not defined CACHE_SRC if exist "%CACHE_ROOT%\vcpkg_installed\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=%CACHE_ROOT%\vcpkg_installed"
-if not defined CACHE_SRC if exist "%CACHE_ROOT%\x86-windows-static" set "CACHE_SRC=%CACHE_ROOT%"
-if defined CACHE_SRC (
-    echo [CI] Copying pre-installed deps from %CACHE_SRC%
-    if not exist "vcpkg_installed" mkdir "vcpkg_installed"
-    xcopy /E /I /Y /Q "%CACHE_SRC%\*" "vcpkg_installed\"
-    if not errorlevel 1 (
-        if exist "vcpkg_installed\%TRIPLET%\include\spdlog\spdlog.h" (
-            echo [CI] Copied successfully - skipping prepare-deps
-            exit /b 0
-        )
+if exist "!CACHE_ROOT!\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=!CACHE_ROOT!"
+if not defined CACHE_SRC if exist "!CACHE_ROOT!\vcpkg_installed\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=!CACHE_ROOT!\vcpkg_installed"
+if not defined CACHE_SRC if exist "!CACHE_ROOT!\x86-windows-static" set "CACHE_SRC=!CACHE_ROOT!"
+if defined CACHE_SRC if "!CACHE_SRC:~1,2!"==":\" (
+    if exist "vcpkg_installed" rmdir "vcpkg_installed" 2>nul
+    mklink /J "vcpkg_installed" "!CACHE_SRC!" 2>nul
+    if errorlevel 1 (
+        if not exist "vcpkg_installed" mkdir "vcpkg_installed"
+        xcopy /E /I /Y /Q "!CACHE_SRC!\*" "vcpkg_installed\"
+    )
+    if exist "vcpkg_installed\!TRIPLET!\include\spdlog\spdlog.h" (
+        echo [CI] Using pre-installed deps - skipping prepare-deps
+        exit /b 0
     )
 )
 
