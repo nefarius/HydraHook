@@ -28,13 +28,7 @@ install:
 # Source: https://gist.github.com/nefarius/b60a498b0229b5cf0e338b7a39460b80
 - ps: Setup-VS2022 $env:PLATFORM
 before_build:
-- cmd: |
-    if exist "C:\vcpkg-hydrahook-deps\x86-windows-static" (
-      echo Using pre-installed vcpkg dependencies...
-      xcopy /E /I /Y "C:\vcpkg-hydrahook-deps\*" "vcpkg_installed\"
-    ) else (
-      .\prepare-deps.bat %PLATFORM%
-    )
+- cmd: .\prepare-deps-ci.bat %PLATFORM%
 - cmd: dotnet tool install Nefarius.Tools.Vpatch --tool-path .\tools
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\src\HydraHook\HydraHook.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-ImGui\HydraHook-ImGui.rc" --resource.file-version --resource.product-version
