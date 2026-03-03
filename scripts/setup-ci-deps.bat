@@ -9,9 +9,8 @@ set "REPO_ROOT=%~dp0.."
 set "VCPKG_CACHE_PATH=C:\vcpkg-cache"
 
 cd /d "%REPO_ROOT%"
-call prepare-deps.bat x86
-if errorlevel 1 exit /b 1
-call prepare-deps.bat x64
+REM Install both triplets in one run (vcpkg manifest mode keeps only one triplet per run, so we must do both together)
+call prepare-deps.bat
 if errorlevel 1 exit /b 1
 
 echo Copying vcpkg_installed to %VCPKG_INSTALL_ROOT%...
