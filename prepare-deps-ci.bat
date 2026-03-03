@@ -5,36 +5,44 @@ REM
 REM Usage:
 REM   prepare-deps-ci.bat --copy-only     Copy from cache if exists (run in install phase)
 REM   prepare-deps-ci.bat Win32|x64       Ensure deps for platform (run in before_build)
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "CACHE_ROOT="
 if defined VCPKG_PREINSTALLED_DEPS (
-    set "CACHE_ROOT=%VCPKG_PREINSTALLED_DEPS%"
+    set "CACHE_ROOT=!VCPKG_PREINSTALLED_DEPS!"
 ) else (
     set "CACHE_ROOT=C:\vcpkg-hydrahook-deps"
 )
-REM Strip trailing backslash for consistent path joining
-if defined CACHE_ROOT if "%CACHE_ROOT:~-1%"=="\" set "CACHE_ROOT=%CACHE_ROOT:~0,-1%"
+REM Strip trailing backslash and require non-empty absolute path
+if defined CACHE_ROOT if "!CACHE_ROOT:~-1!"=="\" set "CACHE_ROOT=!CACHE_ROOT:~0,-1!"
+if not defined CACHE_ROOT set "CACHE_ROOT=C:\vcpkg-hydrahook-deps"
+if "!CACHE_ROOT!"=="" set "CACHE_ROOT=C:\vcpkg-hydrahook-deps"
 
 REM --copy-only: Just copy from cache if available (no prepare-deps)
 if "%~1"=="--copy-only" (
     set "CACHE_SRC="
-    if exist "%CACHE_ROOT%\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=%CACHE_ROOT%"
-    if not defined CACHE_SRC if exist "%CACHE_ROOT%\vcpkg_installed\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=%CACHE_ROOT%\vcpkg_installed"
-    if not defined CACHE_SRC if exist "%CACHE_ROOT%\x86-windows-static" set "CACHE_SRC=%CACHE_ROOT%"
+    if exist "!CACHE_ROOT!\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=!CACHE_ROOT!"
+    if not defined CACHE_SRC if exist "!CACHE_ROOT!\vcpkg_installed\x86-windows-static\include\spdlog\spdlog.h" set "CACHE_SRC=!CACHE_ROOT!\vcpkg_installed"
+    if not defined CACHE_SRC if exist "!CACHE_ROOT!\x86-windows-static" set "CACHE_SRC=!CACHE_ROOT!"
     if not defined CACHE_SRC (
-        echo [CI] Pre-installed deps not found at %CACHE_ROOT%
-        echo [CI] Checked: %CACHE_ROOT%\x86-windows-static\include\spdlog\spdlog.h
-        echo [CI] Checked: %CACHE_ROOT%\vcpkg_installed\x86-windows-static\include\spdlog\spdlog.h
-        echo [CI] Checked: %CACHE_ROOT%\x86-windows-static
-        if exist "%CACHE_ROOT%" dir "%CACHE_ROOT%" 2>nul
+        echo [CI] Pre-installed deps not found at !CACHE_ROOT!
         echo [CI] Will run prepare-deps in before_build
         exit /b 0
     )
-    echo [CI] Using pre-installed vcpkg dependencies from %CACHE_SRC%
+    REM Must be non-empty absolute path to avoid cyclic copy
+    if "!CACHE_SRC!"=="" (
+        echo [CI] Cache path empty - skipping copy
+        exit /b 0
+    )
+    REM Reject if path doesn't look like C:\... (avoids copying from . or relative path)
+    if "!CACHE_SRC:~1,2!" neq ":\" (
+        echo [CI] Cache path must be absolute like C:\vcpkg-hydrahook-deps - skipping
+        exit /b 0
+    )
+    echo [CI] Using pre-installed vcpkg dependencies from !CACHE_SRC!
     if not exist "vcpkg_installed" mkdir "vcpkg_installed"
-    xcopy /E /I /Y /Q "%CACHE_SRC%\*" "vcpkg_installed\"
+    xcopy /E /I /Y /Q "!CACHE_SRC!\*" "vcpkg_installed\"
     if errorlevel 1 (
         echo [CI] Failed to copy pre-installed deps
         exit /b 1

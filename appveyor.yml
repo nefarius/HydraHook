@@ -4,7 +4,7 @@ image: Windows
 environment:
   VCPKG_CACHE_PATH: C:\vcpkg-cache
   # Path to pre-installed vcpkg deps (run scripts\setup-ci-deps.bat on server via RDP)
-  VCPKG_PREINSTALLED_DEPS: C:\vcpkg-hydrahook-deps
+  VCPKG_PREINSTALLED_DEPS: "C:\\vcpkg-hydrahook-deps"
 skip_commits:
   files:
     - '**/*.md'
