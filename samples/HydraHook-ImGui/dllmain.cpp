@@ -51,65 +51,14 @@ t_WindowProc OriginalDefWindowProc = nullptr;
 t_WindowProc OriginalWindowProc = nullptr;
 PHYDRAHOOK_ENGINE engine = nullptr;
 
-/**
- * @brief DLL entry point that initializes or shuts down the HydraHook engine.
- *
- * Initialization (DLL_PROCESS_ATTACH) creates and configures the HydraHook engine
- * and registers the game-hook callback. Shutdown (DLL_PROCESS_DETACH) destroys
- * the engine and releases resources. Do not perform other work here to avoid
- * potential deadlocks (e.g., avoid heavy initialization or thread operations).
- *
- * @param hInstance Module instance handle provided by the OS.
- * @param dwReason  Reason code for the call (e.g., DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH).
- * @param         Unused parameter reserved by the loader.
- * @return TRUE on success, FALSE otherwise.
- */
-BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
-{
-	switch (dwReason)
-	{
-	case DLL_PROCESS_ATTACH:
-		//
-		// We don't need to get notified in thread attach- or detachments
-		//
-		DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-		{
-			HYDRAHOOK_ENGINE_CONFIG cfg;
-			HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-			cfg.Direct3D.HookDirect3D9 = TRUE;
-			cfg.Direct3D.HookDirect3D10 = TRUE;
-			cfg.Direct3D.HookDirect3D11 = TRUE;
-#ifdef _WIN64
-			cfg.Direct3D.HookDirect3D12 = TRUE;
-#endif
-
-			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-			cfg.CrashHandler.IsEnabled = TRUE;
-
-			//
-			// Bootstrap the engine. Allocates resources, establishes hooks etc.
-			//
-			(void)HydraHookEngineCreate(
-				static_cast<HMODULE>(hInstance),
-				&cfg,
-				NULL
-			);
-		}
-		break;
-	case DLL_PROCESS_DETACH:
-		//
-		// Tears down the engine. Graceful shutdown, frees resources etc.
-		//
-		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
-		break;
-	default:
-		break;
-	}
-
-	return TRUE;
-}
+HYDRAHOOK_DEFINE_DLLMAIN(
+	cfg.Direct3D.HookDirect3D9 = TRUE;
+	cfg.Direct3D.HookDirect3D10 = TRUE;
+	cfg.Direct3D.HookDirect3D11 = TRUE;
+	cfg.Direct3D.HookDirect3D12 = TRUE;
+	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+	cfg.CrashHandler.IsEnabled = TRUE;
+)
 
 /**
  * @brief Initializes ImGui and registers Direct3D event callbacks for the detected rendering version.
@@ -159,7 +108,7 @@ void EvtHydraHookGameHooked(
 	d3d11.EvtHydraHookD3D11PreResizeBuffers = EvtHydraHookD3D11PreResizeBuffers;
 	d3d11.EvtHydraHookD3D11PostResizeBuffers = EvtHydraHookD3D11PostResizeBuffers;
 
-#ifdef _WIN64
+#ifdef _WIN64 // vcpkg doesn't offer x86 builds for ImGui at the moment
 	HYDRAHOOK_D3D12_EVENT_CALLBACKS d3d12;
 	HYDRAHOOK_D3D12_EVENT_CALLBACKS_INIT(&d3d12);
 	d3d12.EvtHydraHookD3D12PrePresent = EvtHydraHookD3D12Present;
