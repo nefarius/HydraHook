@@ -27,25 +27,29 @@ if not exist "vcpkg\vcpkg.exe" (
 )
 
 REM Use persistent binary cache on CI (set VCPKG_CACHE_PATH on server or in appveyor.yml)
+set "VCPKG_EXTRA_OPTIONS="
 if defined VCPKG_CACHE_PATH (
     set "VCPKG_BINARY_SOURCES=clear;files,%VCPKG_CACHE_PATH%,readwrite"
+    REM Pin tool versions to stabilize ABI hash across runs (avoids cache misses)
+    set "VCPKG_EXTRA_OPTIONS=--x-abi-tools-use-exact-versions"
+    if not exist "%VCPKG_CACHE_PATH%" mkdir "%VCPKG_CACHE_PATH%"
 )
 
 REM vcpkg manifest mode keeps only one triplet per build; install for requested platform(s)
 if /i "%PLATFORM%"=="Win32" set "PLATFORM=x86"
 if /i "%PLATFORM%"=="x86" (
     echo Installing dependencies for x86-windows-static...
-    vcpkg\vcpkg.exe install --triplet x86-windows-static
+    vcpkg\vcpkg.exe install --triplet x86-windows-static %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 ) else if /i "%PLATFORM%"=="x64" (
     echo Installing dependencies for x64-windows-static...
-    vcpkg\vcpkg.exe install --triplet x64-windows-static
+    vcpkg\vcpkg.exe install --triplet x64-windows-static %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 ) else (
     echo Installing dependencies for x86-windows-static and x64-windows-static...
-    vcpkg\vcpkg.exe install --triplet x86-windows-static
+    vcpkg\vcpkg.exe install --triplet x86-windows-static %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
-    vcpkg\vcpkg.exe install --triplet x64-windows-static
+    vcpkg\vcpkg.exe install --triplet x64-windows-static %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 )
 
