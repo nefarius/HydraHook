@@ -66,45 +66,43 @@ PHYDRAHOOK_ENGINE engine = nullptr;
  */
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 {
-	//
-	// We don't need to get notified in thread attach- or detachments
-	// 
-	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-	HYDRAHOOK_ENGINE_CONFIG cfg;
-	HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-	cfg.Direct3D.HookDirect3D9 = TRUE;
-	cfg.Direct3D.HookDirect3D10 = TRUE;
-	cfg.Direct3D.HookDirect3D11 = TRUE;
-#ifdef _WIN64
-	cfg.Direct3D.HookDirect3D12 = TRUE;
-#endif
-
-	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-	cfg.CrashHandler.IsEnabled = TRUE;
-
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
-
 		//
-		// Bootstrap the engine. Allocates resources, establishes hooks etc.
-		// 
-		(void)HydraHookEngineCreate(
-			static_cast<HMODULE>(hInstance),
-			&cfg,
-			NULL
-		);
+		// We don't need to get notified in thread attach- or detachments
+		//
+		DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
 
+		{
+			HYDRAHOOK_ENGINE_CONFIG cfg;
+			HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
+
+			cfg.Direct3D.HookDirect3D9 = TRUE;
+			cfg.Direct3D.HookDirect3D10 = TRUE;
+			cfg.Direct3D.HookDirect3D11 = TRUE;
+#ifdef _WIN64
+			cfg.Direct3D.HookDirect3D12 = TRUE;
+#endif
+
+			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+			cfg.CrashHandler.IsEnabled = TRUE;
+
+			//
+			// Bootstrap the engine. Allocates resources, establishes hooks etc.
+			//
+			(void)HydraHookEngineCreate(
+				static_cast<HMODULE>(hInstance),
+				&cfg,
+				NULL
+			);
+		}
 		break;
 	case DLL_PROCESS_DETACH:
-
 		//
 		// Tears down the engine. Graceful shutdown, frees resources etc.
-		// 
+		//
 		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
-
 		break;
 	default:
 		break;

@@ -99,47 +99,45 @@ static std::wstring GetFontPath()
  */
 BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
 {
-	//
-	// We don't need to get notified in thread attach- or detachments
-	// 
-	DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-
-	g_hModule = static_cast<HMODULE>(hInstance);
-
-	HYDRAHOOK_ENGINE_CONFIG cfg;
-	HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-
-	// Only attempt to detect and hook D3D11
-	cfg.Direct3D.HookDirect3D11 = TRUE;
-	// Called once game as been hooked
-	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-	// Called after hooks have been removed
-	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGamePostUnhooked;
-	// Crash dump logic
-	cfg.CrashHandler.IsEnabled = TRUE;
-
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
-
 		//
-		// Bootstrap the engine. Allocates resources, establishes hooks etc.
-		// 
-		(void)HydraHookEngineCreate(
-			static_cast<HMODULE>(hInstance),
-			&cfg,
-			NULL
-		);
+		// We don't need to get notified in thread attach- or detachments
+		//
+		DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
 
+		g_hModule = static_cast<HMODULE>(hInstance);
+
+		{
+			HYDRAHOOK_ENGINE_CONFIG cfg;
+			HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
+
+			// Only attempt to detect and hook D3D11
+			cfg.Direct3D.HookDirect3D11 = TRUE;
+			// Called once game as been hooked
+			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+			// Called after hooks have been removed
+			cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGamePostUnhooked;
+			// Crash dump logic
+			cfg.CrashHandler.IsEnabled = TRUE;
+
+			//
+			// Bootstrap the engine. Allocates resources, establishes hooks etc.
+			//
+			(void)HydraHookEngineCreate(
+				static_cast<HMODULE>(hInstance),
+				&cfg,
+				NULL
+			);
+		}
 		break;
 	case DLL_PROCESS_DETACH:
-
 		//
 		// Tears down the engine. Graceful shutdown, frees resources etc.
-		// 
+		//
 		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
 		g_hModule = nullptr;
-
 		break;
 	default:
 		break;

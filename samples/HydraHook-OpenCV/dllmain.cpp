@@ -42,34 +42,10 @@ static void EvtHydraHookGamePreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 	Capture_Shutdown();
 }
 
-BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID)
-{
-	switch (dwReason)
-	{
-	case DLL_PROCESS_ATTACH:
-		DisableThreadLibraryCalls(static_cast<HMODULE>(hInstance));
-		{
-			HYDRAHOOK_ENGINE_CONFIG cfg;
-			HYDRAHOOK_ENGINE_CONFIG_INIT(&cfg);
-			cfg.Direct3D.HookDirect3D11 = TRUE;
-			cfg.Direct3D.HookDirect3D12 = TRUE;
-			cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
-			cfg.EvtHydraHookGamePreUnhook = EvtHydraHookGamePreUnhook;
-			cfg.CrashHandler.IsEnabled = TRUE;
-			(void)HydraHookEngineCreate(
-				static_cast<HMODULE>(hInstance),
-				&cfg,
-				NULL
-			);
-		}
-		break;
-	case DLL_PROCESS_DETACH:
-		Capture_Shutdown();
-		(void)HydraHookEngineDestroy(static_cast<HMODULE>(hInstance));
-		break;
-	default:
-		break;
-	}
-
-	return TRUE;
-}
+HYDRAHOOK_DEFINE_DLLMAIN(
+	cfg.Direct3D.HookDirect3D11 = TRUE;
+	cfg.Direct3D.HookDirect3D12 = TRUE;
+	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+	cfg.EvtHydraHookGamePreUnhook = EvtHydraHookGamePreUnhook;
+	cfg.CrashHandler.IsEnabled = TRUE;
+)
