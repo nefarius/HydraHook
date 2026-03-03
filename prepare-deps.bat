@@ -11,7 +11,7 @@ REM The first build from VS may fail with "unable to detect the active compiler"
 REM because vcpkg runs in a context where the compiler toolchain is not set up.
 REM Running this script once populates vcpkg_installed; subsequent VS builds work.
 
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 set "PLATFORM=%~1"
@@ -47,10 +47,18 @@ if /i "%PLATFORM%"=="x86" (
     if errorlevel 1 exit /b 1
 ) else (
     echo Installing dependencies for x86-windows-static and x64-windows-static...
-    vcpkg\vcpkg.exe install --triplet x86-windows-static %VCPKG_EXTRA_OPTIONS%
+    REM vcpkg manifest mode keeps only one triplet per install - use separate staging dirs then merge
+    set "SCRIPT_DIR=%~dp0"
+    set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
+    vcpkg\vcpkg.exe install --triplet x86-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed_x86_stage" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
-    vcpkg\vcpkg.exe install --triplet x64-windows-static %VCPKG_EXTRA_OPTIONS%
+    vcpkg\vcpkg.exe install --triplet x64-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed_x64_stage" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
+    if not exist "!SCRIPT_DIR!\vcpkg_installed" mkdir "!SCRIPT_DIR!\vcpkg_installed"
+    xcopy /E /I /Y /Q "!SCRIPT_DIR!\vcpkg_installed_x86_stage\*" "!SCRIPT_DIR!\vcpkg_installed\"
+    xcopy /E /I /Y /Q "!SCRIPT_DIR!\vcpkg_installed_x64_stage\*" "!SCRIPT_DIR!\vcpkg_installed\"
+    rmdir /S /Q "!SCRIPT_DIR!\vcpkg_installed_x86_stage" 2>nul
+    rmdir /S /Q "!SCRIPT_DIR!\vcpkg_installed_x64_stage" 2>nul
 )
 
 echo.

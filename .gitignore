@@ -18,6 +18,8 @@ mono_crash.*
 
 # vcpkg manifest mode install directory
 vcpkg_installed/
+vcpkg_installed_x86_stage/
+vcpkg_installed_x64_stage/
 
 # Build results
 [Dd]ebug/
