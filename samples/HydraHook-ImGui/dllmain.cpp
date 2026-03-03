@@ -49,7 +49,6 @@ SOFTWARE.
 
 t_WindowProc OriginalDefWindowProc = nullptr;
 t_WindowProc OriginalWindowProc = nullptr;
-PHYDRAHOOK_ENGINE engine = nullptr;
 
 HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D9 = TRUE;
@@ -57,6 +56,7 @@ HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D11 = TRUE;
 	cfg.Direct3D.HookDirect3D12 = TRUE;
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
+	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGameUnhooked;
 	cfg.CrashHandler.IsEnabled = TRUE;
 )
 
@@ -138,14 +138,18 @@ void EvtHydraHookGameHooked(
 /**
  * \fn  void EvtHydraHookGameUnhooked()
  *
- * \brief   Gets called when all core engine hooks have been released. At this stage it is save
+ * \brief   Gets called when all core engine hooks have been released. At this stage it is safe
  *          to remove our own additional hooks and shut down the hooking sub-system as well.
  *
  * \author  Benjamin "Nefarius" Höglinger
  * \date    16.06.2018
  */
-void EvtHydraHookGameUnhooked()
+void EvtHydraHookGameUnhooked(
+	PHYDRAHOOK_ENGINE EngineHandle)
 {
+	(void)EngineHandle;
+
+	// TODO: implement me!
 #ifdef WNDPROC_HOOK
 	auto& logger = Logger::get(__func__);
 
