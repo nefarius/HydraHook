@@ -5,6 +5,7 @@ REM Re-run when vcpkg.json or the vcpkg submodule changes.
 setlocal
 set "VCPKG_INSTALL_ROOT=C:\vcpkg-hydrahook-deps"
 set "REPO_ROOT=%~dp0.."
+set "VCPKG_CACHE_PATH=C:\vcpkg-cache"
 
 cd /d "%REPO_ROOT%"
 call prepare-deps.bat x86
