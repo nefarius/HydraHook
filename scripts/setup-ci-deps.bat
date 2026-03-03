@@ -4,6 +4,7 @@ REM Run from "Developer Command Prompt for VS 2022" on the build server.
 REM Re-run when vcpkg.json or the vcpkg submodule changes.
 setlocal
 set "VCPKG_INSTALL_ROOT=C:\vcpkg-hydrahook-deps"
+if defined VCPKG_PREINSTALLED_DEPS set "VCPKG_INSTALL_ROOT=%VCPKG_PREINSTALLED_DEPS%"
 set "REPO_ROOT=%~dp0.."
 set "VCPKG_CACHE_PATH=C:\vcpkg-cache"
 

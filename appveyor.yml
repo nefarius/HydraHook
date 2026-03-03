@@ -3,6 +3,8 @@ build_cloud: WIN-LKR467JS4GL
 image: Windows
 environment:
   VCPKG_CACHE_PATH: C:\vcpkg-cache
+  # Path to pre-installed vcpkg deps (run scripts\setup-ci-deps.bat on server via RDP)
+  VCPKG_PREINSTALLED_DEPS: C:\vcpkg-hydrahook-deps
 skip_commits:
   files:
     - '**/*.md'
@@ -24,6 +26,7 @@ configuration:
 - Release_LIB
 test: off
 install:
+- cmd: .\prepare-deps-ci.bat --copy-only
 - cmd: git submodule update --init --recursive
 # Source: https://gist.github.com/nefarius/b60a498b0229b5cf0e338b7a39460b80
 - ps: Setup-VS2022 $env:PLATFORM
