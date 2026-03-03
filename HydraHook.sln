@@ -20,6 +20,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution 
 		Directory.Build.props = Directory.Build.props
 		Directory.Build.targets = Directory.Build.targets
 		LICENSE = LICENSE
+		prepare-deps-ci.bat = prepare-deps-ci.bat
 		prepare-deps.bat = prepare-deps.bat
 		README.md = README.md
 		scripts\setup-ci-deps.bat = scripts\setup-ci-deps.bat
