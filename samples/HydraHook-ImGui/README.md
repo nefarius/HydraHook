@@ -11,7 +11,12 @@ Demonstrates how to render [Dear ImGui](https://github.com/ocornut/imgui) interf
 Build the project, then inject `HydraHook-ImGui.dll` into a target process using a DLL injector:
 
 ```powershell
-.\Injector -i -n hl2.exe HydraHook-ImGui.dll
+.\Injector -n hl2.exe -i HydraHook-ImGui.dll
 ```
 
 Replace `hl2.exe` with your target process name.
+
+## Limitations
+
+> [!NOTE]
+> Mouse, keyboard and gamepad support is currently not implemented.
