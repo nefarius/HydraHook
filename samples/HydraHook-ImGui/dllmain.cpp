@@ -953,6 +953,7 @@ void EvtHydraHookD3D12PostResizeBuffers(
  */
 void HookWindowProc(HWND hWnd)
 {
+	// TODO: fix me pls!
 #ifdef WNDPROC_HOOK
 
 	auto& logger = Logger::get(__func__);
