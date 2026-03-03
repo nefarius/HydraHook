@@ -50,6 +50,14 @@ SOFTWARE.
 t_WindowProc OriginalDefWindowProc = nullptr;
 t_WindowProc OriginalWindowProc = nullptr;
 
+static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
+
+#ifdef _WIN64
+static void D3D12_CleanupInitResources();
+#endif
+
+static ID3D11RenderTargetView *g_d3d11_mainRenderTargetView = nullptr;
+
 HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D9 = TRUE;
 	cfg.Direct3D.HookDirect3D10 = TRUE;
@@ -116,6 +124,8 @@ void EvtHydraHookGameHooked(
 	d3d12.EvtHydraHookD3D12PostResizeBuffers = EvtHydraHookD3D12PostResizeBuffers;
 #endif
 
+	g_GameVersion = GameVersion;
+
 	switch (GameVersion)
 	{
 	case HydraHookDirect3DVersion9:
@@ -149,24 +159,68 @@ void EvtHydraHookGameUnhooked(
 {
 	(void)EngineHandle;
 
-	// TODO: implement me!
-#ifdef WNDPROC_HOOK
-	auto& logger = Logger::get(__func__);
+	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
-	if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK)
+	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
+	switch (g_GameVersion)
 	{
-		logger.fatal("Couldn't disable hooks, host process might crash");
-		return;
+	case HydraHookDirect3DVersion9:
+		ImGui_ImplDX9_Shutdown();
+		break;
+	case HydraHookDirect3DVersion10:
+		ImGui_ImplDX10_Shutdown();
+		break;
+	case HydraHookDirect3DVersion11:
+		ImGui_ImplDX11_Shutdown();
+		break;
+#ifdef _WIN64
+	case HydraHookDirect3DVersion12:
+		ImGui_ImplDX12_Shutdown();
+		break;
+#endif
+	default:
+		break;
 	}
 
-	HydraHookEngineLogInfo("Hooks disabled");
+	ImGui_ImplWin32_Shutdown();
+	if (ImGui::GetCurrentContext() != nullptr)
+	{
+		ImGui::DestroyContext();
+	}
+
+	// Release D3D11 overlay resources (RTV created by overlay; device/context are owned by game)
+	if (g_d3d11_mainRenderTargetView != nullptr)
+	{
+		g_d3d11_mainRenderTargetView->Release();
+		g_d3d11_mainRenderTargetView = nullptr;
+	}
+
+#ifdef _WIN64
+	// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
+	D3D12_CleanupInitResources();
+#endif
+
+#ifdef WNDPROC_HOOK
+	// Restore original window procedure by disabling MinHook trampolines and clearing hook state
+	if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK)
+	{
+		HydraHookEngineLogError("Couldn't disable WNDPROC hooks, host process might crash");
+	}
+	else
+	{
+		HydraHookEngineLogInfo("WNDPROC hooks disabled");
+	}
 
 	if (MH_Uninitialize() != MH_OK)
 	{
-		logger.fatal("Couldn't shut down hook engine, host process might crash");
-		return;
+		HydraHookEngineLogError("Couldn't shut down MinHook, host process might crash");
 	}
+
+	OriginalWindowProc = nullptr;
+	OriginalDefWindowProc = nullptr;
 #endif
+
+	g_GameVersion = HydraHookDirect3DVersionUnknown;
 }
 
 #pragma region D3D9(Ex)
@@ -403,9 +457,6 @@ void EvtHydraHookD3D10PostResizeBuffers(
 #pragma endregion
 
 #pragma region D3D11
-
-// TODO: lazy global, improve
-static ID3D11RenderTargetView *g_d3d11_mainRenderTargetView = nullptr;
 
 void EvtHydraHookD3D11Present(
 	IDXGISwapChain				*pSwapChain,
