@@ -33,6 +33,7 @@ SOFTWARE.
 // STL
 // 
 #include <mutex>
+#include <wrl/client.h>
 
 // 
 // ImGui includes
@@ -54,15 +55,86 @@ static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
 
 #ifdef _WIN64
 static void D3D12_CleanupInitResources();
+static void D3D12_WaitForGpu();
 #endif
 
-static ID3D11RenderTargetView *g_d3d11_mainRenderTargetView = nullptr;
+using Microsoft::WRL::ComPtr;
+
+static ComPtr<ID3D10Device> g_d3d10Device;
+static ComPtr<ID3D10RenderTargetView> g_d3d10Target;
+static ComPtr<ID3D11Device> g_d3d11Device;
+static ComPtr<ID3D11DeviceContext> g_d3d11Context;
+static ComPtr<ID3D11RenderTargetView> g_d3d11Target;
+
+template<typename Context>
+struct ShaderResourceStage
+{
+	decltype(&Context::PSGetShaderResources) get;
+	decltype(&Context::PSSetShaderResources) set;
+};
+
+static constexpr ShaderResourceStage<ID3D10Device> d3d10Stages[] = {
+	{ &ID3D10Device::VSGetShaderResources, &ID3D10Device::VSSetShaderResources },
+	{ &ID3D10Device::GSGetShaderResources, &ID3D10Device::GSSetShaderResources },
+	{ &ID3D10Device::PSGetShaderResources, &ID3D10Device::PSSetShaderResources },
+};
+
+static constexpr ShaderResourceStage<ID3D11DeviceContext> d3d11Stages[] = {
+	{ &ID3D11DeviceContext::VSGetShaderResources, &ID3D11DeviceContext::VSSetShaderResources },
+	{ &ID3D11DeviceContext::HSGetShaderResources, &ID3D11DeviceContext::HSSetShaderResources },
+	{ &ID3D11DeviceContext::DSGetShaderResources, &ID3D11DeviceContext::DSSetShaderResources },
+	{ &ID3D11DeviceContext::GSGetShaderResources, &ID3D11DeviceContext::GSSetShaderResources },
+	{ &ID3D11DeviceContext::PSGetShaderResources, &ID3D11DeviceContext::PSSetShaderResources },
+	{ &ID3D11DeviceContext::CSGetShaderResources, &ID3D11DeviceContext::CSSetShaderResources },
+};
+
+// D3D10 and D3D11 may enter Present with the back buffer unbound. Bind it for
+// the overlay draw and restore all game render targets before returning.
+template<typename Resource, typename DepthView, typename ShaderView, typename Device, typename Context, typename Target, size_t StageCount>
+static void DrawToBackBuffer(IDXGISwapChain* chain, Device* device, Context* context,
+	ComPtr<Target>& target, const ShaderResourceStage<Context> (&stages)[StageCount], void (*draw)(ImDrawData*))
+{
+	// Key the view by the presenting chain's actual buffer without retaining the chain.
+	ComPtr<Resource> buffer;
+	if (FAILED(chain->GetBuffer(0, IID_PPV_ARGS(&buffer))))
+		return;
+	ComPtr<Resource> cachedBuffer;
+	if (target)
+		target->GetResource(&cachedBuffer);
+	if (cachedBuffer.Get() != buffer.Get())
+	{
+		if (FAILED(device->CreateRenderTargetView(buffer.Get(), nullptr, target.ReleaseAndGetAddressOf())))
+			return;
+	}
+
+	Target* previous[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+	ComPtr<DepthView> depth;
+	context->OMGetRenderTargets(ARRAYSIZE(previous), previous, &depth);
+	// Binding the back buffer for output can clear overlapping SRVs in any shader stage.
+	constexpr UINT slotCount = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+	ShaderView* resources[StageCount][slotCount]{};
+	for (size_t i = 0; i < StageCount; ++i)
+		(context->*stages[i].get)(0, slotCount, resources[i]);
+	context->OMSetRenderTargets(1, target.GetAddressOf(), nullptr);
+	draw(ImGui::GetDrawData());
+	context->OMSetRenderTargets(ARRAYSIZE(previous), previous, depth.Get());
+	for (size_t i = 0; i < StageCount; ++i)
+	{
+		(context->*stages[i].set)(0, slotCount, resources[i]);
+		for (auto* view : resources[i])
+			if (view)
+				view->Release();
+	}
+	for (auto* view : previous)
+		if (view)
+			view->Release();
+}
 
 HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D9 = TRUE;
 	cfg.Direct3D.HookDirect3D10 = TRUE;
 	cfg.Direct3D.HookDirect3D11 = TRUE;
-	cfg.Direct3D.HookDirect3D12 = TRUE;
+	cfg.Direct3D.HookDirect3D12 = sizeof(void*) == 8;
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
 	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGameUnhooked;
 	cfg.CrashHandler.IsEnabled = TRUE;
@@ -83,6 +155,10 @@ void EvtHydraHookGameHooked(
 	const HYDRAHOOK_D3D_VERSION GameVersion
 )
 {
+	// Present, Present1 and resize hooks can announce the same renderer.
+	if (g_GameVersion != HydraHookDirect3DVersionUnknown)
+		return;
+
 	HydraHookEngineLogInfo("Loading ImGui plugin");
 
 	IMGUI_CHECKVERSION();
@@ -108,13 +184,11 @@ void EvtHydraHookGameHooked(
 	HYDRAHOOK_D3D10_EVENT_CALLBACKS_INIT(&d3d10);
 	d3d10.EvtHydraHookD3D10PrePresent = EvtHydraHookD3D10Present;
 	d3d10.EvtHydraHookD3D10PreResizeBuffers = EvtHydraHookD3D10PreResizeBuffers;
-	d3d10.EvtHydraHookD3D10PostResizeBuffers = EvtHydraHookD3D10PostResizeBuffers;
 
 	HYDRAHOOK_D3D11_EVENT_CALLBACKS d3d11;
 	HYDRAHOOK_D3D11_EVENT_CALLBACKS_INIT(&d3d11);
 	d3d11.EvtHydraHookD3D11PrePresent = EvtHydraHookD3D11Present;
 	d3d11.EvtHydraHookD3D11PreResizeBuffers = EvtHydraHookD3D11PreResizeBuffers;
-	d3d11.EvtHydraHookD3D11PostResizeBuffers = EvtHydraHookD3D11PostResizeBuffers;
 
 #ifdef _WIN64 // vcpkg doesn't offer x86 builds for ImGui at the moment
 	HYDRAHOOK_D3D12_EVENT_CALLBACKS d3d12;
@@ -162,38 +236,42 @@ void EvtHydraHookGameUnhooked(
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
-	switch (g_GameVersion)
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 	{
-	case HydraHookDirect3DVersion9:
-		ImGui_ImplDX9_Shutdown();
-		break;
-	case HydraHookDirect3DVersion10:
-		ImGui_ImplDX10_Shutdown();
-		break;
-	case HydraHookDirect3DVersion11:
-		ImGui_ImplDX11_Shutdown();
-		break;
+		switch (g_GameVersion)
+		{
+		case HydraHookDirect3DVersion9:
+			ImGui_ImplDX9_Shutdown();
+			break;
+		case HydraHookDirect3DVersion10:
+			ImGui_ImplDX10_Shutdown();
+			break;
+		case HydraHookDirect3DVersion11:
+			ImGui_ImplDX11_Shutdown();
+			break;
 #ifdef _WIN64
-	case HydraHookDirect3DVersion12:
-		ImGui_ImplDX12_Shutdown();
-		break;
+		case HydraHookDirect3DVersion12:
+			D3D12_WaitForGpu();
+			ImGui_ImplDX12_Shutdown();
+			break;
 #endif
-	default:
-		break;
+		default:
+			break;
+		}
 	}
 
-	ImGui_ImplWin32_Shutdown();
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendPlatformUserData)
+		ImGui_ImplWin32_Shutdown();
 	if (ImGui::GetCurrentContext() != nullptr)
 	{
 		ImGui::DestroyContext();
 	}
 
-	// Release D3D11 overlay resources (RTV created by overlay; device/context are owned by game)
-	if (g_d3d11_mainRenderTargetView != nullptr)
-	{
-		g_d3d11_mainRenderTargetView->Release();
-		g_d3d11_mainRenderTargetView = nullptr;
-	}
+	g_d3d10Target.Reset();
+	g_d3d10Device.Reset();
+	g_d3d11Target.Reset();
+	g_d3d11Context.Reset();
+	g_d3d11Device.Reset();
 
 #ifdef _WIN64
 	// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
@@ -276,7 +354,11 @@ void EvtHydraHookD3D9Present(
 
 	RenderScene();
 
-	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+	if (SUCCEEDED(pDevice->BeginScene()))
+	{
+		ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+		pDevice->EndScene();
+	}
 }
 
 void EvtHydraHookD3D9PreReset(
@@ -284,7 +366,8 @@ void EvtHydraHookD3D9PreReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	ImGui_ImplDX9_InvalidateDeviceObjects();
+	if (ImGui::GetIO().BackendRendererUserData)
+		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
 void EvtHydraHookD3D9PostReset(
@@ -292,7 +375,8 @@ void EvtHydraHookD3D9PostReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	ImGui_ImplDX9_CreateDeviceObjects();
+	if (ImGui::GetIO().BackendRendererUserData)
+		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
 void EvtHydraHookD3D9PresentEx(
@@ -304,50 +388,8 @@ void EvtHydraHookD3D9PresentEx(
 	DWORD                   dwFlags
 )
 {
-	static auto initialized = false;
-	static bool show_overlay = true;
-	static std::once_flag init;
-
-	//
-	// This section is only called once to initialize ImGui
-	// 
-	std::call_once(init, [&](LPDIRECT3DDEVICE9EX pd3dDevice)
-	{
-		D3DDEVICE_CREATION_PARAMETERS params;
-
-		const auto hr = pd3dDevice->GetCreationParameters(&params);
-		if (FAILED(hr))
-		{
-			HydraHookEngineLogError("Couldn't get creation parameters from device");
-			return;
-		}
-
-		ImGui_ImplWin32_Init(params.hFocusWindow);
-		ImGui_ImplDX9_Init(pd3dDevice);
-
-		HydraHookEngineLogInfo("ImGui (DX9Ex) initialized");
-
-		HookWindowProc(params.hFocusWindow);
-
-		initialized = true;
-
-	}, pDevice);
-
-	if (!initialized)
-		return;
-
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
-		return;
-
-	// Start the Dear ImGui frame
-	ImGui_ImplDX9_NewFrame();
-	ImGui_ImplWin32_NewFrame();
-	ImGui::NewFrame();
-
-	RenderScene();
-
-	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+	if (!(dwFlags & D3DPRESENT_DONOTFLIP))
+		EvtHydraHookD3D9Present(pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 }
 
 void EvtHydraHookD3D9PreResetEx(
@@ -356,7 +398,8 @@ void EvtHydraHookD3D9PreResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	ImGui_ImplDX9_InvalidateDeviceObjects();
+	if (ImGui::GetIO().BackendRendererUserData)
+		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
 void EvtHydraHookD3D9PostResetEx(
@@ -365,7 +408,8 @@ void EvtHydraHookD3D9PostResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	ImGui_ImplDX9_CreateDeviceObjects();
+	if (ImGui::GetIO().BackendRendererUserData)
+		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
 #pragma endregion
@@ -378,6 +422,9 @@ void EvtHydraHookD3D10Present(
 	UINT            Flags
 )
 {
+	if (Flags & DXGI_PRESENT_TEST)
+		return;
+
 	static auto initialized = false;
 	static bool show_overlay = true;
 	static std::once_flag init;
@@ -389,8 +436,7 @@ void EvtHydraHookD3D10Present(
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		ID3D10Device *pDevice;
-		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pChain, &pDevice)))
+		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pChain, &g_d3d10Device)))
 		{
 			HydraHookEngineLogError("Couldn't get device from swapchain");
 			return;
@@ -402,7 +448,7 @@ void EvtHydraHookD3D10Present(
 		HydraHookEngineLogInfo("Initializing ImGui");
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
-		ImGui_ImplDX10_Init(pDevice);
+		ImGui_ImplDX10_Init(g_d3d10Device.Get());
 
 		HydraHookEngineLogInfo("ImGui (DX10) initialized");
 
@@ -427,7 +473,8 @@ void EvtHydraHookD3D10Present(
 
 	RenderScene();
 
-	ImGui_ImplDX10_RenderDrawData(ImGui::GetDrawData());
+	DrawToBackBuffer<ID3D10Resource, ID3D10DepthStencilView, ID3D10ShaderResourceView>(pSwapChain, g_d3d10Device.Get(),
+		g_d3d10Device.Get(), g_d3d10Target, d3d10Stages, ImGui_ImplDX10_RenderDrawData);
 }
 
 void EvtHydraHookD3D10PreResizeBuffers(
@@ -439,19 +486,7 @@ void EvtHydraHookD3D10PreResizeBuffers(
 	UINT            SwapChainFlags
 )
 {
-	ImGui_ImplDX10_InvalidateDeviceObjects();
-}
-
-void EvtHydraHookD3D10PostResizeBuffers(
-	IDXGISwapChain  *pSwapChain,
-	UINT            BufferCount,
-	UINT            Width,
-	UINT            Height,
-	DXGI_FORMAT     NewFormat,
-	UINT            SwapChainFlags
-)
-{
-	ImGui_ImplDX10_CreateDeviceObjects();
+	g_d3d10Target.Reset();
 }
 
 #pragma endregion
@@ -465,11 +500,13 @@ void EvtHydraHookD3D11Present(
 	PHYDRAHOOK_EVT_PRE_EXTENSION Extension
 )
 {
+	if (Flags & DXGI_PRESENT_TEST)
+		return;
+
 	static auto initialized = false;
 	static bool show_overlay = true;
 	static std::once_flag init;
 
-	static ID3D11DeviceContext *pContext;
 
 	//
 	// This section is only called once to initialize ImGui
@@ -478,17 +515,11 @@ void EvtHydraHookD3D11Present(
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		ID3D11Device *pDevice;
-		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pChain, &pDevice, &pContext)))
+		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pChain, &g_d3d11Device, &g_d3d11Context)))
 		{
 			HydraHookEngineLogError("Couldn't get device and context from swapchain");
 			return;
 		}
-
-		ID3D11Texture2D* pBackBuffer;
-		pChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
-		pDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_d3d11_mainRenderTargetView);
-		pBackBuffer->Release();
 
 		DXGI_SWAP_CHAIN_DESC sd;
 		pChain->GetDesc(&sd);
@@ -496,7 +527,7 @@ void EvtHydraHookD3D11Present(
 		HydraHookEngineLogInfo("Initializing ImGui");
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
-		ImGui_ImplDX11_Init(pDevice, pContext);
+		ImGui_ImplDX11_Init(g_d3d11Device.Get(), g_d3d11Context.Get());
 
 		HydraHookEngineLogInfo("ImGui (DX11) initialized");
 
@@ -518,11 +549,10 @@ void EvtHydraHookD3D11Present(
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	pContext->OMSetRenderTargets(1, &g_d3d11_mainRenderTargetView, NULL);
-
 	RenderScene();
 
-	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+	DrawToBackBuffer<ID3D11Resource, ID3D11DepthStencilView, ID3D11ShaderResourceView>(pSwapChain, g_d3d11Device.Get(),
+		g_d3d11Context.Get(), g_d3d11Target, d3d11Stages, ImGui_ImplDX11_RenderDrawData);
 }
 
 //
@@ -538,34 +568,7 @@ void EvtHydraHookD3D11PreResizeBuffers(
 	PHYDRAHOOK_EVT_PRE_EXTENSION Extension
 )
 {
-	if (g_d3d11_mainRenderTargetView)
-	{
-		g_d3d11_mainRenderTargetView->Release();
-		g_d3d11_mainRenderTargetView = nullptr;
-	}
-}
-
-//
-// Called after the original invocation of ResizeBuffers.
-// 
-void EvtHydraHookD3D11PostResizeBuffers(
-	IDXGISwapChain					*pSwapChain,
-	UINT							BufferCount,
-	UINT							Width,
-	UINT							Height,
-	DXGI_FORMAT						NewFormat,
-	UINT							SwapChainFlags,
-	PHYDRAHOOK_EVT_POST_EXTENSION	Extension
-)
-{
-	ID3D11Texture2D* pBackBuffer;
-	ID3D11DeviceContext *pContext;
-	ID3D11Device *pDevice;
-	D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pSwapChain, &pDevice, &pContext);
-
-	pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
-	pDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_d3d11_mainRenderTargetView);
-	pBackBuffer->Release();
+	g_d3d11Target.Reset();
 }
 
 #pragma endregion
@@ -574,7 +577,7 @@ void EvtHydraHookD3D11PostResizeBuffers(
 
 #ifdef _WIN64
 
-static constexpr UINT D3D12_NUM_BACK_BUFFERS = 3;
+static constexpr UINT D3D12_NUM_BACK_BUFFERS = DXGI_MAX_SWAP_CHAIN_BUFFERS;
 static constexpr UINT D3D12_NUM_FRAMES_IN_FLIGHT = 2;
 static constexpr UINT D3D12_SRV_HEAP_SIZE = 64;
 
@@ -745,6 +748,8 @@ static void D3D12_CleanupInitResources()
 static void D3D12_WaitForGpu()
 {
 	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
+	if (g_d3d12_pFence->GetCompletedValue() >= fence)
+		return;
 	g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent);
 	WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
 }
@@ -770,8 +775,10 @@ void EvtHydraHookD3D12Present(
 	PHYDRAHOOK_EVT_PRE_EXTENSION Extension
 )
 {
+	if (Flags & DXGI_PRESENT_TEST)
+		return;
+
 	(void)SyncInterval;
-	(void)Flags;
 	(void)Extension;
 
 	static auto initialized = false;
@@ -883,13 +890,15 @@ void EvtHydraHookD3D12Present(
 		backBufferIdx = pSwapChain3->GetCurrentBackBufferIndex();
 		pSwapChain3->Release();
 	}
-	if (backBufferIdx >= g_d3d12_numBackBuffers)
-		backBufferIdx = 0;
+	if (backBufferIdx >= g_d3d12_numBackBuffers || !g_d3d12_mainRenderTargetResource[backBufferIdx])
+		return;
 
 	ImGui_ImplDX12_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
+	// Only wait when reusing an allocator still in flight. Present can overlap GPU work.
+	D3D12_WaitForGpu();
 	g_d3d12_pCommandAllocator->Reset();
 	g_d3d12_pCommandList->Reset(g_d3d12_pCommandAllocator, nullptr);
 
@@ -915,8 +924,9 @@ void EvtHydraHookD3D12Present(
 	g_d3d12_pCommandList->Close();
 
 	g_d3d12_pCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_d3d12_pCommandList);
-	g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, ++g_d3d12_fenceLastSignaledValue);
-	D3D12_WaitForGpu();
+	const UINT64 nextFence = g_d3d12_fenceLastSignaledValue + 1;
+	if (SUCCEEDED(g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, nextFence)))
+		g_d3d12_fenceLastSignaledValue = nextFence;
 }
 
 /**
@@ -950,8 +960,11 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	ImGui_ImplDX12_InvalidateDeviceObjects();
+	if (!ImGui::GetIO().BackendRendererUserData)
+		return;
+
 	D3D12_WaitForGpu();
+	ImGui_ImplDX12_InvalidateDeviceObjects();
 	D3D12_CleanupOverlayResources();
 	g_d3d12_srvDescriptorCount = 0;
 }
@@ -980,6 +993,9 @@ void EvtHydraHookD3D12PostResizeBuffers(
 	(void)NewFormat;
 	(void)SwapChainFlags;
 	(void)Extension;
+
+	if (!ImGui::GetIO().BackendRendererUserData)
+		return;
 
 	if (!D3D12_CreateOverlayResources(pSwapChain))
 	{
@@ -1088,104 +1104,6 @@ LRESULT WINAPI DetourWindowProc(
 	ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
 
 	return OriginalWindowProc(hWnd, Msg, wParam, lParam);
-}
-
-#pragma endregion
-
-#pragma region Main content rendering
-
-/**
- * @brief Renders the ImGui overlay/demo UI containing plots and widgets.
- *
- * Displays an ImGui window with frame-time plots, line plots and histograms (including a selectable function and sample count),
- * an "Animate" toggle, and an animated progress bar with textual label. Submits ImGui draw data by calling ImGui::Render().
- */
-void RenderScene()
-{
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ RenderScene called"); });
-
-	ImGui::ShowMetricsWindow();
-
-	{
-		ImGui::SetNextWindowPos(ImVec2(1400, 60));
-		ImGui::Begin(
-			"Some plots =)",
-			nullptr,
-			ImGuiWindowFlags_AlwaysAutoResize
-		);
-
-		static bool animate = true;
-		ImGui::Checkbox("Animate", &animate);
-
-		static float arr[] = { 0.6f, 0.1f, 1.0f, 0.5f, 0.92f, 0.1f, 0.2f };
-		ImGui::PlotLines("Frame Times", arr, IM_ARRAYSIZE(arr));
-
-		// Create a dummy array of contiguous float values to plot
-		// Tip: If your float aren't contiguous but part of a structure, you can pass a pointer to your first float and the sizeof() of your structure in the Stride parameter.
-		static float values[90] = { 0 };
-		static int values_offset = 0;
-		static float refresh_time = 0.0f;
-		if (!animate || refresh_time == 0.0f)
-			refresh_time = (float)ImGui::GetTime();
-		while (refresh_time < ImGui::GetTime()) // Create dummy data at fixed 60 hz rate for the demo
-		{
-			static float phase = 0.0f;
-			values[values_offset] = cosf(phase);
-			values_offset = (values_offset + 1) % IM_ARRAYSIZE(values);
-			phase += 0.10f*values_offset;
-			refresh_time += 1.0f / 60.0f;
-		}
-		ImGui::PlotLines("Lines", values, IM_ARRAYSIZE(values), values_offset, "avg 0.0", -1.0f, 1.0f, ImVec2(0, 80));
-		ImGui::PlotHistogram("Histogram", arr, IM_ARRAYSIZE(arr), 0, NULL, 0.0f, 1.0f, ImVec2(0, 80));
-
-		// Use functions to generate output
-		// FIXME: This is rather awkward because current plot API only pass in indices. We probably want an API passing floats and user provide sample rate/count.
-		struct Funcs
-		{
-			static float Sin(void*, int i) { return sinf(i * 0.1f); }
-			static float Saw(void*, int i) { return (i & 1) ? 1.0f : -1.0f; }
-		};
-		static int func_type = 0, display_count = 70;
-		ImGui::Separator();
-		ImGui::PushItemWidth(100); ImGui::Combo("func", &func_type, "Sin\0Saw\0"); ImGui::PopItemWidth();
-		ImGui::SameLine();
-		ImGui::SliderInt("Sample count", &display_count, 1, 400);
-		float(*func)(void*, int) = (func_type == 0) ? Funcs::Sin : Funcs::Saw;
-		ImGui::PlotLines("Lines", func, NULL, display_count, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
-		ImGui::PlotHistogram("Histogram", func, NULL, display_count, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
-		ImGui::Separator();
-
-		// Animate a simple progress bar
-		static float progress = 0.0f, progress_dir = 1.0f;
-		if (animate)
-		{
-			progress += progress_dir * 0.4f * ImGui::GetIO().DeltaTime;
-			if (progress >= +1.1f) { progress = +1.1f; progress_dir *= -1.0f; }
-			if (progress <= -0.1f) { progress = -0.1f; progress_dir *= -1.0f; }
-		}
-
-		// Typically we would use ImVec2(-1.0f,0.0f) to use all available width, or ImVec2(width,0.0f) for a specified width. ImVec2(0.0f,0.0f) uses ItemWidth.
-		ImGui::ProgressBar(progress, ImVec2(0.0f, 0.0f));
-		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-		ImGui::Text("Progress Bar");
-
-		float progress_saturated = (progress < 0.0f) ? 0.0f : (progress > 1.0f) ? 1.0f : progress;
-		char buf[32];
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-		sprintf(buf, "%d/%d", (int)(progress_saturated * 1753), 1753);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-		ImGui::ProgressBar(progress, ImVec2(0.f, 0.f), buf);
-
-		ImGui::End();
-	}
-
-	ImGui::Render();
 }
 
 #pragma endregion
