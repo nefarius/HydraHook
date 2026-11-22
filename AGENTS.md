@@ -12,12 +12,15 @@ Do not merge on a green `build` check alone. A passing build does not mean revie
 
 ```powershell
 gh api graphql -f query='
-  query($owner:String!,$repo:String!,$pr:Int!,$cursor:String) {
+  query($owner:String!,$repo:String!,$pr:Int!,$reviewCursor:String,$threadCursor:String) {
     repository(owner:$owner, name:$repo) {
       pullRequest(number:$pr) {
         headRefOid
-        reviews(last:20) { nodes { author { login } state commit { oid } } }
-        reviewThreads(first:100, after:$cursor) {
+        reviews(first:100, after:$reviewCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes { author { login } state commit { oid } }
+        }
+        reviewThreads(first:100, after:$threadCursor) {
           pageInfo { hasNextPage endCursor }
           nodes {
             isResolved
@@ -29,7 +32,7 @@ gh api graphql -f query='
   }' -f owner=nefarius -f repo=HydraHook -F pr=<num>
 ```
 
-Page with `endCursor` while `hasNextPage` is true. Merge only when, for that `headRefOid`, every `reviewThreads` node has `isResolved: true` and no human review is `CHANGES_REQUESTED` without a later approval.
+Page `reviews` with `$reviewCursor` and `reviewThreads` with `$threadCursor` while each connection's `hasNextPage` is true. Merge only when, for that `headRefOid`, every `reviewThreads` node has `isResolved: true` and no human review is `CHANGES_REQUESTED` without a later approval.
 
 ## Documentation
 

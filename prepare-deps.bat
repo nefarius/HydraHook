@@ -42,7 +42,7 @@ set "SCRIPT_DIR=!SCRIPT_DIR:~0,-1!"
 REM Locate VS for "all" mode (each triplet needs different vcvars)
 set "VS_PATH="
 if /i "%PLATFORM%"=="all" (
-    for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2^>nul`) do set "VS_PATH=%%i"
+    for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do set "VS_PATH=%%i"
     if not defined VS_PATH (
         echo vswhere not found or no VS installation. Run from Developer Command Prompt or specify a platform.
         exit /b 1

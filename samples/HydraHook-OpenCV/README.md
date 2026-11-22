@@ -17,6 +17,6 @@ An ImGui debug HUD draws the trail and feature counts. Press `F12` to toggle it.
 
 ## Building
 
-1. Run `prepare-deps.bat` from the repository root so vcpkg installs `opencv4`.
+1. Initialize submodules with `git submodule update --init --recursive`, then run `prepare-deps.bat` from the repository root so vcpkg installs `opencv4`. The [root build steps](../../README.md#build-steps) cover the same prerequisite.
 2. Build `Release_LIB` (or `Release` of this project against the static library). The DLL is `bin\x64\HydraHook-OpenCV.dll` or `bin\x86\HydraHook-OpenCV.dll`.
 3. Inject that DLL into a D3D11 or D3D12 process. Use the x64 build for D3D12.

@@ -85,7 +85,15 @@ function Assert-ReleaseArchitecture
         throw "Release payload directory $Path does not exist."
     }
 
-    $files = @(Get-ChildItem -LiteralPath $Path -File)
+    $entries = @(Get-ChildItem -LiteralPath $Path -Force)
+    $directories = @($entries | Where-Object { $_.PSIsContainer })
+    if ($directories.Count -gt 0)
+    {
+        $directoryNames = @($directories | Select-Object -ExpandProperty Name)
+        throw "Release payload $Architecture contains directories: $($directoryNames -join ', ')."
+    }
+
+    $files = @($entries | Where-Object { -not $_.PSIsContainer })
     $names = @($files | Select-Object -ExpandProperty Name)
 
     $unexpected = @($names | Where-Object { $_ -notin $script:ExpectedFiles })

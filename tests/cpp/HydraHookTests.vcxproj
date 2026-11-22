@@ -68,7 +68,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>Iphlpapi.lib;shlwapi.lib;dxgi.lib;d3d9.lib;d3d10.lib;d3d11.lib;d3d12.lib;d3dcompiler.lib;dxguid.lib;ole32.lib;oleaut32.lib;uuid.lib;dbghelp.lib;psapi.lib;mmdevapi.lib;detours.lib;spdlog.lib;fmt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Iphlpapi.lib;shlwapi.lib;dxgi.lib;d3d9.lib;d3d10.lib;d3d11.lib;d3d12.lib;d3dcompiler.lib;dxguid.lib;ole32.lib;oleaut32.lib;uuid.lib;dbghelp.lib;psapi.lib;mmdevapi.lib;detours.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Platform)'=='Win32'">
@@ -82,6 +82,9 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>spdlogd.lib;fmtd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
@@ -94,6 +97,7 @@
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>spdlog.lib;fmt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

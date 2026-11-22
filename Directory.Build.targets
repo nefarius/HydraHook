@@ -7,7 +7,7 @@
   -->
   <ItemDefinitionGroup Condition="'$(VcpkgEnabled)' != 'false' And Exists('$(VcpkgRoot)bootstrap-vcpkg.bat') And !Exists('$(VcpkgRoot)vcpkg.exe')">
     <PreBuildEvent>
-      <Command>$(VcpkgRoot)bootstrap-vcpkg.bat</Command>
+      <Command>"$(VcpkgRoot)bootstrap-vcpkg.bat"</Command>
       <Message>Bootstrap vcpkg</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>

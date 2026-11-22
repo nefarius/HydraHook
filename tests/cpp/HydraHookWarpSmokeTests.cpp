@@ -158,10 +158,18 @@ int main()
 
     if (swapChain != nullptr)
     {
-        const HRESULT resized = swapChain->ResizeBuffers(0, 64, 64, DXGI_FORMAT_UNKNOWN, 0);
-        Check(SUCCEEDED(resized), "ResizeBuffers");
-        if (FAILED(resized))
-            std::fprintf(stderr, "ResizeBuffers HRESULT 0x%08lX\n", static_cast<unsigned long>(resized));
+        while (GetTickCount64() < deadline && (state->resizePre == 0 || state->resizePost == 0))
+        {
+            const HRESULT resized = swapChain->ResizeBuffers(0, 64, 64, DXGI_FORMAT_UNKNOWN, 0);
+            if (FAILED(resized))
+            {
+                std::fprintf(stderr, "ResizeBuffers HRESULT 0x%08lX\n", static_cast<unsigned long>(resized));
+                Check(false, "ResizeBuffers");
+                break;
+            }
+            if (state->resizePre == 0 || state->resizePost == 0)
+                Sleep(50);
+        }
     }
     Check(state->resizePre > 0, "pre-ResizeBuffers fired");
     Check(state->resizePost > 0, "post-ResizeBuffers fired");
@@ -179,7 +187,12 @@ int main()
     if (unloadThread != nullptr)
     {
         const DWORD waited = WaitForSingleObject(unloadThread, 20000);
-        Check(waited == WAIT_OBJECT_0, "FreeLibrary returned without hanging");
+        if (waited != WAIT_OBJECT_0)
+        {
+            std::fprintf(stderr, "FreeLibrary wait timed out (WaitForSingleObject returned %lu)\n",
+                         static_cast<unsigned long>(waited));
+            ExitProcess(1);
+        }
         CloseHandle(unloadThread);
     }
     Check(GetModuleHandleW(L"HydraHookTestHost.dll") == nullptr, "host unloaded");

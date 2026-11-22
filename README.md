@@ -32,7 +32,7 @@ API-Hooking and rendering framework for DirectX-based games.
 
 - Windows 10 and Windows 11
 - x86 and x64
-- Direct3D 12 hooking is available on x64. The D3D12 ImGui overlay path is x64-only
+- Direct3D 12 hooking is built for x86 and x64. The D3D12 ImGui overlay is x64-only
 - ARM and UWP are not supported
 
 ## Supported DirectX versions
@@ -69,6 +69,10 @@ Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared
 bin\x64\HydraHookTests.exe
 bin\x64\HydraHookWarpSmokeTests.exe
 ```
+
+### Releases
+
+A `vX.Y.Z` tag (for example `v4.2.0`) builds, tests, signs, and publishes a stable GitHub Release. A `vX.Y.Z-preN` tag (for example `v4.2.0-pre1`, where `N` is one or more digits) publishes a prerelease. Signing requires the `SIGN_RELAY_CI_TOKEN` repository secret. `SIGN_RELAY_SERVER` is optional and defaults to `https://signrelay.api.nefarius.systems/`.
 
 ### Pre-built binaries
 
@@ -124,7 +128,7 @@ Road Redemption, 64-Bit
 
 ### DirectX 12
 
-Supported on 64-bit builds. The ImGui sample automatically detects and hooks DX12 games.
+Core Direct3D 12 hooking is built for x86 and x64. The ImGui sample's D3D12 overlay is x64-only.
 
 BEHEMOTH, 64-Bit
 

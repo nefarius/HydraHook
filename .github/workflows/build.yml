@@ -106,6 +106,9 @@ jobs:
               --target-file $file `
               --resource.file-version `
               --resource.product-version
+            if ($LASTEXITCODE -ne 0) {
+              throw "vpatch failed for $file (exit $LASTEXITCODE)"
+            }
           }
 
       - name: Add MSBuild to PATH
@@ -143,7 +146,18 @@ jobs:
           $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
           $dll = "bin\${{ matrix.artifact }}\HydraHook.dll"
-          $exports = & $dumpbin /EXPORTS $dll | Out-String
+          $exportLines = @(& $dumpbin /EXPORTS $dll)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $dll (exit $LASTEXITCODE)" }
+          $exported = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          $inTable = $false
+          foreach ($line in $exportLines) {
+            if ($line -match '^\s+ordinal\s+hint\s+RVA\s+name') { $inTable = $true; continue }
+            if (-not $inTable) { continue }
+            if ($line -match '^\s+Summary') { break }
+            if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') {
+              [void]$exported.Add($Matches[1])
+            }
+          }
           $required = @(
             'HydraHookEngineCreate',
             'HydraHookEngineDestroy',
@@ -164,7 +178,16 @@ jobs:
             'HydraHookEngineLogError'
           )
           foreach ($name in $required) {
-            if ($exports -notmatch [regex]::Escape($name)) {
+            $found = $false
+            foreach ($exportName in $exported) {
+              # C exports match the name column exactly. C++ exports are
+              # ?Name@@decoration, which is not a prefix of a longer identifier.
+              if ($exportName -eq $name -or $exportName.StartsWith('?' + $name + '@@')) {
+                $found = $true
+                break
+              }
+            }
+            if (-not $found) {
               throw "$dll is missing export $name"
             }
           }
@@ -212,7 +235,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y doxygen
 
       - name: Lint API comments
-        run: doxygen Doxyfile
+        run: |
+          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
 
   sign:
     name: Sign release binaries
@@ -356,3 +380,10 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-pre') }}
+          draft: ${{ contains(github.ref_name, '-pre') }}
+
+      - name: Publish prerelease
+        if: contains(github.ref_name, '-pre')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false
