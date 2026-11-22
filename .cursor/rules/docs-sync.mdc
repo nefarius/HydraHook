@@ -1,0 +1,22 @@
+---
+description: Keep in-repo docs aligned with user-facing and architectural changes
+globs: include/HydraHook/**,src/HydraHook/**,samples/**,vcpkg.json,.github/workflows/**,tests/**
+alwaysApply: false
+---
+
+# Docs sync
+
+HydraHook documentation lives in this repository. There are no HydraHook pages on docs.nefarius.at.
+
+When a change is user-facing or changes the architecture described in a README, update the matching doc in the same change:
+
+| Source | Doc |
+|---|---|
+| `include/HydraHook/**` public API | Doxygen comments, `README.md`, `src/HydraHook/README.md` |
+| `src/HydraHook/**` engine, hooks, shutdown | `src/HydraHook/README.md` |
+| `samples/**` | `samples/README.md` and `samples/<sample>/README.md` |
+| `vcpkg.json` | `README.md` dependency and build steps |
+| `.github/workflows/**` | `README.md` build, test, and release sections |
+| `tests/**` | `README.md` Tests section and `src/HydraHook/README.md` Testing section |
+
+Pure formatting or comment-only edits do not need a doc update.

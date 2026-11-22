@@ -21,14 +21,14 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots to help explain your problem.
 
 **Please complete at least the following information:**
- - Windows version: [e.g. Windows 10 x64 1803]
+ - Windows version: [e.g. Windows 11 x64 24H2]
  - Game name [e.g. Half-Life 2]
- - Game architecture [32-Bit or 64-Bit]
- - HydraHook version [e.g. 3.0.33.0]
+ - Game architecture [x86 or x64]
+ - HydraHook version [e.g. 4.2.0]
 
 **Logs**
 ```
-Please paste logs properly formatted to keep them easy to read. For huge logs use a [text pasting service](https://bpaste.net/)!
+Paste HydraHook.log here. For large logs, attach the file to the issue or link a GitHub Gist.
 ```
 
 **Additional context**

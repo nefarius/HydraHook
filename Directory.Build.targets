@@ -1,22 +1,23 @@
 <Project>
-  <Import Project="$(MSBuildThisFileDirectory)vcpkg\scripts\buildsystems\msbuild\vcpkg.targets" />
+  <!-- VcpkgRoot is resolved in Directory.Build.props and carries over here. -->
+  <Import Project="$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.targets" />
+  <!--
+    Bootstrap the local submodule only when it is checked out but has not yet
+    been compiled (first local build after cloning with submodules).
+  -->
+  <ItemDefinitionGroup Condition="'$(VcpkgEnabled)' != 'false' And Exists('$(VcpkgRoot)bootstrap-vcpkg.bat') And !Exists('$(VcpkgRoot)vcpkg.exe')">
+    <PreBuildEvent>
+      <Command>$(VcpkgRoot)bootstrap-vcpkg.bat</Command>
+      <Message>Bootstrap vcpkg</Message>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
 
-  <!-- Manifest mode: vcpkg installs to vcpkg_installed\<triplet>\, vcpkg.targets incorrectly appends triplet again -->
+  <!--
+    This vcpkg revision sets the manifest install root to vcpkg_installed\<triplet>\
+    and then appends the triplet again when consuming headers and libraries.
+    Point consumption back at the directory vcpkg actually populates.
+  -->
   <PropertyGroup Condition="'$(VcpkgEnableManifest)' == 'true'">
     <_ZVcpkgCurrentInstalledDir>$(_ZVcpkgInstalledDir)</_ZVcpkgCurrentInstalledDir>
   </PropertyGroup>
-
-  <!-- Dependencies must be installed via prepare-deps.bat (run from Developer Command Prompt) before building in VS -->
-  <Target Name="VcpkgInstallManifestDependencies" BeforeTargets="ClCompile"
-          Condition="'$(VcpkgEnabled)' == 'true' and '$(VcpkgEnableManifest)' == 'true' and '$(VcpkgManifestInstall)' == 'true'"
-          Inputs="@(_ZVcpkgInstallManifestDependenciesInputs)"
-          Outputs="$(_ZVcpkgMSBuildStampFile)">
-    <PropertyGroup>
-      <_ZVcpkgDepsReady Condition="Exists('$(MSBuildThisFileDirectory)vcpkg_installed\$(VcpkgTriplet)\include\spdlog\spdlog.h')">true</_ZVcpkgDepsReady>
-    </PropertyGroup>
-    <Error Condition="'$(_ZVcpkgDepsReady)' != 'true'"
-           Text="vcpkg dependencies not installed. Run prepare-deps.bat from a Developer Command Prompt for VS, then build again." />
-    <Message Text="Using existing vcpkg installation" Importance="High" Condition="'$(_ZVcpkgDepsReady)' == 'true'" />
-    <Touch Files="$(_ZVcpkgMSBuildStampFile)" AlwaysCreate="true" />
-  </Target>
 </Project>

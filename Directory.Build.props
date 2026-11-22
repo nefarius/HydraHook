@@ -1,8 +1,15 @@
 <Project>
+  <!--
+    Resolve the vcpkg root: prefer the local submodule checkout (developer
+    workflow), fall back to the runner-provided vcpkg when the submodule has
+    not been cloned (CI without submodule).
+  -->
   <PropertyGroup>
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' And Exists('$(MSBuildThisFileDirectory)vcpkg\scripts\buildsystems\msbuild\vcpkg.props')">$(MSBuildThisFileDirectory)vcpkg\</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' And '$(VCPKG_INSTALLATION_ROOT)' != ''">$(VCPKG_INSTALLATION_ROOT)\</VcpkgRoot>
   </PropertyGroup>
-  <Import Project="$(MSBuildThisFileDirectory)vcpkg\scripts\buildsystems\msbuild\vcpkg.props" />
+  <Import Project="$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.props" />
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalOptions>%(AdditionalOptions) /utf-8</AdditionalOptions>

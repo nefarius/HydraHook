@@ -91,7 +91,7 @@ namespace HydraHook
             {
                 const auto nSize = MAX_PATH + 1;
                 char procName[nSize];
-                GetProcessImageFileName(GetCurrentProcess(), procName, nSize);
+                GetProcessImageFileNameA(GetCurrentProcess(), procName, nSize);
 
                 return std::string(procName);
             }

@@ -1,0 +1,14 @@
+---
+description: C API, loader-lock, encoding, and test guardrails for HydraHook
+globs: include/HydraHook/**,src/HydraHook/**,tests/**,samples/**
+alwaysApply: false
+---
+
+# C++ and tests
+
+- The public surface is the C API in `include/HydraHook/Engine`. Keep existing functions, error codes, and struct layouts compatible. Add fields at the end of a struct only when every caller initializes it with the matching `*_INIT` helper.
+- Do not rewrite the library onto `std::expected`. Callers use `HYDRAHOOK_ERROR`.
+- Code that runs while the loader lock is held, or during `FreeLibrary` / `ExitProcess` / `DllMain` detach, must use `Hook::remove_nothrow`. Do not call the throwing `Hook::remove()` on those paths.
+- Render-thread hook lambdas take a `HookActivityTracker::Guard` and skip callbacks when `guard.invoke` is false. Shutdown calls `HookActivityTracker::shutdown()` and then `drain()` before the DLL unloads.
+- Source and project files are UTF-8 without a BOM. Do not leave UTF-16 LE files in the tree.
+- A change to engine behavior, the public headers, crash handling, or the FPS sampler updates `tests/cpp` in the same change. `HydraHookTests` links the static library. `HydraHookWarpSmokeTests` is the D3D11 WARP check and must keep passing on a machine with no hardware GPU.

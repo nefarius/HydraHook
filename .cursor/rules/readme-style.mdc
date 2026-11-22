@@ -1,0 +1,44 @@
+---
+description: Enforce Nefarius README documentation style
+globs:
+  - README.md
+  - "**/README.md"
+alwaysApply: true
+---
+
+# README Style Rule
+
+When generating or editing README files, follow these rules:
+
+## Tone
+- Pragmatic, technical, direct.
+- No fluff or marketing language.
+- Concise; prefer bullets and short sections.
+
+## Must Include
+- One-line value proposition near top.
+- Explicit support scope (OS/arch/version).
+- Installation/quick start.
+- Build prerequisites and deterministic build steps.
+- Support policy and boundaries.
+- Licensing and required legal/trademark notes.
+- Credits/sources for dependencies and references (when relevant).
+
+## Preferred Organization
+- About/Summary early.
+- Features as bullets.
+- Limitations/known gaps section where applicable.
+- End-user instructions separated from contributor/build instructions.
+
+## Prohibited Patterns
+- Ambiguous support claims ("should work everywhere").
+- Missing versions in prerequisite lists.
+- Large unstructured prose blocks when bullets would be clearer.
+- Soft language where hard constraints exist.
+
+## Output Quality Check
+Before finalizing README text, ensure:
+1. A newcomer can install/use with no external guesswork.
+2. Support boundaries are explicit.
+3. Build steps are reproducible.
+4. The tone remains practical and technically precise.

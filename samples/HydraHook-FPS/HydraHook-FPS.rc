@@ -1,4 +1,4 @@
-﻿// Microsoft Visual C++ generated resource script.
+// Microsoft Visual C++ generated resource script.
 //
 #include "resource.h"
 
@@ -44,7 +44,7 @@ BEGIN
             VALUE "FileDescription", "HydraHook FPS counter"
             VALUE "FileVersion", "1.0.0.1"
             VALUE "InternalName", "HydraHook-FPS.dll"
-            VALUE "LegalCopyright", "Copyright (C) Benjamin Hoeglinger-Stelzer 2016-2026"
+            VALUE "LegalCopyright", "Copyright (C) Benjamin Höglinger-Stelzer 2016-2026"
             VALUE "OriginalFilename", "HydraHook-FPS.dll"
             VALUE "ProductName", "HydraHook-FPS"
             VALUE "ProductVersion", "1.0.0.1"

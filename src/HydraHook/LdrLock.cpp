@@ -30,23 +30,26 @@ bool HydraHook::Core::Util::IsLoaderLockHeld()
 	ULONG disposition = 0;
 	ULONG_PTR cookie = 0;
 
-	// TRY_ONLY = 0x2
-	NTSTATUS status = LdrLockLoaderLock(0x2, &disposition, &cookie);
+	// TRY_ONLY = 0x2. Disposition 1 means this call acquired the lock.
+	// Disposition 2 means the lock is held by another thread.
+	constexpr ULONG kTryOnly = 0x2;
+	constexpr ULONG kLockAcquired = 1;
+	constexpr ULONG kLockNotAcquired = 2;
+
+	NTSTATUS status = LdrLockLoaderLock(kTryOnly, &disposition, &cookie);
 
 	if (status < 0)
 		return false;
 
-	if (disposition == 0)
-	{
-		// Lock was acquired -> loader lock was NOT held
-		LdrUnlockLoaderLock(0, cookie);
-		return false;
-	}
-
-	if (disposition == 1)
-	{
-		// Lock was already held
+	if (disposition == kLockNotAcquired)
 		return true;
+
+	if (disposition == kLockAcquired)
+	{
+		// Drop the reference this probe took. The loader lock is recursive,
+		// so a try on the thread that already owns it also returns acquired
+		// and this function reports "not held" in that case (including DllMain).
+		LdrUnlockLoaderLock(0, cookie);
 	}
 
 	return false;

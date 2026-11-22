@@ -12,7 +12,7 @@ INPUT                  = include/HydraHook src/HydraHook
 FILE_PATTERNS          = *.h *.hpp *.cpp *.c
 RECURSIVE              = YES
 EXCLUDE                = vcpkg
-EXCLUDE_PATTERNS       = */vcpkg/* */detours/* */spdlog/* *.rc
+EXCLUDE_PATTERNS       = */vcpkg/* */vcpkg_installed/* */tests/* */detours/* */spdlog/* *.rc
 
 # Source browsing
 SOURCE_BROWSER         = YES

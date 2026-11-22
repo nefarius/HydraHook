@@ -1,0 +1,358 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-pre[0-9]+'
+    # paths-ignore is not evaluated for tag pushes, so releases always build.
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+  workflow_dispatch:
+
+# Tag pushes are never cancelled so a release is never half-published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_BINARY_SOURCES: "clear;nuget,GitHubPackages,readwrite"
+  # Parallel matrix jobs may race to push the same packages.
+  VCPKG_NUGET_PUSH_OPTIONS: "-SkipDuplicate"
+
+jobs:
+  build:
+    name: Build (${{ matrix.artifact }})
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+          - platform: x64
+            artifact: x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Init vcpkg submodule (shallow)
+        shell: pwsh
+        run: git submodule update --init --depth 1 vcpkg
+
+      - name: Configure NuGet credentials for vcpkg binary cache
+        shell: pwsh
+        run: |
+          nuget sources add `
+            -Name "GitHubPackages" `
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" `
+            -Username "${{ github.actor }}" `
+            -Password "${{ secrets.GITHUB_TOKEN }}" `
+            -StorePasswordInClearText
+          nuget setapikey "${{ secrets.GITHUB_TOKEN }}" `
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: Install vpatch
+        shell: pwsh
+        run: |
+          dotnet tool install --global Nefarius.Tools.Vpatch --version 2.7.0
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Compute build version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ref = '${{ github.ref }}'
+          if ($ref.StartsWith('refs/tags/')) {
+            . .\.github\scripts\Get-ReleaseBuildVersion.ps1
+            $ver = Get-ReleaseBuildVersion -Ref $ref
+          } else {
+            $ver = "4.2.0.${{ github.run_number }}"
+          }
+          "BUILD_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Output "BUILD_VERSION=$ver"
+
+      - name: Stamp version into resource files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(
+            'src\HydraHook\HydraHook.rc',
+            'samples\HydraHook-ImGui\HydraHook-ImGui.rc',
+            'samples\HydraHook-FPS\HydraHook-FPS.rc',
+            'samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc',
+            'samples\HydraHook-OpenCV\HydraHook-OpenCV.rc'
+          )
+          foreach ($file in $files) {
+            vpatch `
+              --stamp-version "$env:BUILD_VERSION" `
+              --target-file $file `
+              --resource.file-version `
+              --resource.product-version
+          }
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build static library, samples, and tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }}
+          if ($LASTEXITCODE -ne 0) { throw "Release_LIB build failed ($LASTEXITCODE)" }
+
+      - name: Build standalone HydraHook.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /t:HydraHook
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE)" }
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "bin\${{ matrix.artifact }}"
+          foreach ($exe in @('HydraHookTests.exe', 'HydraHookWarpSmokeTests.exe')) {
+            & (Join-Path $bin $exe)
+            if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
+          }
+
+      - name: Verify HydraHook.dll exports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
+          $dll = "bin\${{ matrix.artifact }}\HydraHook.dll"
+          $exports = & $dumpbin /EXPORTS $dll | Out-String
+          $required = @(
+            'HydraHookEngineCreate',
+            'HydraHookEngineDestroy',
+            'HydraHookEngineAllocCustomContext',
+            'HydraHookEngineFreeCustomContext',
+            'HydraHookEngineGetCustomContext',
+            'HydraHookEngineSetD3D9EventCallbacks',
+            'HydraHookEngineGetHandleFromD3D9Device',
+            'HydraHookEngineGetHandleFromD3D9ExDevice',
+            'HydraHookEngineSetD3D10EventCallbacks',
+            'HydraHookEngineSetD3D11EventCallbacks',
+            'HydraHookEngineSetD3D12EventCallbacks',
+            'HydraHookEngineGetD3D12CommandQueue',
+            'HydraHookEngineSetARCEventCallbacks',
+            'HydraHookEngineLogDebug',
+            'HydraHookEngineLogInfo',
+            'HydraHookEngineLogWarning',
+            'HydraHookEngineLogError'
+          )
+          foreach ($name in $required) {
+            if ($exports -notmatch [regex]::Escape($name)) {
+              throw "$dll is missing export $name"
+            }
+          }
+          Write-Output "HydraHook.dll exports the public API."
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $source = "bin\$arch"
+          $dest = "staged\$arch"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          $names = @(
+            'HydraHook.dll',
+            'HydraHook-ImGui.dll',
+            'HydraHook-FPS.dll',
+            'HydraHook-DirectXTK.dll',
+            'Arial.spritefont',
+            'HydraHook-OpenCV.dll'
+          )
+          foreach ($name in $names) {
+            $from = Join-Path $source $name
+            if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+            Copy-Item -LiteralPath $from -Destination (Join-Path $dest $name)
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  docs:
+    name: Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Lint API comments
+        run: doxygen Doxyfile
+
+  sign:
+    name: Sign release binaries
+    runs-on: windows-2022
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    env:
+      SIGN_RELAY_SERVER: ${{ vars.SIGN_RELAY_SERVER || 'https://signrelay.api.nefarius.systems/' }}
+      SIGN_RELAY_CI_TOKEN: ${{ secrets.SIGN_RELAY_CI_TOKEN }}
+
+    steps:
+      - name: Require signing configuration
+        shell: pwsh
+        run: |
+          if (-not $env:SIGN_RELAY_SERVER) { throw 'SIGN_RELAY_SERVER is empty.' }
+          if (-not $env:SIGN_RELAY_CI_TOKEN) { throw 'Repository secret SIGN_RELAY_CI_TOKEN is not set.' }
+          Write-Output "SignRelay server: $env:SIGN_RELAY_SERVER"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Download x86 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-x86
+          path: artifacts/x86
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-x64
+          path: artifacts/x64
+
+      - name: Assert release payload architectures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\.github\scripts\Assert-ReleaseArchitecture.ps1
+          Assert-ReleaseArchitecture -Path artifacts\x86 -Architecture x86
+          Assert-ReleaseArchitecture -Path artifacts\x64 -Architecture x64
+
+      - name: Assert binaries are unsigned
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -Path artifacts -Filter '*.dll' -Recurse -File)
+          if ($files.Count -eq 0) { throw 'No DLLs found in downloaded artifacts.' }
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($sig.Status -ne 'NotSigned') {
+              throw "Expected unsigned $($file.FullName) but Get-AuthenticodeSignature returned $($sig.Status)."
+            }
+            Write-Output "Unsigned as required: $($file.FullName)"
+          }
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Sign release binaries
+        uses: nefarius/SignRelay@39ccbe0cef16a383237130380a5aef8db040d5d0
+        with:
+          server: ${{ env.SIGN_RELAY_SERVER }}
+          token: ${{ env.SIGN_RELAY_CI_TOKEN }}
+          tool-version: 1.3.0
+          in-place: true
+          files: |
+            artifacts/**/*.dll
+
+      - name: Verify signed binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -Path artifacts -Filter '*.dll' -Recurse -File)
+          if ($files.Count -eq 0) { throw 'No DLLs found after signing.' }
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate) {
+              throw "File is not validly signed: $($file.FullName) (Status=$($sig.Status))."
+            }
+            Write-Output "Signed: $($file.FullName) (Subject=$($sig.SignerCertificate.Subject))"
+          }
+
+      - name: Package per-architecture archives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          foreach ($arch in @('x86', 'x64')) {
+            $zip = "release\HydraHook-$arch.zip"
+            Compress-Archive -Path "artifacts\$arch\*" -DestinationPath $zip -Force
+            Write-Output "Packaged $zip"
+          }
+
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\.github\scripts\Assert-ReleaseArchitecture.ps1
+          $staging = Join-Path $env:RUNNER_TEMP 'release-verify'
+          foreach ($arch in @('x86', 'x64')) {
+            Expand-Archive -LiteralPath "release\HydraHook-$arch.zip" `
+              -DestinationPath (Join-Path $staging $arch) -Force
+            Assert-ReleaseArchitecture -Path (Join-Path $staging $arch) -Architecture $arch -RequireSigned
+          }
+
+      - name: Upload release archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-release-assets
+          path: release/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: sign
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-release-assets
+          path: release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release/HydraHook-x86.zip
+            release/HydraHook-x64.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-pre') }}

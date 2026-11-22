@@ -1,16 +1,22 @@
 # HydraHook-OpenCV
 
-Skeleton sample demonstrating OpenCV integration with DirectX 11 and DirectX 12 hooks.
+Direct3D 11 and Direct3D 12 sample that reads the back buffer asynchronously and runs an OpenCV perception pipeline.
 
 ## About
 
 > [!CAUTION]
-> This sample app is still rough around the edges and hasn't been tested thoroughly with many games yet. Use with caution (or help finishing it) when testing!
+> This sample is still rough around the edges and has not been tested with many games. Use it on games you own.
 
-This sample wires up HydraHook's D3D11 and D3D12 Present hooks with minimal OpenCV usage. It clears the back buffer to a teal color as a visual proof that the overlay is rendering. OpenCV is consumed via vcpkg.
+On each Present the sample copies the back buffer into a staging resource (D3D11 `Map`, or a D3D12 readback heap) and hands the frame to a worker thread. The worker:
+
+- detects features with ORB
+- tracks them with Lucas-Kanade optical flow
+- estimates motion with a RANSAC essential matrix and recovers a pose trail
+
+An ImGui debug HUD draws the trail and feature counts. Press `F12` to toggle it. The D3D12 ImGui overlay is compiled only for x64; D3D11 works on x86 and x64.
 
 ## Building
 
-1. Run `prepare-deps.bat` from the repository root (from a **Developer Command Prompt for VS 2022** or x64 Native Tools Command Prompt) to install vcpkg dependencies, including OpenCV.
-2. Build the solution. The output DLL is placed in `bin/$(Configuration)/$(PlatformShortName)/` (Debug) or `bin/$(PlatformShortName)/` (Release).
-3. Inject the DLL into a D3D11 or D3D12 game to verify the hooks fire and the teal overlay appears.
+1. Run `prepare-deps.bat` from the repository root so vcpkg installs `opencv4`.
+2. Build `Release_LIB` (or `Release` of this project against the static library). The DLL is `bin\x64\HydraHook-OpenCV.dll` or `bin\x86\HydraHook-OpenCV.dll`.
+3. Inject that DLL into a D3D11 or D3D12 process. Use the x64 build for D3D12.

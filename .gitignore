@@ -20,6 +20,14 @@ mono_crash.*
 vcpkg_installed/
 vcpkg_installed_x86_stage/
 vcpkg_installed_x64_stage/
+vcpkg_installed_*_stage/
+.vcpkg-cache/
+
+# Local and CI staging
+docs/html/
+tools/
+staged/
+release/
 
 # Build results
 [Dd]ebug/

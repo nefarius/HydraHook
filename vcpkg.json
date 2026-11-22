@@ -1,6 +1,9 @@
 {
   "name": "hydrahook",
-  "version": "0.1.0",
+  "version": "4.2.0",
+  "description": "DirectX and Core Audio API-hooking framework",
+  "license": "MIT",
+  "supports": "!(arm | uwp)",
   "dependencies": [
     "spdlog",
     "detours",
