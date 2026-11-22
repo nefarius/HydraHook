@@ -56,6 +56,13 @@ jobs:
         shell: pwsh
         run: git submodule update --init --depth 1 vcpkg
 
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\.github\scripts\Bootstrap-VcpkgOnce.ps1
+          if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg failed ($LASTEXITCODE)" }
+
       - name: Resolve vcpkg cache key
         id: vcpkg-cache
         shell: pwsh

@@ -4,10 +4,12 @@
   <!--
     Bootstrap the local submodule only when it is checked out but has not yet
     been compiled (first local build after cloning with submodules).
+    The script holds a mutex: every project sees a missing vcpkg.exe at
+    evaluation time and would otherwise download it in parallel.
   -->
   <ItemDefinitionGroup Condition="'$(VcpkgEnabled)' != 'false' And Exists('$(VcpkgRoot)bootstrap-vcpkg.bat') And !Exists('$(VcpkgRoot)vcpkg.exe')">
     <PreBuildEvent>
-      <Command>"$(VcpkgRoot)bootstrap-vcpkg.bat"</Command>
+      <Command>powershell -NoProfile -ExecutionPolicy Bypass -File "$(MSBuildThisFileDirectory).github\scripts\Bootstrap-VcpkgOnce.ps1"</Command>
       <Message>Bootstrap vcpkg</Message>
     </PreBuildEvent>
   </ItemDefinitionGroup>
