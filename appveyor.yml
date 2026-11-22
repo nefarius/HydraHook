@@ -35,6 +35,7 @@ before_build:
 - cmd: dotnet tool install Nefarius.Tools.Vpatch --tool-path .\tools
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\src\HydraHook\HydraHook.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-ImGui\HydraHook-ImGui.rc" --resource.file-version --resource.product-version
+- cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-FPS\HydraHook-FPS.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc" --resource.file-version --resource.product-version
 - cmd: .\tools\vpatch.exe --stamp-version "%APPVEYOR_BUILD_VERSION%" --target-file ".\samples\HydraHook-OpenCV\HydraHook-OpenCV.rc" --resource.file-version --resource.product-version
 build:

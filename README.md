@@ -59,6 +59,8 @@ Pre-built binaries are available from the [buildbot](https://buildbot.nefarius.a
 
 ## How to use
 
+For a ready-to-use FPS counter, build the [HydraHook-FPS sample](samples/HydraHook-FPS/).
+
 Inject the resulting host library (e.g. `HydraHook-ImGui.dll`) into the target process first using a DLL injection utility of your choice (you can ofc. [use mine as well](https://github.com/nefarius/Injector)). The following example loads the [imgui sample](samples/HydraHook-ImGui):
 
 ```PowerShell
