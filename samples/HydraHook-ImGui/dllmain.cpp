@@ -66,11 +66,33 @@ static ComPtr<ID3D11Device> g_d3d11Device;
 static ComPtr<ID3D11DeviceContext> g_d3d11Context;
 static ComPtr<ID3D11RenderTargetView> g_d3d11Target;
 
+template<typename Context>
+struct ShaderResourceStage
+{
+	decltype(&Context::PSGetShaderResources) get;
+	decltype(&Context::PSSetShaderResources) set;
+};
+
+static constexpr ShaderResourceStage<ID3D10Device> d3d10Stages[] = {
+	{ &ID3D10Device::VSGetShaderResources, &ID3D10Device::VSSetShaderResources },
+	{ &ID3D10Device::GSGetShaderResources, &ID3D10Device::GSSetShaderResources },
+	{ &ID3D10Device::PSGetShaderResources, &ID3D10Device::PSSetShaderResources },
+};
+
+static constexpr ShaderResourceStage<ID3D11DeviceContext> d3d11Stages[] = {
+	{ &ID3D11DeviceContext::VSGetShaderResources, &ID3D11DeviceContext::VSSetShaderResources },
+	{ &ID3D11DeviceContext::HSGetShaderResources, &ID3D11DeviceContext::HSSetShaderResources },
+	{ &ID3D11DeviceContext::DSGetShaderResources, &ID3D11DeviceContext::DSSetShaderResources },
+	{ &ID3D11DeviceContext::GSGetShaderResources, &ID3D11DeviceContext::GSSetShaderResources },
+	{ &ID3D11DeviceContext::PSGetShaderResources, &ID3D11DeviceContext::PSSetShaderResources },
+	{ &ID3D11DeviceContext::CSGetShaderResources, &ID3D11DeviceContext::CSSetShaderResources },
+};
+
 // D3D10 and D3D11 may enter Present with the back buffer unbound. Bind it for
 // the overlay draw and restore all game render targets before returning.
-template<typename Resource, typename DepthView, typename ShaderView, typename Device, typename Context, typename Target>
+template<typename Resource, typename DepthView, typename ShaderView, typename Device, typename Context, typename Target, size_t StageCount>
 static void DrawToBackBuffer(IDXGISwapChain* chain, Device* device, Context* context,
-	ComPtr<Target>& target, void (*draw)(ImDrawData*))
+	ComPtr<Target>& target, const ShaderResourceStage<Context> (&stages)[StageCount], void (*draw)(ImDrawData*))
 {
 	// Key the view by the presenting chain's actual buffer without retaining the chain.
 	ComPtr<Resource> buffer;
@@ -88,16 +110,21 @@ static void DrawToBackBuffer(IDXGISwapChain* chain, Device* device, Context* con
 	Target* previous[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
 	ComPtr<DepthView> depth;
 	context->OMGetRenderTargets(ARRAYSIZE(previous), previous, &depth);
-	// Binding the back buffer for output can clear an overlapping SRV in any PS slot.
-	ShaderView* resources[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
-	context->PSGetShaderResources(0, ARRAYSIZE(resources), resources);
+	// Binding the back buffer for output can clear overlapping SRVs in any shader stage.
+	constexpr UINT slotCount = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+	ShaderView* resources[StageCount][slotCount]{};
+	for (size_t i = 0; i < StageCount; ++i)
+		(context->*stages[i].get)(0, slotCount, resources[i]);
 	context->OMSetRenderTargets(1, target.GetAddressOf(), nullptr);
 	draw(ImGui::GetDrawData());
 	context->OMSetRenderTargets(ARRAYSIZE(previous), previous, depth.Get());
-	context->PSSetShaderResources(0, ARRAYSIZE(resources), resources);
-	for (auto* view : resources)
-		if (view)
-			view->Release();
+	for (size_t i = 0; i < StageCount; ++i)
+	{
+		(context->*stages[i].set)(0, slotCount, resources[i]);
+		for (auto* view : resources[i])
+			if (view)
+				view->Release();
+	}
 	for (auto* view : previous)
 		if (view)
 			view->Release();
@@ -447,7 +474,7 @@ void EvtHydraHookD3D10Present(
 	RenderScene();
 
 	DrawToBackBuffer<ID3D10Resource, ID3D10DepthStencilView, ID3D10ShaderResourceView>(pSwapChain, g_d3d10Device.Get(),
-		g_d3d10Device.Get(), g_d3d10Target, ImGui_ImplDX10_RenderDrawData);
+		g_d3d10Device.Get(), g_d3d10Target, d3d10Stages, ImGui_ImplDX10_RenderDrawData);
 }
 
 void EvtHydraHookD3D10PreResizeBuffers(
@@ -525,7 +552,7 @@ void EvtHydraHookD3D11Present(
 	RenderScene();
 
 	DrawToBackBuffer<ID3D11Resource, ID3D11DepthStencilView, ID3D11ShaderResourceView>(pSwapChain, g_d3d11Device.Get(),
-		g_d3d11Context.Get(), g_d3d11Target, ImGui_ImplDX11_RenderDrawData);
+		g_d3d11Context.Get(), g_d3d11Target, d3d11Stages, ImGui_ImplDX11_RenderDrawData);
 }
 
 //
