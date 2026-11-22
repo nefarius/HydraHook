@@ -371,6 +371,22 @@ jobs:
           name: hydrahook-release-assets
           path: release
 
+      - name: Return an existing release to draft before replacing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft); then
+            if [ "$draft" = "false" ]; then
+              echo "Returning published release $RELEASE_TAG to draft before replacing its assets"
+              gh release edit "$RELEASE_TAG" --draft
+            fi
+          else
+            echo "No existing release for $RELEASE_TAG; the publish step will create one"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

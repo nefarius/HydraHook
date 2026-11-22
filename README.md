@@ -72,7 +72,7 @@ bin\x64\HydraHookWarpSmokeTests.exe
 
 ### Releases
 
-A `vX.Y.Z` tag (for example `v4.2.0`) builds, tests, signs, and publishes a stable GitHub Release. A `vX.Y.Z-preN` tag (for example `v4.2.0-pre1`, where `N` is one or more digits) publishes a prerelease. Signing requires the `SIGN_RELAY_CI_TOKEN` repository secret. `SIGN_RELAY_SERVER` is optional and defaults to `https://signrelay.api.nefarius.systems/`.
+A `vX.Y.Z` tag (for example `v4.2.0`) builds, tests, signs, and publishes a stable GitHub Release. A `vX.Y.Z-preN` tag (for example `v4.2.0-pre1`, where `N` is one or more digits) publishes a prerelease. Rerunning a tag that already has a published release returns that release to draft before the archives are replaced, and publishes it again only after both uploads succeed. Signing requires the `SIGN_RELAY_CI_TOKEN` repository secret. `SIGN_RELAY_SERVER` is optional and defaults to `https://signrelay.api.nefarius.systems/`.
 
 ### Pre-built binaries
 
