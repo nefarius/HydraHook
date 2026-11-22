@@ -55,7 +55,10 @@ ID3D12CommandQueue* GetD3D12CommandQueueForSwapChain(IDXGISwapChain* pSwapChain)
  * @brief Main hook worker thread; probes and hooks render and audio APIs.
  *
  * Installs the configured hooks, waits for cancellation, then uninstalls them.
- * The thread exits through FreeLibraryAndExitThread.
+ * The worker does not own the unload. When the host calls FreeLibrary, that
+ * hook runs cleanup and its caller exits with FreeLibraryAndExitThread, while
+ * the worker exits with ExitThread. On any other shutdown the worker exits
+ * with FreeLibraryAndExitThread after cleanup.
  *
  * @param Params PHYDRAHOOK_ENGINE cast to LPVOID.
  * @return Thread exit code. The thread does not return to its caller.

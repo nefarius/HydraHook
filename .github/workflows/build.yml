@@ -378,13 +378,23 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft); then
+          lookup_err=$(mktemp)
+          set +e
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>"$lookup_err")
+          status=$?
+          set -e
+          message=$(tr -d '\r\n' < "$lookup_err")
+          if [ "$status" -eq 0 ]; then
             if [ "$draft" = "false" ]; then
               echo "Returning published release $RELEASE_TAG to draft before replacing its assets"
               gh release edit "$RELEASE_TAG" --draft
             fi
-          else
+          elif [ "$status" -eq 1 ] && [ "$message" = "release not found" ]; then
             echo "No existing release for $RELEASE_TAG; the publish step will create one"
+          else
+            echo "Release lookup failed with exit ${status}" >&2
+            cat "$lookup_err" >&2
+            exit "$status"
           fi
 
       - name: Publish GitHub Release
