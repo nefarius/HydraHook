@@ -26,7 +26,9 @@ permissions:
   contents: read
 
 env:
-  VCPKG_BINARY_SOURCES: "clear;nuget,GitHubPackages,readwrite"
+  # nugettimeout is seconds. The vcpkg tool default is 100, and GitHub Packages
+  # drops larger packages (abseil, protobuf, opencv) before that upload finishes.
+  VCPKG_BINARY_SOURCES: "clear;nuget,GitHubPackages,readwrite;nugettimeout,1800"
   # Parallel matrix jobs may race to push the same packages.
   VCPKG_NUGET_PUSH_OPTIONS: "-SkipDuplicate"
 
