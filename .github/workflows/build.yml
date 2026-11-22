@@ -25,20 +25,17 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # nugettimeout is seconds. The vcpkg tool default is 100, and GitHub Packages
-  # drops larger packages (abseil, protobuf, opencv) before that upload finishes.
-  VCPKG_BINARY_SOURCES: "clear;nuget,GitHubPackages,readwrite;nugettimeout,1800"
-  # Parallel matrix jobs may race to push the same packages.
-  VCPKG_NUGET_PUSH_OPTIONS: "-SkipDuplicate"
-
 jobs:
   build:
     name: Build (${{ matrix.artifact }})
     runs-on: windows-2022
     permissions:
       contents: read
-      packages: write
+    env:
+      # Optional. GITHUB_TOKEN cannot create packages in a personal-account
+      # GitHub Packages namespace (403). A PAT with read:packages and
+      # write:packages publishes the same archives for local restores.
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,17 +56,51 @@ jobs:
         shell: pwsh
         run: git submodule update --init --depth 1 vcpkg
 
-      - name: Configure NuGet credentials for vcpkg binary cache
+      - name: Resolve vcpkg cache key
+        id: vcpkg-cache
         shell: pwsh
         run: |
-          nuget sources add `
+          $vcpkgSha = git rev-parse "HEAD:vcpkg"
+          $imageVersion = $env:ImageVersion
+          "vcpkg-sha=$vcpkgSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "image-version=$imageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Output "vcpkg $vcpkgSha (ImageVersion=$imageVersion)"
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: vcpkg-archives
+          # vcpkg checks each archive's ABI hash, so a restore without ImageVersion
+          # ignores packages built by an older runner image.
+          key: vcpkg-v1-${{ matrix.artifact }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.vcpkg-cache.outputs.vcpkg-sha }}-${{ steps.vcpkg-cache.outputs.image-version }}
+          restore-keys: |
+            vcpkg-v1-${{ matrix.artifact }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.vcpkg-cache.outputs.vcpkg-sha }}-
+
+      - name: Configure vcpkg files binary cache
+        shell: pwsh
+        run: |
+          $archives = (Join-Path $env:GITHUB_WORKSPACE 'vcpkg-archives').Replace('\', '/')
+          New-Item -ItemType Directory -Force -Path $archives | Out-Null
+          "VCPKG_BINARY_SOURCES=clear;files,$archives,readwrite" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure vcpkg NuGet binary cache
+        if: ${{ env.VCPKG_NUGET_TOKEN != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nugetExe = & .\vcpkg\vcpkg.exe fetch nuget | Select-Object -Last 1
+          & $nugetExe sources add `
             -Name "GitHubPackages" `
             -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" `
-            -Username "${{ github.actor }}" `
-            -Password "${{ secrets.GITHUB_TOKEN }}" `
+            -Username "${{ github.repository_owner }}" `
+            -Password "$env:VCPKG_NUGET_TOKEN" `
             -StorePasswordInClearText
-          nuget setapikey "${{ secrets.GITHUB_TOKEN }}" `
+          if ($LASTEXITCODE -ne 0) { throw "nuget sources add failed ($LASTEXITCODE)" }
+          & $nugetExe setapikey "$env:VCPKG_NUGET_TOKEN" `
             -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          if ($LASTEXITCODE -ne 0) { throw "nuget setapikey failed ($LASTEXITCODE)" }
+          "VCPKG_BINARY_SOURCES=$env:VCPKG_BINARY_SOURCES;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite;nugettimeout,1800" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_NUGET_PUSH_OPTIONS=-SkipDuplicate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install vpatch
         shell: pwsh

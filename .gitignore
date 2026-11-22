@@ -22,6 +22,7 @@ vcpkg_installed_x86_stage/
 vcpkg_installed_x64_stage/
 vcpkg_installed_*_stage/
 .vcpkg-cache/
+vcpkg-archives/
 
 # Local and CI staging
 docs/html/
