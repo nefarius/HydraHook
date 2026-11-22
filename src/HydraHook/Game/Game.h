@@ -42,15 +42,22 @@ struct ID3D12CommandQueue;
 
 /**
  * @brief Returns the D3D12 command queue associated with a swap chain.
- * Works for both early injection (CreateSwapChain hook) and mid-process injection (ExecuteCommandLists hook).
- * @param pSwapChain The swap chain to query.
- * @return The command queue with AddRef, or nullptr if not yet captured.
+ *
+ * Checks the swap-chain map filled by the CreateSwapChain hook, then the
+ * device map filled by the ExecuteCommandLists hook.
+ *
+ * @param pSwapChain The swap chain to query. May be null.
+ * @return The command queue with AddRef, or nullptr if it is not captured or @p pSwapChain is null.
  */
 ID3D12CommandQueue* GetD3D12CommandQueueForSwapChain(IDXGISwapChain* pSwapChain);
 
 /**
- * @brief Main hook worker thread; probes and hooks render/audio APIs.
+ * @brief Main hook worker thread; probes and hooks render and audio APIs.
+ *
+ * Installs the configured hooks, waits for cancellation, then uninstalls them.
+ * The thread exits through FreeLibraryAndExitThread.
+ *
  * @param Params PHYDRAHOOK_ENGINE cast to LPVOID.
- * @return Thread exit code (0 on success).
+ * @return Thread exit code. The thread does not return to its caller.
  */
 DWORD WINAPI HydraHookMainThread(LPVOID Params);

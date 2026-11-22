@@ -76,24 +76,6 @@ SOFTWARE.
 static std::map<HMODULE, PHYDRAHOOK_ENGINE> g_EngineHostInstances;
 
 
-/**
- * @brief Create and initialize a HydraHook engine for a host module and start its main thread.
- *
- * Initializes a new engine instance for the specified host module, configures logging per
- * the provided engine configuration, creates the engine cancellation event, launches the
- * engine's main thread, and registers the engine in the process-wide host-instance map.
- *
- * @param HostInstance Handle to the host module (HMODULE) the engine will be associated with.
- * @param EngineConfig Pointer to an engine configuration structure that controls logging and other engine options.
- * @param Engine Optional out parameter that receives the allocated engine handle on success.
- * @return HYDRAHOOK_ERROR_NONE on success.
- * @return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED if an engine is already created for HostInstance.
- * @return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED if the host DLL module handle could not be obtained.
- * @return HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED if engine memory allocation failed.
- * @return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED if a suitable logger could not be created or obtained.
- * @return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED if the engine cancellation event could not be created.
- * @return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED if the engine main thread could not be created.
- */
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRAHOOK_ENGINE_CONFIG EngineConfig,
                                                     PHYDRAHOOK_ENGINE* Engine)
 {
@@ -414,14 +396,6 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engin
 
 #ifndef HYDRAHOOK_NO_D3D12
 
-/**
- * @brief Sets the engine's Direct3D12 event callback table.
- *
- * Copies the provided D3D12 event callbacks into the engine's D3D12 callback slot.
- *
- * @param Engine Pointer to the engine whose D3D12 callbacks will be updated. If `nullptr`, the function does nothing.
- * @param Callbacks Pointer to the callback table to copy from.
- */
 HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                          PHYDRAHOOK_D3D12_EVENT_CALLBACKS Callbacks)
 {
@@ -431,12 +405,6 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(PHYDRAHOOK_ENGINE Engin
 	}
 }
 
-/**
- * @brief Retrieves the ID3D12CommandQueue associated with a given DXGI swap chain.
- *
- * @param pSwapChain Pointer to the IDXGISwapChain whose associated command queue is requested; may be nullptr.
- * @return ID3D12CommandQueue* Pointer to the associated ID3D12CommandQueue, or nullptr if no queue is found.
- */
 HYDRAHOOK_API ID3D12CommandQueue* HydraHookEngineGetD3D12CommandQueue(IDXGISwapChain* pSwapChain)
 {
 	return GetD3D12CommandQueueForSwapChain(pSwapChain);
@@ -507,12 +475,6 @@ static void HydraHookEngineLogImpl(spdlog::level::level_enum level, LPCSTR Forma
 	logger->log(level, buf);
 }
 
-/**
- * @brief Logs a formatted message at the debug level to the host logger.
- *
- * @param Format Printf-style format string.
- * @param ... Arguments matching the format specifiers in `Format`.
- */
 _Use_decl_annotations_
 HYDRAHOOK_API VOID HydraHookEngineLogDebug(LPCSTR Format, ...)
 {
@@ -522,15 +484,6 @@ HYDRAHOOK_API VOID HydraHookEngineLogDebug(LPCSTR Format, ...)
 	va_end(args);
 }
 
-/**
- * @brief Logs a formatted informational message to the host-scoped logger.
- *
- * Formats the provided printf-style string and emits it at the info level via the host logger.
- * If the host logger is not available or not enabled for info-level messages, no output is produced.
- *
- * @param Format printf-style format string.
- * @param ... Values referenced by `Format`.
- */
 _Use_decl_annotations_
 HYDRAHOOK_API VOID HydraHookEngineLogInfo(LPCSTR Format, ...)
 {
@@ -540,14 +493,6 @@ HYDRAHOOK_API VOID HydraHookEngineLogInfo(LPCSTR Format, ...)
 	va_end(args);
 }
 
-/**
- * @brief Logs a formatted warning message to the host logger.
- *
- * Formats the provided printf-style message and emits it at the warning level
- * using the host-scoped logger.
- *
- * @param Format printf-style format string followed by corresponding arguments.
- */
 _Use_decl_annotations_
 HYDRAHOOK_API VOID HydraHookEngineLogWarning(LPCSTR Format, ...)
 {
@@ -557,15 +502,6 @@ HYDRAHOOK_API VOID HydraHookEngineLogWarning(LPCSTR Format, ...)
 	va_end(args);
 }
 
-/**
- * @brief Log an error-level message to the host logger using a printf-style format.
- *
- * Formats the provided arguments according to `Format` and emits the result at error severity
- * via the host-scoped logger.
- *
- * @param Format printf-style format string.
- * @param ... Arguments referenced by the format string.
- */
 _Use_decl_annotations_
 HYDRAHOOK_API VOID HydraHookEngineLogError(LPCSTR Format, ...)
 {

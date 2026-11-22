@@ -191,7 +191,7 @@ int main()
         {
             std::fprintf(stderr, "FreeLibrary wait timed out (WaitForSingleObject returned %lu)\n",
                          static_cast<unsigned long>(waited));
-            ExitProcess(1);
+            TerminateProcess(GetCurrentProcess(), 1);
         }
         CloseHandle(unloadThread);
     }

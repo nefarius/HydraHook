@@ -32,7 +32,7 @@ gh api graphql -f query='
   }' -f owner=nefarius -f repo=HydraHook -F pr=<num>
 ```
 
-Page `reviews` with `$reviewCursor` and `reviewThreads` with `$threadCursor` while each connection's `hasNextPage` is true. Merge only when, for that `headRefOid`, every `reviewThreads` node has `isResolved: true` and no human review is `CHANGES_REQUESTED` without a later approval.
+Page `reviews` with `$reviewCursor` and `reviewThreads` with `$threadCursor` while each connection's `hasNextPage` is true. Merge only when, for that `headRefOid`, every `reviewThreads` node has `isResolved: true`, and every human `CHANGES_REQUESTED` review is followed by an approval from that same reviewer or by dismissal of that review. An approval from a different reviewer does not clear it.
 
 ## Documentation
 

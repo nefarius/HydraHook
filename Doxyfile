@@ -24,10 +24,15 @@ REFERENCES_RELATION    = YES
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = NO
-PREDEFINED             = HYDRAHOOK_API= __declspec(dllexport)=
-                         WINAPI= APIENTRY= _In_= _Out_= _In_opt_= _Out_opt_=
-                         _Function_class_(x)=
-                         FORCEINLINE= __forceinline
+PREDEFINED             = "HYDRAHOOK_API=" \
+                         "WINAPI=" \
+                         "APIENTRY=" \
+                         "_In_=" \
+                         "_Out_=" \
+                         "_In_opt_=" \
+                         "_Out_opt_=" \
+                         "_Function_class_(x)=" \
+                         "FORCEINLINE=inline"
 
 # Extraction
 EXTRACT_ALL            = YES
@@ -46,7 +51,6 @@ GENERATE_MAN           = NO
 
 # HTML options
 HTML_OUTPUT            = html
-HTML_TIMESTAMP         = YES
 HTML_DYNAMIC_SECTIONS  = NO
 DISABLE_INDEX          = NO
 GENERATE_TREEVIEW      = YES

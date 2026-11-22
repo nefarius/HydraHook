@@ -386,4 +386,6 @@ jobs:
         if: contains(github.ref_name, '-pre')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
