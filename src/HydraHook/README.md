@@ -10,7 +10,7 @@ Doxygen 1.18.0 builds this document into the same HTML reference as the public h
 doxygen Doxyfile
 ```
 
-Open `docs/html/index.html`. Generated HTML is not committed. The class index is the C++ navigation, and source links are generated for the public headers and the engine. The architecture diagram stays in the page as Mermaid source so the HTML does not load a remote script.
+Open `docs/html/index.html`. Generated HTML is not committed. The class index is the C++ navigation, and source links are generated for the public headers and the engine. Mermaid diagrams render client-side from a pinned jsDelivr Mermaid release.
 
 Published reference: <https://nefarius.github.io/HydraHook/>
 

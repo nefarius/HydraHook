@@ -59,13 +59,12 @@ GENERATE_MAN           = NO
 HTML_OUTPUT            = html
 HTML_COLORSTYLE        = LIGHT
 HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome/doxygen-awesome.css \
-                         docs/doxygen-awesome/doxygen-awesome-sidebar-only.css
-HTML_EXTRA_FILES       = docs/doxygen-awesome/mermaid-offline.js \
-                         docs/doxygen-awesome/LICENSE
-# The architecture page includes a Mermaid diagram. Render it from a local
-# module so the HTML tree does not depend on a CDN.
+                         docs/doxygen-awesome/doxygen-awesome-sidebar-only.css \
+                         docs/mermaid.css
+HTML_EXTRA_FILES       = docs/doxygen-awesome/LICENSE
+# Render Mermaid diagrams (such as the architecture flowchart) client-side with a pinned release.
 MERMAID_RENDER_MODE    = CLIENT_SIDE
-MERMAID_JS_URL         = mermaid-offline.js
+MERMAID_JS_URL         = https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs
 HTML_DYNAMIC_SECTIONS  = NO
 DISABLE_INDEX          = NO
 GENERATE_TREEVIEW      = YES
