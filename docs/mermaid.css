@@ -1,0 +1,7 @@
+@media (prefers-color-scheme: dark) {
+    pre.mermaid[data-processed="true"] {
+        background-color: #ffffff;
+        padding: 12px;
+        border-radius: var(--border-radius-medium, 8px);
+    }
+}
