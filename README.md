@@ -57,7 +57,7 @@ API-Hooking and rendering framework for DirectX-based games.
 
 1. Clone the repository and initialize submodules: `git submodule update --init --recursive`
 2. From the repository root, run `prepare-deps.bat` (both x86 and x64), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`. With no arguments the script locates Visual Studio via `vswhere` and sets up the compiler itself.
-3. Open `HydraHook.slnx` and build `Release_LIB` (static library, samples, and tests) or `Release` (standalone `HydraHook.dll`)
+3. Open `HydraHook.slnx` and build `Release_LIB` (static library, samples, and tests) or `Release` (standalone `HydraHook.dll`). Both write `bin\<arch>\HydraHook.lib`; delete that file before switching between them, or the tests fail to link
 
 Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared in `vcpkg.json` and installed via [vcpkg](https://github.com/microsoft/vcpkg) (included as a submodule). The manifest baseline is pinned in `vcpkg-configuration.json`. GitHub Actions builds core/tests, the ImGui/FPS/DirectXTK samples, and the OpenCV dependencies/sample in separate jobs and caches each slice's vcpkg archives per architecture. Publishing those packages to GitHub Packages requires the `VCPKG_NUGET_TOKEN` secret, a PAT with `read:packages` and `write:packages`. The workflow token cannot create packages under a personal account.
 
