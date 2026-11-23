@@ -177,6 +177,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\HydraHook-ImGui\dllmain.h" />
+    <ClInclude Include="..\HydraHook-ImGui\InitGuard.h" />
     <ClInclude Include="FrameRate.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>

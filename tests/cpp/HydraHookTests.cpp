@@ -14,9 +14,13 @@
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
 #include "FrameRate.h"
+#include "InitGuard.h"
+#include "OverlayRelease.h"
+#include "WindowProcHook.h"
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -383,6 +387,412 @@ namespace
         Check(frameRate.AverageMilliseconds() == 0.0, "reset clears the average", __FILE__, __LINE__);
     }
 
+    void TestResettableInitGuard()
+    {
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            auto init = [&]() { ++calls; return true; };
+            Check(guard.EnsureInitialized(init), "init succeeds", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init), "init stays latched", __FILE__, __LINE__);
+            Check(calls == 1, "init runs once", __FILE__, __LINE__);
+            guard.Reset();
+            Check(guard.EnsureInitialized(init), "init runs after reset", __FILE__, __LINE__);
+            Check(calls == 2, "reset allows re-init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            bool succeed = false;
+            auto init = [&]() { ++calls; return succeed; };
+            Check(!guard.EnsureInitialized(init), "failure reported", __FILE__, __LINE__);
+            succeed = true;
+            Check(!guard.EnsureInitialized(init), "failure latched like call_once", __FILE__, __LINE__);
+            Check(calls == 1, "no retry without reset", __FILE__, __LINE__);
+            guard.Reset();
+            Check(guard.EnsureInitialized(init), "success after reset", __FILE__, __LINE__);
+            Check(calls == 2, "reset re-executed init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            int failuresLeft = 2;
+            auto init = [&]() { ++calls; return failuresLeft-- <= 0; };
+            Check(!guard.EnsureInitialized(init, true), "retry mode fails 1", __FILE__, __LINE__);
+            Check(!guard.EnsureInitialized(init, true), "retry mode fails 2", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init, true), "retry mode succeeds", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init, true), "retry mode latches", __FILE__, __LINE__);
+            Check(calls == 3, "retry mode ran until success", __FILE__, __LINE__);
+            guard.Reset();
+            failuresLeft = 0;
+            Check(guard.EnsureInitialized(init, true), "retry mode re-inits after reset", __FILE__, __LINE__);
+            Check(calls == 4, "reset re-executed retry-mode init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            std::atomic<int> calls{0};
+            std::atomic<bool> go{false};
+            std::thread threads[8];
+            for (auto& t : threads)
+            {
+                t = std::thread([&]()
+                {
+                    while (!go.load())
+                        SwitchToThread();
+                    guard.EnsureInitialized([&]() { ++calls; Sleep(20); return true; });
+                });
+            }
+            go.store(true);
+            for (auto& t : threads)
+                t.join();
+            Check(calls.load() == 1, "concurrent callers init exactly once", __FILE__, __LINE__);
+        }
+    }
+
+    std::atomic<int> g_origMessages{0};
+    std::atomic<int> g_origDestroy{0};
+    std::atomic<int> g_origNcDestroy{0};
+    std::atomic<int> g_handlerCalls{0};
+    std::atomic<int> g_errorCalls{0};
+    std::atomic<LRESULT> g_reentrantResult{-1};
+    std::atomic<int> g_beforeDispatchPhase{0};
+
+    void TestBeforeDispatch(UINT msg)
+    {
+        if (msg != WM_APP + 1 || g_beforeDispatchPhase.load() != 1)
+            return;
+        g_beforeDispatchPhase.store(2);
+        while (g_beforeDispatchPhase.load() == 2)
+            SwitchToThread();
+    }
+
+    LRESULT CALLBACK TestOrigProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        ++g_origMessages;
+        switch (msg)
+        {
+        case WM_APP + 1:
+            return 0x1234;
+        case WM_APP + 9:
+            DestroyWindow(hWnd);
+            PostQuitMessage(0);
+            return 0;
+        case WM_DESTROY:
+            ++g_origDestroy;
+            break;
+        case WM_NCDESTROY:
+            ++g_origNcDestroy;
+            break;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    LRESULT CALLBACK TestOuterProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    WNDPROC g_outerPrevious = nullptr;
+
+    LRESULT CALLBACK TestOuterProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        return CallWindowProcW(g_outerPrevious, hWnd, msg, wParam, lParam);
+    }
+
+    LRESULT TestHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        (void)wParam;
+        (void)lParam;
+        ++g_handlerCalls;
+        if (msg == WM_APP + 2)
+            return 0x77;
+        if (msg == WM_APP + 3)
+            g_reentrantResult = SendMessageW(hWnd, WM_APP + 1, 0, 0);
+        return 0;
+    }
+
+    void TestErrorLogger(const char*)
+    {
+        ++g_errorCalls;
+    }
+
+    HWND MakeTestWindow()
+    {
+        static bool registered = false;
+        if (!registered)
+        {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = TestOrigProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"HydraHookWndProcTest";
+            RegisterClassW(&wc);
+            registered = true;
+        }
+        return CreateWindowExW(0, L"HydraHookWndProcTest", L"t", WS_OVERLAPPED, 0, 0, 16, 16,
+                               nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    }
+
+    void TestWindowProcHook()
+    {
+        auto& hook = WindowProcHook::Instance();
+        hook.SetErrorLogger(TestErrorLogger);
+        hook.SetMessageHandler(TestHandler);
+
+        // Input validation
+        Check(!hook.Hook(nullptr), "hook rejects null window", __FILE__, __LINE__);
+        Check(g_errorCalls.load() == 1, "null window logged", __FILE__, __LINE__);
+        HWND dead = MakeTestWindow();
+        DestroyWindow(dead);
+        Check(!hook.Hook(dead), "hook rejects destroyed window", __FILE__, __LINE__);
+        Check(g_errorCalls.load() == 2, "destroyed window logged", __FILE__, __LINE__);
+
+        // Interception and forwarding
+        HWND w1 = MakeTestWindow();
+        Check(w1 != nullptr, "test window created", __FILE__, __LINE__);
+        Check(hook.Hook(w1), "hook window", __FILE__, __LINE__);
+        Check(hook.Hook(w1), "duplicate hook is idempotent", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 1 && hook.IsHooked(w1), "single tracked window", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w1, GWLP_WNDPROC) != reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "dispatcher installed", __FILE__, __LINE__);
+
+        g_handlerCalls = 0;
+        g_origMessages = 0;
+        Check(SendMessageW(w1, WM_APP + 1, 0, 0) == 0x1234, "unhandled message forwarded to original", __FILE__, __LINE__);
+        Check(g_handlerCalls.load() == 1 && g_origMessages.load() == 1, "handler then original", __FILE__, __LINE__);
+        g_origMessages = 0;
+        Check(SendMessageW(w1, WM_APP + 2, 0, 0) == 0x77, "handler result short-circuits", __FILE__, __LINE__);
+        Check(g_origMessages.load() == 0, "original skipped when handled", __FILE__, __LINE__);
+
+        // Re-entrant SendMessage from the handler
+        g_reentrantResult = -1;
+        SendMessageW(w1, WM_APP + 3, 0, 0);
+        Check(g_reentrantResult.load() == 0x1234, "re-entrant send does not deadlock", __FILE__, __LINE__);
+
+        // Independent windows, selective unhook
+        HWND w2 = MakeTestWindow();
+        Check(hook.Hook(w2), "hook second window", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 2, "two tracked windows", __FILE__, __LINE__);
+        Check(hook.Unhook(w1), "unhook restores", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w1, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "original restored", __FILE__, __LINE__);
+        Check(!hook.IsHooked(w1) && hook.IsHooked(w2), "second window untouched", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        SendMessageW(w1, WM_APP + 1, 0, 0);
+        Check(g_handlerCalls.load() == 0, "unhooked window bypasses handler", __FILE__, __LINE__);
+
+        // Destroy messages reach the original and clean up
+        g_origDestroy = 0;
+        g_origNcDestroy = 0;
+        DestroyWindow(w2);
+        Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "destroy messages forwarded", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "no active hook after destroy", __FILE__, __LINE__);
+        DestroyWindow(w1);
+
+        // Re-hook after UnhookAll
+        HWND w3 = MakeTestWindow();
+        Check(hook.Hook(w3), "hook before UnhookAll", __FILE__, __LINE__);
+        hook.UnhookAll();
+        Check(hook.HookedCount() == 0, "UnhookAll leaves no active hook", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w3, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "UnhookAll restores", __FILE__, __LINE__);
+        Check(hook.Hook(w3), "re-hook after UnhookAll", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        SendMessageW(w3, WM_APP + 1, 0, 0);
+        Check(g_handlerCalls.load() == 1, "handler active after re-hook", __FILE__, __LINE__);
+        hook.UnhookAll();
+        DestroyWindow(w3);
+
+        // Another party subclasses after us: do not clobber it
+        HWND w4 = MakeTestWindow();
+        Check(hook.Hook(w4), "hook before external subclass", __FILE__, __LINE__);
+        g_outerPrevious = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(w4, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&TestOuterProc)));
+        Check(!hook.Unhook(w4), "unhook refuses to drop outer subclass", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w4, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOuterProc),
+              "outer subclass kept", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        Check(SendMessageW(w4, WM_APP + 1, 0, 0) == 0x1234, "pass-through still reaches original", __FILE__, __LINE__);
+        Check(g_handlerCalls.load() == 0, "pass-through skips handler", __FILE__, __LINE__);
+        g_origDestroy = 0;
+        g_origNcDestroy = 0;
+        DestroyWindow(w4);
+        Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "chained destroy forwarded", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "no active hook after chained destroy", __FILE__, __LINE__);
+
+        // Unhook while DispatchProc is entered but has not incremented its in-flight count.
+        // The original procedure must still be invoked. DefWindowProcW returns 0 for WM_APP.
+        {
+            std::atomic<HWND> shared{nullptr};
+            std::atomic<int> ownerReady{0};
+            std::thread owner([&]()
+            {
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    ownerReady.store(-1);
+                    return;
+                }
+                shared.store(hw);
+                ownerReady.store(1);
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+            while (ownerReady.load() == 0)
+                SwitchToThread();
+            if (ownerReady.load() < 0)
+            {
+                owner.join();
+                Check(false, "preamble owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = shared.load();
+                const bool hooked = hook.Hook(hw);
+                Check(hooked, "hook before preamble unhook", __FILE__, __LINE__);
+                if (!hooked)
+                {
+                    SendMessageW(hw, WM_APP + 9, 0, 0);
+                    owner.join();
+                }
+                else
+                {
+                    hook.SetBeforeDispatch(TestBeforeDispatch);
+                    g_beforeDispatchPhase.store(0);
+                    g_origMessages = 0;
+                    std::atomic<LRESULT> delivered{-1};
+                    std::thread sender([&]()
+                    {
+                        g_beforeDispatchPhase.store(1);
+                        delivered.store(SendMessageW(hw, WM_APP + 1, 0, 0));
+                    });
+                    while (g_beforeDispatchPhase.load() != 2)
+                        SwitchToThread();
+                    Check(hook.Unhook(hw), "unhook during dispatch preamble", __FILE__, __LINE__);
+                    g_beforeDispatchPhase.store(3);
+                    sender.join();
+                    hook.SetBeforeDispatch(nullptr);
+                    Check(delivered.load() == 0x1234, "preamble dispatch still reaches the original", __FILE__, __LINE__);
+                    Check(g_origMessages.load() >= 1, "original procedure ran after preamble unhook", __FILE__, __LINE__);
+                    SendMessageW(hw, WM_APP + 9, 0, 0);
+                    owner.join();
+                }
+            }
+        }
+
+        // Cross-thread: the owner thread pumps while this thread hooks, sends, and unhooks.
+        // Readiness is separate from the HWND so a failed CreateWindow cannot spin forever.
+        std::atomic<HWND> shared{nullptr};
+        std::atomic<int> ownerReady{0};
+        std::thread owner([&]()
+        {
+            HWND hw = MakeTestWindow();
+            if (!hw)
+            {
+                ownerReady.store(-1);
+                return;
+            }
+            shared.store(hw);
+            ownerReady.store(1);
+            MSG m;
+            while (GetMessageW(&m, nullptr, 0, 0) > 0)
+            {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        });
+        while (ownerReady.load() == 0)
+            SwitchToThread();
+        if (ownerReady.load() < 0)
+        {
+            owner.join();
+            Check(false, "owner window created", __FILE__, __LINE__);
+        }
+        else
+        {
+        HWND shw = shared.load();
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> sent{0};
+        std::thread sender([&]()
+        {
+            while (!stop.load())
+            {
+                if (SendMessageW(shw, WM_APP + 1, 0, 0) == 0x1234)
+                    ++sent;
+            }
+        });
+        int installs = 0;
+        int observed = 0;
+        for (int i = 0; i < 100; ++i)
+        {
+            if (!hook.Hook(shw))
+            {
+                hook.UnhookAll();
+                continue;
+            }
+            ++installs;
+            const int before = g_handlerCalls.load();
+            const LRESULT delivered = SendMessageW(shw, WM_APP + 1, 0, 0);
+            if (delivered == 0x1234 && g_handlerCalls.load() > before)
+                ++observed;
+            hook.UnhookAll();
+        }
+        stop.store(true);
+        sender.join();
+        Check(installs > 0, "at least one cross-thread hook installed", __FILE__, __LINE__);
+        Check(observed > 0, "handler saw a message while the hook was installed", __FILE__, __LINE__);
+        Check(sent.load() > 0, "messages delivered during hook churn", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(shw, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "original restored after churn", __FILE__, __LINE__);
+        SendMessageW(shw, WM_APP + 9, 0, 0);
+        owner.join();
+        Check(hook.HookedCount() == 0, "no active hooks remain", __FILE__, __LINE__);
+        }
+
+        hook.SetMessageHandler(nullptr);
+        hook.SetErrorLogger(nullptr);
+        hook.SetBeforeDispatch(nullptr);
+    }
+
+    void TestOverlayReleaseClaim()
+    {
+        std::atomic<uint32_t> current{1};
+        std::atomic<uint32_t> applied{0};
+
+        Check(ClaimOverlayRelease(current, applied, 1, false), "first release claims the hide", __FILE__, __LINE__);
+        // Reopening does not change the generation. A delayed duplicate must not claim again.
+        Check(!ClaimOverlayRelease(current, applied, 1, false), "duplicate release after reopen is ignored", __FILE__, __LINE__);
+
+        current.store(2);
+        Check(!ClaimOverlayRelease(current, applied, 1, false), "stale hide is ignored", __FILE__, __LINE__);
+        Check(ClaimOverlayRelease(current, applied, 2, false), "newer hide claims", __FILE__, __LINE__);
+        Check(!ClaimOverlayRelease(current, applied, 2, false), "newer hide is also idempotent", __FILE__, __LINE__);
+
+        Check(ClaimOverlayRelease(current, applied, 0, true), "unhook force still runs", __FILE__, __LINE__);
+        Check(!ClaimOverlayRelease(current, applied, 2, false), "force consumes the current generation", __FILE__, __LINE__);
+
+        std::mutex gate;
+        std::atomic<bool> pending{true};
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            current.store(3);
+            pending.store(true);
+        }
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            Check(!ClearPendingIfCurrent(current, pending, 2), "older post does not clear a newer hide", __FILE__, __LINE__);
+        }
+        Check(pending.load(), "newer hide stays pending", __FILE__, __LINE__);
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            Check(ClearPendingIfCurrent(current, pending, 3), "matching post clears pending", __FILE__, __LINE__);
+        }
+        Check(!pending.load(), "matching generation consumed the request", __FILE__, __LINE__);
+    }
+
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -401,6 +811,9 @@ int main()
     TestExceptions();
     TestCrashHandler();
     TestFrameRate();
+    TestResettableInitGuard();
+    TestWindowProcHook();
+    TestOverlayReleaseClaim();
     TestShutdownGuard();
 
     if (g_failures != 0)

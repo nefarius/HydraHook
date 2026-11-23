@@ -177,6 +177,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="dllmain.h" />
+    <ClInclude Include="InitGuard.h" />
+    <ClInclude Include="ImGuiWin32Buttons.h" />
+    <ClInclude Include="OverlayRelease.h" />
+    <ClInclude Include="WindowProcHook.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
