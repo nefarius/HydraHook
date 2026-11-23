@@ -32,6 +32,7 @@ SOFTWARE.
 // STL
 // 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <wrl/client.h>
@@ -68,7 +69,7 @@ static std::atomic<bool> g_InputClosed{ false };
 // Serializes ImGui context use between the render thread and the window thread.
 // Re-entry on the thread that already holds it does not lock again: Present and a
 // SendMessage it triggers can share a thread, and Dear ImGui is already on that stack.
-static std::mutex g_ImGuiMutex;
+static std::timed_mutex g_ImGuiMutex;
 static std::atomic<DWORD> g_ImGuiOwner{ 0 };
 
 struct ImGuiScope
@@ -77,10 +78,30 @@ struct ImGuiScope
 	{
 		const DWORD self = ::GetCurrentThreadId();
 		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+		{
+			acquired_ = true;
 			return;
+		}
 		g_ImGuiMutex.lock();
 		g_ImGuiOwner.store(self, std::memory_order_relaxed);
 		locked_ = true;
+		acquired_ = true;
+	}
+
+	explicit ImGuiScope(std::chrono::milliseconds timeout)
+	{
+		const DWORD self = ::GetCurrentThreadId();
+		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+		{
+			acquired_ = true;
+			return;
+		}
+		if (g_ImGuiMutex.try_lock_for(timeout))
+		{
+			g_ImGuiOwner.store(self, std::memory_order_relaxed);
+			locked_ = true;
+			acquired_ = true;
+		}
 	}
 
 	~ImGuiScope()
@@ -91,11 +112,14 @@ struct ImGuiScope
 		g_ImGuiMutex.unlock();
 	}
 
+	bool owns_lock() const { return acquired_; }
+
 	ImGuiScope(const ImGuiScope&) = delete;
 	ImGuiScope& operator=(const ImGuiScope&) = delete;
 
 private:
 	bool locked_ = false;
+	bool acquired_ = false;
 };
 
 static UINT OverlayReleaseMessage()
@@ -187,7 +211,7 @@ static ResettableInitGuard g_d3d12InitGuard;
 #ifdef _WIN64
 static void D3D12_CleanupOverlayResources();
 static void D3D12_CleanupInitResources();
-static void D3D12_WaitForGpu();
+static bool D3D12_WaitForGpu(DWORD timeoutMs = INFINITE);
 #endif
 
 using Microsoft::WRL::ComPtr;
@@ -366,21 +390,27 @@ void EvtHydraHookGameUnhooked(
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
 	// Restore window procedures and wait for in-flight handlers before ImGui is torn down.
-	// A handler that called unhook itself or stalled past the timeout cannot be waited on;
-	// destroying the context under it is a use-after-free, so only drop our own render targets.
+	// A handler that called unhook itself, stalled past the timeout, or could not yet process
+	// the capture-release message cannot be waited on; destroying the context under it is a
+	// use-after-free, so only drop our own render targets when GPU completion is confirmed.
 	if (!UnhookWindowProc())
 	{
 		HydraHookEngineLogError("WNDPROC unhook did not drain in-flight message handlers; leaving the ImGui context alive");
 		g_d3d10Target.Reset();
 		g_d3d11Target.Reset();
 #ifdef _WIN64
-		D3D12_WaitForGpu();
-		D3D12_CleanupOverlayResources();
+		if (D3D12_WaitForGpu(1000))
+			D3D12_CleanupOverlayResources();
+		else
+			HydraHookEngineLogError("Skipping D3D12 overlay resource release on unhook because GPU wait did not complete");
 #endif
 		return;
 	}
 
 	ImGuiScope imguiShutdown;
+#ifdef _WIN64
+	bool d3d12GpuIdle = true;
+#endif
 
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
@@ -398,8 +428,11 @@ void EvtHydraHookGameUnhooked(
 			break;
 #ifdef _WIN64
 		case HydraHookDirect3DVersion12:
-			D3D12_WaitForGpu();
-			ImGui_ImplDX12_Shutdown();
+			d3d12GpuIdle = D3D12_WaitForGpu(1000);
+			if (d3d12GpuIdle)
+				ImGui_ImplDX12_Shutdown();
+			else
+				HydraHookEngineLogError("Skipping D3D12 ImGui shutdown and resource release on unhook because GPU wait did not complete");
 			break;
 #endif
 		default:
@@ -421,8 +454,11 @@ void EvtHydraHookGameUnhooked(
 	g_d3d11Device.Reset();
 
 #ifdef _WIN64
-	// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
-	D3D12_CleanupInitResources();
+	if (d3d12GpuIdle)
+	{
+		// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
+		D3D12_CleanupInitResources();
+	}
 #endif
 
 	// Allow render callbacks to re-initialize on a rehook without a DLL reload
@@ -430,7 +466,8 @@ void EvtHydraHookGameUnhooked(
 	g_d3d10InitGuard.Reset();
 	g_d3d11InitGuard.Reset();
 #ifdef _WIN64
-	g_d3d12InitGuard.Reset();
+	if (d3d12GpuIdle)
+		g_d3d12InitGuard.Reset();
 #endif
 
 	g_AcceptInput.store(false);
@@ -880,16 +917,38 @@ static void D3D12_CleanupInitResources()
  * @brief Blocks the CPU until the GPU has completed work up to the last signaled fence value.
  *
  * Waits on the fence event for g_d3d12_fenceLastSignaledValue (signaled by the caller before invoking).
+ *
+ * @param timeoutMs Maximum time to wait in milliseconds (defaults to INFINITE).
+ * @return true if GPU completion up to the last signaled fence is confirmed (or no fence work was pending);
+ *         false if the device was removed, event registration failed, or waiting did not complete.
  */
-static void D3D12_WaitForGpu()
+static bool D3D12_WaitForGpu(DWORD timeoutMs)
 {
 	if (!g_d3d12_pFence || !g_d3d12_hFenceEvent)
-		return;
+		return true;
 	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
-	if (g_d3d12_pFence->GetCompletedValue() >= fence)
-		return;
-	if (SUCCEEDED(g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent)))
-		WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
+	if (fence == 0)
+		return true;
+	const UINT64 completed = g_d3d12_pFence->GetCompletedValue();
+	if (completed == UINT64_MAX)
+		return false;
+	if (completed >= fence)
+		return true;
+	const HRESULT hr = g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent);
+	if (FAILED(hr))
+	{
+		const UINT64 after = g_d3d12_pFence->GetCompletedValue();
+		if (after != UINT64_MAX && after >= fence)
+			return true;
+		HydraHookEngineLogError("ID3D12Fence::SetEventOnCompletion failed (0x%08X)", static_cast<unsigned int>(hr));
+		return false;
+	}
+	const DWORD waitResult = WaitForSingleObject(g_d3d12_hFenceEvent, timeoutMs);
+	const UINT64 after = g_d3d12_pFence->GetCompletedValue();
+	if (after != UINT64_MAX && after >= fence)
+		return true;
+	HydraHookEngineLogError("D3D12 GPU fence wait did not complete (result %lu)", waitResult);
+	return false;
 }
 
 /**
@@ -1031,14 +1090,20 @@ void EvtHydraHookD3D12Present(
 	if (backBufferIdx >= g_d3d12_numBackBuffers || !g_d3d12_mainRenderTargetResource[backBufferIdx])
 		return;
 
+	// Only wait when reusing an allocator still in flight. Present can overlap GPU work.
+	if (!D3D12_WaitForGpu())
+		return;
+
 	ImGui_ImplDX12_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	// Only wait when reusing an allocator still in flight. Present can overlap GPU work.
-	D3D12_WaitForGpu();
-	g_d3d12_pCommandAllocator->Reset();
-	g_d3d12_pCommandList->Reset(g_d3d12_pCommandAllocator, nullptr);
+	if (FAILED(g_d3d12_pCommandAllocator->Reset()) ||
+		FAILED(g_d3d12_pCommandList->Reset(g_d3d12_pCommandAllocator, nullptr)))
+	{
+		ImGui::EndFrame();
+		return;
+	}
 
 	D3D12_RESOURCE_BARRIER barrier = {};
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1102,7 +1167,11 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
-	D3D12_WaitForGpu();
+	if (!D3D12_WaitForGpu())
+	{
+		HydraHookEngineLogError("Skipping D3D12 overlay resize cleanup because GPU wait did not complete");
+		return;
+	}
 	ImGui_ImplDX12_InvalidateDeviceObjects();
 	D3D12_CleanupOverlayResources();
 	g_d3d12_srvDescriptorCount = 0;
@@ -1320,12 +1389,18 @@ void EvtHydraHookGamePreExit(
 	// release any capture here so UnhookWindowProc does not need a cross-thread SendMessage.
 	g_ReleasePending.store(false);
 	g_HoldInput.store(true);
-	bool needsWindowRelease = false;
+	g_InputClosed.store(true);
+
+	// Bound mutex acquisition so a stalled render thread holding g_ImGuiMutex cannot hang exit.
+	ImGuiScope scope(std::chrono::milliseconds(50));
+	if (!scope.owns_lock())
 	{
-		ImGuiScope scope;
-		g_InputClosed.store(true);
-		needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
+		g_HoldInput.store(false);
+		HydraHookEngineLogWarning("Pre-exit could not acquire ImGui lock within 50 ms; deferring input cleanup");
+		return;
 	}
+
+	const bool needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
 	if (!needsWindowRelease)
 	{
 		g_HoldInput.store(false);
@@ -1336,6 +1411,7 @@ void EvtHydraHookGamePreExit(
 	if (window != nullptr && ::IsWindow(window)
 		&& ::GetWindowThreadProcessId(window, nullptr) == ::GetCurrentThreadId())
 	{
+		// Holding ImGuiScope here guarantees ReleaseOverlayInput re-enters without blocking.
 		ReleaseOverlayInput(window, 0, true);
 	}
 }
@@ -1343,8 +1419,9 @@ void EvtHydraHookGamePreExit(
 /**
  * @brief Restores hooked window procedures and waits for in-flight handlers to finish.
  *
- * @return false when called from inside a hooked message handler or when draining timed out.
- *         The caller must not destroy ImGui while a handler may still be running.
+ * @return false when called from inside a hooked message handler, when capture release could
+ *         not be delivered synchronously, or when draining timed out. The caller must not
+ *         destroy ImGui while a handler or deferred release may still run.
  */
 bool UnhookWindowProc()
 {
@@ -1358,8 +1435,9 @@ bool UnhookWindowProc()
 		g_InputClosed.store(true);
 		needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
 	}
-	const HWND window = g_InputWindow.exchange(nullptr);
+	const HWND window = g_InputWindow.load();
 	const UINT releaseMessage = OverlayReleaseMessage();
+	bool releaseDelivered = true;
 	if (needsWindowRelease && window != nullptr && releaseMessage != 0 && ::IsWindow(window))
 	{
 		const DWORD owner = ::GetWindowThreadProcessId(window, nullptr);
@@ -1373,11 +1451,22 @@ bool UnhookWindowProc()
 			if (!::SendMessageTimeoutW(window, releaseMessage, 0, 0,
 				SMTO_ABORTIFHUNG | SMTO_NORMAL, 250, &sendResult))
 			{
-				HydraHookEngineLogWarning("Timed out releasing overlay input on window thread (error %lu)", ::GetLastError());
+				releaseDelivered = false;
+				HydraHookEngineLogWarning("Timed out releasing overlay input on window thread (error %lu); deferring via PostMessageW", ::GetLastError());
+				// Retain the release obligation and keep the WNDPROC hook attached so the
+				// window-owning thread releases capture as soon as it pumps messages.
+				::PostMessageW(window, releaseMessage, 0, 0);
 			}
 		}
 	}
 
+	if (!releaseDelivered)
+	{
+		g_HoldInput.store(false);
+		return false;
+	}
+
+	g_InputWindow.store(nullptr);
 	g_ForwardedButtons.store(0);
 	g_OverlayOwnsCapture.store(false);
 	g_HoldInput.store(false);
