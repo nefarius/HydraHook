@@ -55,13 +55,13 @@ SOFTWARE.
 #include "Game/Game.h"
 #include "Game/Shutdown.h"
 #include "Utils/Global.h"
-#include "LdrLock.h"
 
 //
 // Logging
 // 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/null_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 //
@@ -69,22 +69,53 @@ SOFTWARE.
 // 
 #include <map>
 #include <mutex>
+#include <new>
+#include <string>
 
 //
 // Keep track of HINSTANCE/HANDLE to engine handle association
 // 
+static std::mutex g_EngineHostInstancesMutex;
 static std::map<HMODULE, PHYDRAHOOK_ENGINE> g_EngineHostInstances;
+
+namespace
+{
+	std::mutex g_hostLoggerMutex;
+	std::shared_ptr<spdlog::logger> g_hostLogger;
+
+	void ResetHostLogger()
+	{
+		std::lock_guard<std::mutex> lock(g_hostLoggerMutex);
+		g_hostLogger.reset();
+	}
+
+	struct LifecycleGuard
+	{
+		explicit LifecycleGuard(PSRWLOCK lock) : lock_(lock) { AcquireSRWLockExclusive(lock_); }
+		~LifecycleGuard() { ReleaseSRWLockExclusive(lock_); }
+		LifecycleGuard(const LifecycleGuard&) = delete;
+		LifecycleGuard& operator=(const LifecycleGuard&) = delete;
+
+	private:
+		PSRWLOCK lock_;
+	};
+}
 
 
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRAHOOK_ENGINE_CONFIG EngineConfig,
                                                     PHYDRAHOOK_ENGINE* Engine)
 {
-	//
-	// Check if we got initialized for this instance before
-	// 
-	if (g_EngineHostInstances.count(HostInstance))
+	if (!EngineConfig)
 	{
-		return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
+		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		if (g_EngineHostInstances.count(HostInstance))
+		{
+			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
+		}
 	}
 
 	HMODULE hMod;
@@ -95,68 +126,90 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED;
 	}
 
-	const auto engine = static_cast<PHYDRAHOOK_ENGINE>(malloc(sizeof(HYDRAHOOK_ENGINE)));
+	const auto engine = new (std::nothrow) HYDRAHOOK_ENGINE();
 
 	if (!engine)
 	{
 		return HYDRAHOOK_ERROR_ENGINE_ALLOCATION_FAILED;
 	}
 
-	//
-	// Initialize engine handle
-	// 
-	ZeroMemory(engine, sizeof(HYDRAHOOK_ENGINE));
 	engine->HostInstance = HostInstance;
 	engine->DllModule = hMod;
-	engine->ShutdownCleanupDone.store(false);
-	engine->FreeLibraryHookActive.store(false);
-	engine->SkipDllUnloadOnExit.store(false);
-	engine->DrainIncomplete.store(false);
-	InitializeSRWLock(&engine->LifecycleLock);
 	HookActivityTracker::reset();
-	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
+	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));
 
 	//
-	// Set up logging: try process directory first, then DLL directory, then %TEMP%
+	// Set up logging: disabled config uses a null sink. Otherwise try the process
+	// directory, then the DLL directory, then the configured fallback path.
 	//
-	std::string processDir = HydraHook::Core::Util::get_process_directory();
-	std::string dllDir = HydraHook::Core::Util::get_module_directory(HostInstance);
-	std::string tempPath = HydraHook::Core::Util::expand_environment_variables(EngineConfig->Logging.FilePath);
-
-	auto tryCreateLogger = [](const std::string& path) -> bool
-	{
-		try
-		{
-			(void)spdlog::basic_logger_mt("HYDRAHOOK", path);
-			return true;
-		}
-		catch (const std::exception&)
-		{
-			return false;
-		}
-	};
-
-	if (!processDir.empty() && tryCreateLogger(processDir + "HydraHook.log"))
-	{
-		/* ok */
-	}
-	else if (!dllDir.empty() && tryCreateLogger(dllDir + "HydraHook.log"))
-	{
-		/* ok */
-	}
-	else { tryCreateLogger(tempPath); }
-
 	auto logger = spdlog::get("HYDRAHOOK");
 	if (!logger)
 	{
-		try
+		if (!EngineConfig->Logging.IsEnabled)
 		{
-			logger = spdlog::stdout_color_mt("HYDRAHOOK");
+			try
+			{
+				logger = std::make_shared<spdlog::logger>(
+					"HYDRAHOOK",
+					std::make_shared<spdlog::sinks::null_sink_mt>());
+				spdlog::register_logger(logger);
+			}
+			catch (const std::exception&)
+			{
+				delete engine;
+				return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED;
+			}
 		}
-		catch (const std::exception&)
+		else
 		{
-			free(engine);
-			return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED;
+			const std::string processDir = HydraHook::Core::Util::get_process_directory();
+			const std::string dllDir = HydraHook::Core::Util::get_module_directory(HostInstance);
+			const char* configuredPath = EngineConfig->Logging.FilePath;
+			const std::string tempPath = configuredPath
+				? HydraHook::Core::Util::expand_environment_variables(configuredPath)
+				: std::string();
+
+			auto tryCreateLogger = [](const std::string& path) -> bool
+			{
+				if (path.empty())
+					return false;
+				try
+				{
+					(void)spdlog::basic_logger_mt("HYDRAHOOK", path);
+					return true;
+				}
+				catch (const std::exception&)
+				{
+					return false;
+				}
+			};
+
+			if (!processDir.empty() && tryCreateLogger(processDir + "HydraHook.log"))
+			{
+				/* ok */
+			}
+			else if (!dllDir.empty() && tryCreateLogger(dllDir + "HydraHook.log"))
+			{
+				/* ok */
+			}
+			else if (!tempPath.empty())
+			{
+				tryCreateLogger(tempPath);
+			}
+
+			logger = spdlog::get("HYDRAHOOK");
+			if (!logger)
+			{
+				try
+				{
+					logger = spdlog::stdout_color_mt("HYDRAHOOK");
+				}
+				catch (const std::exception&)
+				{
+					delete engine;
+					return HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED;
+				}
+			}
 		}
 	}
 
@@ -190,11 +243,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		nullptr,
 		FALSE, // Auto-reset event
 		FALSE, // Initial state non-signaled
-		NULL // Named unique event
+		nullptr // Unnamed event
 	);
 
-	if (engine->EngineCancellationEvent == INVALID_HANDLE_VALUE
-		|| engine->EngineCancellationEvent == NULL)
+	if (engine->EngineCancellationEvent == nullptr)
 	{
 		logger->error("Failed to create the Engine Cancellation Event: {}", GetLastError());
 		if (engine->CrashHandlerInstalled)
@@ -202,7 +254,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			HydraHookCrashHandlerUninstall(engine);
 			engine->CrashHandlerInstalled = FALSE;
 		}
-		free(engine);
+		delete engine;
 		return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED;
 	}
 
@@ -229,7 +281,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			engine->CrashHandlerInstalled = FALSE;
 		}
 		CloseHandle(engine->EngineCancellationEvent);
-		free(engine);
+		delete engine;
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
 	}
 
@@ -240,24 +292,56 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		*Engine = engine;
 	}
 
-	g_EngineHostInstances[HostInstance] = engine;
+	{
+		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		if (g_EngineHostInstances.count(HostInstance))
+		{
+			SetEvent(engine->EngineCancellationEvent);
+			WaitForSingleObject(engine->EngineThread, 6500);
+			if (engine->CrashHandlerInstalled)
+			{
+				HydraHookCrashHandlerUninstall(engine);
+			}
+			CloseHandle(engine->EngineCancellationEvent);
+			CloseHandle(engine->EngineThread);
+			delete engine;
+			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
+		}
+		g_EngineHostInstances[HostInstance] = engine;
+	}
 
 	return HYDRAHOOK_ERROR_NONE;
 }
 
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 {
-	if (!g_EngineHostInstances.count(HostInstance))
+	PHYDRAHOOK_ENGINE engine = nullptr;
 	{
-		return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
+		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		const auto it = g_EngineHostInstances.find(HostInstance);
+		if (it == g_EngineHostInstances.end())
+		{
+			return HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE;
+		}
+		engine = it->second;
 	}
 
-	const auto engine = g_EngineHostInstances[HostInstance];
-	auto logger = spdlog::get("HYDRAHOOK")->clone("api");
+	auto base = spdlog::get("HYDRAHOOK");
+	auto logger = base ? base->clone("api") : nullptr;
 
-	PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
+	{
+		LifecycleGuard lifecycle(&engine->LifecycleLock);
+		PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
+	}
 
-	logger->info("Freeing remaining resources");
+	if (logger)
+		logger->info("Freeing remaining resources");
+
+	if (engine->CustomContext)
+	{
+		free(engine->CustomContext);
+		engine->CustomContext = nullptr;
+	}
 
 	if (engine->CrashHandlerInstalled)
 	{
@@ -274,27 +358,33 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		CloseHandle(engine->EngineThread);
 	}
 
-	g_EngineHostInstances.erase(HostInstance);
-	free(engine);
+	bool lastEngine = false;
+	{
+		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		g_EngineHostInstances.erase(HostInstance);
+		lastEngine = g_EngineHostInstances.empty();
+	}
 
-	logger->info("Engine shutdown complete");
-	logger->flush();
+	if (logger)
+	{
+		logger->info("Engine shutdown complete");
+		logger->flush();
+	}
+
+	delete engine;
+
+	if (lastEngine)
+	{
+		ResetHostLogger();
+		spdlog::drop("HYDRAHOOK");
+	}
 
 	return HYDRAHOOK_ERROR_NONE;
 }
 
-namespace
+extern "C" HYDRAHOOK_D3D_VERSION HydraHookEngineGameVersionForTest(PHYDRAHOOK_ENGINE engine)
 {
-	struct LifecycleGuard
-	{
-		explicit LifecycleGuard(PSRWLOCK lock) : lock_(lock) { AcquireSRWLockExclusive(lock_); }
-		~LifecycleGuard() { ReleaseSRWLockExclusive(lock_); }
-		LifecycleGuard(const LifecycleGuard&) = delete;
-		LifecycleGuard& operator=(const LifecycleGuard&) = delete;
-
-	private:
-		PSRWLOCK lock_;
-	};
+	return engine != nullptr ? engine->GameVersion : HydraHookDirect3DVersionUnknown;
 }
 
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(PHYDRAHOOK_ENGINE Engine)
@@ -418,7 +508,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGINE Engine, PVOID* Context,
                                                                 size_t ContextSize)
 {
-	if (!Engine)
+	if (!Engine || !Context)
 	{
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
@@ -481,6 +571,7 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3DDEVICE9 Device)
 {
+	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{
 		const auto& engine = kv.second;
@@ -496,6 +587,7 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIRECT3DDEVICE9EX Device)
 {
+	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{
 		const auto& engine = kv.second;
@@ -582,19 +674,16 @@ HYDRAHOOK_API VOID HydraHookEngineSetARCEventCallbacks(PHYDRAHOOK_ENGINE Engine,
  */
 static std::shared_ptr<spdlog::logger> GetHostLogger()
 {
-	static std::mutex mtx;
-	static std::shared_ptr<spdlog::logger> logger;
-
-	std::lock_guard<std::mutex> lock(mtx);
-	if (logger)
+	std::lock_guard<std::mutex> lock(g_hostLoggerMutex);
+	if (g_hostLogger)
 	{
-		return logger;
+		return g_hostLogger;
 	}
 	auto base = spdlog::get("HYDRAHOOK");
 	if (base)
 	{
-		logger = base->clone("host");
-		return logger;
+		g_hostLogger = base->clone("host");
+		return g_hostLogger;
 	}
 	return nullptr;
 }
@@ -613,13 +702,24 @@ static std::shared_ptr<spdlog::logger> GetHostLogger()
 static void HydraHookEngineLogImpl(spdlog::level::level_enum level, LPCSTR Format, va_list args)
 {
 	auto logger = GetHostLogger();
-	if (!logger || !logger->should_log(level))
+	if (!logger || !logger->should_log(level) || !Format)
 	{
 		return;
 	}
-	char buf[256];
-	vsnprintf(buf, sizeof(buf), Format, args);
-	logger->log(level, buf);
+
+	va_list measure;
+	va_copy(measure, args);
+	const int needed = vsnprintf(nullptr, 0, Format, measure);
+	va_end(measure);
+	if (needed < 0)
+	{
+		return;
+	}
+
+	std::string message(static_cast<size_t>(needed) + 1, '\0');
+	vsnprintf(message.data(), message.size(), Format, args);
+	message.resize(static_cast<size_t>(needed));
+	logger->log(level, message);
 }
 
 _Use_decl_annotations_

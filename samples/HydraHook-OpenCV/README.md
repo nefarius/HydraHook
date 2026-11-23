@@ -13,7 +13,7 @@ On each Present the sample copies the back buffer into a staging resource (D3D11
 - tracks them with Lucas-Kanade optical flow
 - estimates motion with a RANSAC essential matrix and recovers a pose trail
 
-An ImGui debug HUD draws the trail and feature counts. Press `F12` to toggle it. The D3D12 ImGui overlay is compiled only for x64; D3D11 works on x86 and x64.
+An ImGui debug HUD draws the trail and feature counts. Press `F12` to toggle it. The D3D12 hook and ImGui overlay are x64-only; the x86 build enables D3D11 only. D3D11 works on x86 and x64.
 
 ## Building
 

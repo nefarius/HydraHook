@@ -137,9 +137,8 @@ jobs:
           foreach ($name in $required) {
             $found = $false
             foreach ($exportName in $exported) {
-              # C exports match the name column exactly. C++ exports are
-              # ?Name@@decoration, which is not a prefix of a longer identifier.
-              if ($exportName -eq $name -or $exportName.StartsWith('?' + $name + '@@')) {
+              # Public entry points are C exports. The name column must match exactly.
+              if ($exportName -eq $name) {
                 $found = $true
                 break
               }

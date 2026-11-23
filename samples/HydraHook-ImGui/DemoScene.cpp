@@ -97,7 +97,6 @@ void RenderScene()
 		ImGui::PlotHistogram("Histogram", arr, IM_ARRAYSIZE(arr), 0, NULL, 0.0f, 1.0f, ImVec2(0, 80));
 
 		// Use functions to generate output
-		// FIXME: This is rather awkward because current plot API only pass in indices. We probably want an API passing floats and user provide sample rate/count.
 		struct Funcs
 		{
 			static float Sin(void*, int i) { return sinf(i * 0.1f); }
@@ -129,14 +128,7 @@ void RenderScene()
 
 		float progress_saturated = (progress < 0.0f) ? 0.0f : (progress > 1.0f) ? 1.0f : progress;
 		char buf[32];
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4996)
-#endif
-		sprintf(buf, "%d/%d", (int)(progress_saturated * 1753), 1753);
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
+		std::snprintf(buf, sizeof(buf), "%d/%d", (int)(progress_saturated * 1753), 1753);
 		ImGui::ProgressBar(progress, ImVec2(0.f, 0.f), buf);
 
 		ImGui::End();

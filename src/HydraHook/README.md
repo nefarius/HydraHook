@@ -80,11 +80,10 @@ flowchart TB
 | `Engine.cpp` / `Engine.h` | Engine lifecycle, HMODULE mapping, logging, custom context, C API implementation |
 | `Game/Game.cpp` / `Game.h` | Main hook worker thread, hook installation, shutdown handling |
 | `Game/Shutdown.h` | `ShutdownOrigin` enum, `PerformShutdownCleanup` for consolidated pre-exit handling |
-| `Game/Hook/` | Per-API vtable probing and hook targets (Direct3D9, Direct3D9Ex, Direct3D10/11/12, DXGI, AudioRenderClient, DirectInput8) |
+| `Game/Hook/` | Per-API vtable probing and hook targets (Direct3D9, Direct3D9Ex, Direct3D10/11/12, DXGI, AudioRenderClient) |
 | `Utils/Hook.h` | Detours wrapper template (stdcall/cdecl, apply/remove/call_orig) |
 | `Utils/Global.h` | `expand_environment_variables`, `process_name` |
 | `CrashHandler.cpp` / `CrashHandler.h` | Ref-counted crash handler (SetUnhandledExceptionFilter, terminate, invalid_parameter, purecall); per-thread SEH translator |
-| `LdrLock.cpp` / `LdrLock.h` | `IsLoaderLockHeld` utility for loader-lock detection |
 | `Exceptions.hpp` | DetourException, ModuleNotFoundException, ARCException, etc. |
 
 ## Core Components
@@ -93,8 +92,8 @@ flowchart TB
 
 **Files:** [Engine.cpp](Engine.cpp), [Engine.h](Engine.h)
 
-- **`g_EngineHostInstances`**: Static map from `HMODULE` to `PHYDRAHOOK_ENGINE`. Allows multiple host DLLs to each have their own engine instance.
-- **Engine creation**: `GetModuleHandleEx` with `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT` (the host DLL refcount is not incremented), `malloc` for engine struct, spdlog setup, `CreateEvent` for cancellation, `CreateThread` for `HydraHookMainThread`.
+- **`g_EngineHostInstances`**: Static map from `HMODULE` to `PHYDRAHOOK_ENGINE`. The map can hold more than one engine, but Detours hooks, `HookActivityTracker`, and the `HYDRAHOOK` spdlog logger are process-wide. One active hook worker per process is the supported case.
+- **Engine creation**: `GetModuleHandleEx` with `GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT` (the host DLL refcount is not incremented), `new HYDRAHOOK_ENGINE`, spdlog setup (`Logging.IsEnabled == FALSE` uses a null sink and does not open a file), `CreateEvent` for cancellation, `CreateThread` for `HydraHookMainThread`.
 - **Engine struct fields**: `CrashHandlerInstalled`, `ShutdownCleanupDone`, `FreeLibraryHookActive` track shutdown state. `HookActivityTracker` provides lock-free in-flight callback counting for safe DLL unload.
 - **Custom context**: `HydraHookEngineAllocCustomContext` allocates host-owned memory accessible from all event callbacks via `Extension->Context` or `HydraHookEngineGetCustomContext`.
 - **Per-API callback tables**: `EventsD3D9`, `EventsD3D10`, `EventsD3D11`, `EventsD3D12`, `EventsARC` hold function pointers for pre/post hooks.
@@ -126,8 +125,7 @@ flowchart TB
 - **D3D9Ex**: Creates a temporary hidden window via `Window`, loads `d3d9.dll`, calls `Direct3DCreate9Ex` -> `CreateDeviceEx` -> extracts vtable from the device. Used for both D3D9 and D3D9Ex hooks.
 - **D3D10/11/12**: Check for already-loaded DXGI/D3D runtime DLLs via `GetModuleHandle` (they do not call `LoadLibrary`), then create a temporary factory/device/swap chain to extract the swap-chain vtable. If a runtime DLL such as `d3d12.dll` is not loaded in the process, its prober exits before any device creation attempt. Once the runtime DLL is available, the D3D11 and D3D12 probers try a hardware device and fall back to WARP when no usable hardware adapter exists. `IDXGISwapChain::Present` lives in `dxgi.dll`, so one hook per vtable slot covers D3D10, D3D11, and D3D12.
 - **DXGI**: [DXGI.h](Game/Hook/DXGI.h) defines vtable indices (e.g. `Present = 8`, `ResizeBuffers = 13`, `ResizeTarget = 14`, `IDXGISwapChain1::Present1 = 22`, `IDXGISwapChain3::ResizeBuffers1 = 37`).
-- **AudioRenderClient**: Uses MMDevice API (`IMMDeviceEnumerator` -> `IMMDevice` -> `IAudioClient` -> `IAudioRenderClient`) to obtain the vtable.
-- **DirectInput8** (optional, `HOOK_DINPUT8`): Creates DirectInput8 device via `DirectInput8Create`, enumerates joysticks, extracts vtable from `IDirectInputDevice8`. Hooks Acquire, GetDeviceData, GetDeviceState, GetDeviceInfo, GetObjectInfo. Experimental; not enabled by default.
+- **AudioRenderClient**: Uses MMDevice API (`IMMDeviceEnumerator` -> `IMMDevice` -> `IAudioClient` -> `IAudioRenderClient`) to obtain the vtable. Swap-chain probers fall back from `IDXGISwapChain3` to `IDXGISwapChain1` to `IDXGISwapChain` so `Present1` is still captured when `IDXGISwapChain3` is absent.
 
 ## Hooking Flow (Per Frame)
 
@@ -135,7 +133,7 @@ For a typical `IDXGISwapChain::Present` hook:
 
 1. Host calls `IDXGISwapChain::Present`.
 2. Detour redirects execution to the hook lambda.
-3. **First call only** (`std::call_once`): Store swap chain in `engine->RenderPipeline.pSwapChain`, invoke `EvtHydraHookGameHooked`.
+3. **First call only** (`ResettableOnce`, shared by `Present` and `Present1` for the same API): Store the swap chain or device, set `GameVersion`, invoke `EvtHydraHookGameHooked`.
 4. **Pre-callback** (if set): `EvtHydraHookD3D11PrePresent` with `HYDRAHOOK_EVT_PRE_EXTENSION` (engine handle, custom context).
 5. **Original call**: `swapChainPresentHook.call_orig(chain, SyncInterval, Flags)`.
 6. **Post-callback** (if set): `EvtHydraHookD3D11PostPresent` with `HYDRAHOOK_EVT_POST_EXTENSION`.
@@ -145,8 +143,8 @@ For a typical `IDXGISwapChain::Present` hook:
 
 To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`, `PostQuitMessage`, and `FreeLibrary`:
 
-- **Shutdown.h**: `PerformShutdownCleanup(engine, ShutdownOrigin)` consolidates pre-exit handling. `ShutdownOrigin` can be `ExitProcessHook`, `PostQuitMessageHook`, `FreeLibraryHook`, or `DllMainProcessDetach`.
-- **On trigger** (ExitProcess/PostQuitMessage): `EvtHydraHookGamePreExit` -> `SetEvent(EngineCancellationEvent)` -> `WaitForSingleObject(EngineThread, 3000)` -> `call_orig`.
+- **Shutdown.h**: `PerformShutdownCleanup(engine, ShutdownOrigin)` consolidates pre-exit handling. `ShutdownOrigin` can be `ExitProcessHook`, `PostQuitMessageHook`, `FreeLibraryHook`, `DllMainProcessDetach`, or `ManualUnhook`.
+- **On trigger** (ExitProcess/PostQuitMessage/FreeLibrary): `EvtHydraHookGamePreExit` -> `SetEvent(EngineCancellationEvent)` -> `WaitForSingleObject(EngineThread, 6500)` so the wait outlasts the 5000 ms callback drain. `FreeLibrary` then detaches its own hook before `FreeLibraryAndExitThread`.
 - **On FreeLibrary** (host-initiated unload): `PerformShutdownCleanup` runs, then `FreeLibraryAndExitThread` (engine thread does not call it again).
 - **On DllMainProcessDetach**: No user callbacks; uses `remove_nothrow` to avoid loader-lock deadlocks.
 - **On ManualUnhook** (`HydraHookEngineUnhook`): `PerformShutdownCleanup` skips `EvtHydraHookGamePreExit`, sets `SkipDllUnloadOnExit`, signals the worker, and waits up to 8000 ms. The worker removes every hook (including `ExitProcess`/`PostQuitMessage`/`FreeLibrary`) with `remove_nothrow`, drains, runs the unhook callbacks, and exits with `ExitThread` so the DLL stays loaded.
@@ -172,7 +170,6 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
   - `HYDRAHOOK_NO_D3D11`
   - `HYDRAHOOK_NO_D3D12`
   - `HYDRAHOOK_NO_COREAUDIO`
-- **Optional define** to enable: `HOOK_DINPUT8` (DirectInput8 input hooking; experimental, disabled by default).
 - **Dependencies**: vcpkg (spdlog, detours).
 - **Public headers**: `include/HydraHook/Engine/` (HydraHookCore.h, HydraHookDirect3D9.h, HydraHookDirect3D10.h, HydraHookDirect3D11.h, HydraHookDirect3D12.h, HydraHookCoreAudio.h).
 
@@ -180,9 +177,9 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 
 `tests/cpp/` builds three projects, wired into `HydraHook.slnx` under the `tests` folder. They build with the `Debug_LIB` and `Release_LIB` solution configurations and link the static library (the smoke host does; the smoke runner loads that host).
 
-- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
-- `HydraHookTestHost` is a small DLL that enables D3D10/D3D11/D3D12 hooking and exports shared counters.
-- `HydraHookWarpSmokeTests` loads `d3d12.dll` alongside `d3d11.dll`, creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers still succeed without firing callbacks, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
+- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks (null config, null context, logging disabled), `Hook` apply/remove/`remove_nothrow` including a rejected second apply, `HookActivityTracker`, utility functions (environment expansion does not keep a trailing NUL), exception types, crash-handler refcounting and snapshot promotion, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
+- `HydraHookTestHost` is a small DLL that enables D3D10/D3D11/D3D12 hooking and exports shared counters plus the engine `GameVersion`.
+- `HydraHookWarpSmokeTests` loads `d3d12.dll` alongside `d3d11.dll`, creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked callback, `GameVersion`, Present, Present1 (no second announcement), and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers still succeed without firing callbacks, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
 
 ## Extending HydraHook
 
@@ -230,7 +227,6 @@ All are caught in `Game.cpp` with `logger->error` or `logger->warn`; the engine 
 | [Utils/Hook.h](Utils/Hook.h) | Detours `Hook<>` template |
 | [Utils/Global.h](Utils/Global.h) | Environment expansion, process name |
 | [CrashHandler.cpp](CrashHandler.cpp), [CrashHandler.h](CrashHandler.h) | Crash handler install/uninstall, per-thread SEH |
-| [LdrLock.cpp](LdrLock.cpp), [LdrLock.h](LdrLock.h) | `IsLoaderLockHeld` loader-lock detection |
 | [Exceptions.hpp](Exceptions.hpp) | Exception types |
 | [Game/Hook/Direct3DBase.h](Game/Hook/Direct3DBase.h) | Abstract base for D3D vtable probers |
 | [Game/Hook/Direct3D9.h](Game/Hook/Direct3D9.h) | D3D9 vtable indices |
@@ -241,4 +237,3 @@ All are caught in `Game.cpp` with `logger->error` or `logger->warn`; the engine 
 | [Game/Hook/DXGI.h](Game/Hook/DXGI.h) | IDXGISwapChain vtable indices |
 | [Game/Hook/Window.h](Game/Hook/Window.h), [.cpp](Game/Hook/Window.cpp) | Temporary window for D3D device creation |
 | [Game/Hook/AudioRenderClientHook.h](Game/Hook/AudioRenderClientHook.h), [.cpp](Game/Hook/AudioRenderClientHook.cpp) | Core Audio prober |
-| [Game/Hook/DirectInput8.h](Game/Hook/DirectInput8.h), [.cpp](Game/Hook/DirectInput8.cpp) | DirectInput8 prober (optional, `HOOK_DINPUT8`) |

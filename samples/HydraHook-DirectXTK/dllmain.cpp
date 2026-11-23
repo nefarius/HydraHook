@@ -36,6 +36,9 @@ SOFTWARE.
 #include <directxtk/SpriteBatch.h>
 #include <directxtk/SpriteFont.h>
 #include <directxtk/CommonStates.h>
+#include <wrl/client.h>
+
+using Microsoft::WRL::ComPtr;
 
 using namespace DirectX;
 
@@ -48,8 +51,8 @@ static constexpr double FPS_SMOOTH_ALPHA = 0.1;
 
 typedef struct _DX11_TEXT_CTX
 {
-	ID3D11Device* dev = nullptr;
-	ID3D11DeviceContext* ctx = nullptr;
+	ComPtr<ID3D11Device> dev;
+	ComPtr<ID3D11DeviceContext> ctx;
 	std::unique_ptr<SpriteBatch> spriteBatch;
 	std::unique_ptr<SpriteFont> spriteFont;
 	std::unique_ptr<CommonStates> commonStates;
@@ -192,7 +195,10 @@ void EvtHydraHookGamePostUnhooked(PHYDRAHOOK_ENGINE EngineHandle)
 {
 	auto pCtx = PDX11_TEXT_CTX(HydraHookEngineGetCustomContext(EngineHandle));
 	if (pCtx)
+	{
 		pCtx->~DX11_TEXT_CTX();
+		HydraHookEngineFreeCustomContext(EngineHandle);
+	}
 }
 
 //
@@ -223,17 +229,19 @@ void EvtHydraHookD3D11PrePresent(
 	 * does when switching cores) so compare to ones grabbed earlier and
 	 * re-request both if necessary.
 	 */
-	bool devChanged = (pCtx->dev != pDeviceTmp);
+	bool devChanged = (pCtx->dev.Get() != pDeviceTmp);
 	if (devChanged)
 	{
 		pCtx->spriteBatch.reset();
 		pCtx->spriteFont.reset();
 		pCtx->commonStates.reset();
+		pCtx->dev.Reset();
+		pCtx->ctx.Reset();
 
 		D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(
 			pSwapChain,
-			&pCtx->dev,
-			&pCtx->ctx
+			pCtx->dev.GetAddressOf(),
+			pCtx->ctx.GetAddressOf()
 		);
 
 		const std::wstring fontPath = GetFontPath();
@@ -247,9 +255,9 @@ void EvtHydraHookD3D11PrePresent(
 
 		try
 		{
-			pCtx->commonStates = std::make_unique<CommonStates>(pCtx->dev);
-			pCtx->spriteBatch = std::make_unique<SpriteBatch>(pCtx->ctx);
-			pCtx->spriteFont = std::make_unique<SpriteFont>(pCtx->dev, fontPath.c_str());
+			pCtx->commonStates = std::make_unique<CommonStates>(pCtx->dev.Get());
+			pCtx->spriteBatch = std::make_unique<SpriteBatch>(pCtx->ctx.Get());
+			pCtx->spriteFont = std::make_unique<SpriteFont>(pCtx->dev.Get(), fontPath.c_str());
 		}
 		catch (const std::exception& e)
 		{

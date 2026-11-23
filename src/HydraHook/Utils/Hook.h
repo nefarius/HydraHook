@@ -83,6 +83,9 @@ class Hook
     bool is_applied_;
     bool has_open_transaction_;
 
+    Hook(const Hook&) = delete;
+    Hook& operator=(const Hook&) = delete;
+
     void transaction_begin()
     {
         const auto result = DetourTransactionBegin();
@@ -176,26 +179,11 @@ public:
     {
     }
 
-    /** @brief Destroys hook; removes if applied. @throws DetourException on abort/remove failure. */
-    ~Hook() noexcept(false)
+    /** @brief Destroys hook; removes if applied. Never throws. */
+    ~Hook() noexcept
     {
-        if (has_open_transaction_)
-        {
-            const auto result = DetourTransactionAbort();
-
-            if (result != NO_ERROR)
-            {
-                if (result == ERROR_INVALID_OPERATION)
-                {
-                    throw HydraHook::Core::Exceptions::DetourException(
-                        "No pending transaction exists"
-                    );
-                }
-                throw HydraHook::Core::Exceptions::DetourException("Unknown error");
-            }
-        }
-
-        remove();
+        abort_transaction_nothrow();
+        remove_nothrow();
     }
 
     /**
@@ -207,6 +195,11 @@ public:
     template <typename T>
     void apply(T pFunc, type detour)
     {
+        if (is_applied_)
+        {
+            throw HydraHook::Core::Exceptions::DetourException("Hook is already applied");
+        }
+
         detour_ = detour;
         orig_ = static_cast<size_t>(pFunc);
 
@@ -262,8 +255,6 @@ public:
         if (!is_applied_)
             return;
 
-        is_applied_ = false;
-
         transaction_begin();
         try
         {
@@ -302,6 +293,7 @@ public:
             }
 
             transaction_commit();
+            is_applied_ = false;
         }
         catch (...)
         {

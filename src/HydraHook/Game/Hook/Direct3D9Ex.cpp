@@ -25,7 +25,10 @@ SOFTWARE.
 #include "Direct3D9Ex.h"
 #include "Exceptions.hpp"
 
+#include <wrl/client.h>
+
 using namespace HydraHook::Core::Exceptions;
+using Microsoft::WRL::ComPtr;
 
 Direct3D9Hooking::Direct3D9Ex::Direct3D9Ex() :
 	d3d9_ex(nullptr), d3d9_device_ex(nullptr)
@@ -42,18 +45,19 @@ Direct3D9Hooking::Direct3D9Ex::Direct3D9Ex() :
 	const auto Direct3DCreate9Ex = static_cast<LPVOID>(GetProcAddress(hMod, "Direct3DCreate9Ex"));
 	if (Direct3DCreate9Ex == nullptr)
 	{
-		throw RuntimeException("Could not locate the Direct3DCreate9 procedure entry point");
+		throw RuntimeException("Could not locate the Direct3DCreate9Ex procedure entry point");
 	}
 
+	ComPtr<IDirect3D9Ex> d3d9;
 	auto error_code = static_cast<HRESULT(WINAPI *)(UINT, IDirect3D9Ex**)>(Direct3DCreate9Ex
-	)(D3D_SDK_VERSION, &d3d9_ex);
+	)(D3D_SDK_VERSION, d3d9.GetAddressOf());
 	if (FAILED(error_code))
 	{
 		throw DXAPIException("Could not create the DirectX 9 interface", error_code);
 	}
 
 	D3DDISPLAYMODE display_mode;
-	error_code = d3d9_ex->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display_mode);
+	error_code = d3d9->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display_mode);
 	if (FAILED(error_code))
 	{
 		throw DXAPIException("Could not determine the current display mode", error_code);
@@ -65,19 +69,23 @@ Direct3D9Hooking::Direct3D9Ex::Direct3D9Ex() :
 	present_parameters.SwapEffect = D3DSWAPEFFECT_DISCARD;
 	present_parameters.BackBufferFormat = display_mode.Format;
 
-	error_code = d3d9_ex->CreateDeviceEx(
+	ComPtr<IDirect3DDevice9Ex> device;
+	error_code = d3d9->CreateDeviceEx(
 		D3DADAPTER_DEFAULT,
 		D3DDEVTYPE_HAL,
 		temp_window->windowHandle(),
 		D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_DISABLE_DRIVER_MANAGEMENT,
 		&present_parameters,
 		nullptr,
-		&d3d9_device_ex
+		device.GetAddressOf()
 	);
 	if (FAILED(error_code))
 	{
 		throw DXAPIException("Could not create the Direct3D 9 device", error_code);
 	}
+
+	d3d9_ex = d3d9.Detach();
+	d3d9_device_ex = device.Detach();
 }
 
 std::vector<size_t> Direct3D9Hooking::Direct3D9Ex::vtable() const

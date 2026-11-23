@@ -3,6 +3,8 @@
 #include "HydraHook/Engine/HydraHookCore.h"
 #include "HydraHook/Engine/HydraHookDirect3D11.h"
 
+extern "C" HYDRAHOOK_D3D_VERSION HydraHookEngineGameVersionForTest(PHYDRAHOOK_ENGINE engine);
+
 struct HydraHookTestState
 {
     volatile LONG hooked;
@@ -31,6 +33,11 @@ extern "C" __declspec(dllexport) HYDRAHOOK_ERROR HydraHookTest_Unhook(void)
 extern "C" __declspec(dllexport) HYDRAHOOK_ERROR HydraHookTest_Rehook(void)
 {
     return HydraHookEngineRehook(g_engine);
+}
+
+extern "C" __declspec(dllexport) HYDRAHOOK_D3D_VERSION HydraHookTest_GameVersion(void)
+{
+    return HydraHookEngineGameVersionForTest(g_engine);
 }
 
 static VOID EvtGameHooked(PHYDRAHOOK_ENGINE, const HYDRAHOOK_D3D_VERSION version)

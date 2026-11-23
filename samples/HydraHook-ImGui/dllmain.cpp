@@ -344,7 +344,7 @@ void EvtHydraHookGameHooked(
 	d3d11.EvtHydraHookD3D11PrePresent = EvtHydraHookD3D11Present;
 	d3d11.EvtHydraHookD3D11PreResizeBuffers = EvtHydraHookD3D11PreResizeBuffers;
 
-#ifdef _WIN64 // vcpkg doesn't offer x86 builds for ImGui at the moment
+#ifdef _WIN64 // D3D12 ImGui overlay is x64-only by choice (vcpkg.json disables the dx12 binding on x86)
 	HYDRAHOOK_D3D12_EVENT_CALLBACKS d3d12;
 	HYDRAHOOK_D3D12_EVENT_CALLBACKS_INIT(&d3d12);
 	d3d12.EvtHydraHookD3D12PrePresent = EvtHydraHookD3D12Present;

@@ -55,6 +55,7 @@ namespace CoreAudioHooking
         IAudioClient *client{};
         WAVEFORMATEX *pwfx{};
         IAudioRenderClient *arc{};
+        bool comInitialized_{};
 
     public:
         AudioRenderClientHook();

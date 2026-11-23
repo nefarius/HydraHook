@@ -15,6 +15,7 @@
 #include <ctime>
 #include <mutex>
 #include <atomic>
+#include <vector>
 
 #pragma comment(lib, "DbgHelp.lib")
 
@@ -55,6 +56,26 @@ struct CrashConfigSnapshot
 };
 
 static std::atomic<CrashConfigSnapshot*> s_snapshot{ nullptr };
+static std::atomic<int> s_dumpInFlight{ 0 };
+
+struct CrashRegistration
+{
+	PHYDRAHOOK_ENGINE Engine;
+	CrashConfigSnapshot* Snapshot;
+};
+
+static std::vector<CrashRegistration> s_registrations;
+
+static void RetireSnapshot(CrashConfigSnapshot* retired)
+{
+	if (!retired)
+		return;
+
+	while (s_dumpInFlight.load(std::memory_order_acquire) != 0)
+		SwitchToThread();
+
+	delete retired;
+}
 
 // ---------------------------------------------------------------------------
 // Exception code to symbolic name
@@ -86,6 +107,9 @@ static const char* ExceptionCodeToString(DWORD code)
 	case EXCEPTION_SINGLE_STEP:              return "EXCEPTION_SINGLE_STEP";
 	case EXCEPTION_STACK_OVERFLOW:           return "EXCEPTION_STACK_OVERFLOW";
 	case STATUS_HEAP_CORRUPTION:             return "STATUS_HEAP_CORRUPTION";
+	case 0xE0000001:                         return "HYDRAHOOK_TERMINATE";
+	case 0xE0000002:                         return "HYDRAHOOK_INVALID_PARAMETER";
+	case 0xE0000003:                         return "HYDRAHOOK_PURECALL";
 	default:                                 return "UNKNOWN_EXCEPTION";
 	}
 }
@@ -138,34 +162,40 @@ static MINIDUMP_TYPE GetMiniDumpTypeFlags(HYDRAHOOK_DUMP_TYPE type)
 }
 
 // ---------------------------------------------------------------------------
-// Build dump directory path, falling back through configured -> log dir -> %TEMP%
+// Dump directory candidates: configured -> process dir -> DLL dir -> %TEMP%
 // ---------------------------------------------------------------------------
-static std::string ResolveDumpDirectory(const CrashConfigSnapshot* snap)
+static void AppendDumpDirectory(std::vector<std::string>& dirs, std::string path)
 {
+	if (path.empty())
+		return;
+	if (path.back() != '\\' && path.back() != '/')
+		path += '\\';
+	for (const auto& existing : dirs)
+	{
+		if (existing == path)
+			return;
+	}
+	dirs.push_back(std::move(path));
+}
+
+static std::vector<std::string> DumpDirectoryCandidates(const CrashConfigSnapshot* snap)
+{
+	std::vector<std::string> dirs;
 	if (snap && !snap->DumpDirectoryPath.empty())
 	{
-		std::string path = HydraHook::Core::Util::expand_environment_variables(
-			snap->DumpDirectoryPath);
-		if (!path.empty())
-		{
-			if (path.back() != '\\' && path.back() != '/')
-				path += '\\';
-			return path;
-		}
+		AppendDumpDirectory(dirs, HydraHook::Core::Util::expand_environment_variables(
+			snap->DumpDirectoryPath));
 	}
 
-	std::string dir = HydraHook::Core::Util::get_process_directory();
-	if (!dir.empty())
-		return dir;
+	AppendDumpDirectory(dirs, HydraHook::Core::Util::get_process_directory());
 
 	if (snap && snap->HostInstance)
 	{
-		dir = HydraHook::Core::Util::get_module_directory(snap->HostInstance);
-		if (!dir.empty())
-			return dir;
+		AppendDumpDirectory(dirs, HydraHook::Core::Util::get_module_directory(snap->HostInstance));
 	}
 
-	return HydraHook::Core::Util::expand_environment_variables("%TEMP%\\");
+	AppendDumpDirectory(dirs, HydraHook::Core::Util::expand_environment_variables("%TEMP%\\"));
+	return dirs;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,68 +220,82 @@ static std::string GetProcessBaseName()
 // ---------------------------------------------------------------------------
 static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 {
+	s_dumpInFlight.fetch_add(1, std::memory_order_acq_rel);
+	struct InFlightGuard
+	{
+		~InFlightGuard() { s_dumpInFlight.fetch_sub(1, std::memory_order_acq_rel); }
+	} inFlightGuard;
+
 	// Atomic snapshot load -- no lock, safe even if crash fires during install/uninstall
 	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
 
 	auto logger = spdlog::get("HYDRAHOOK");
-	if (!logger)
-		return;
-
-	auto crashLog = logger->clone("crash");
+	std::shared_ptr<spdlog::logger> crashLog = logger ? logger->clone("crash") : nullptr;
 
 	const DWORD exCode = exInfo && exInfo->ExceptionRecord
 		? exInfo->ExceptionRecord->ExceptionCode : 0;
 	const PVOID exAddr = exInfo && exInfo->ExceptionRecord
 		? exInfo->ExceptionRecord->ExceptionAddress : nullptr;
 
-	crashLog->critical("=== HydraHook Crash Handler ({}) ===", trigger);
-	crashLog->critical("Exception code: 0x{:08X} ({})", exCode, ExceptionCodeToString(exCode));
-	crashLog->critical("Faulting address: {}", exAddr);
-	crashLog->critical("Thread ID: {}", GetCurrentThreadId());
+	if (crashLog)
+	{
+		crashLog->critical("=== HydraHook Crash Handler ({}) ===", trigger);
+		crashLog->critical("Exception code: 0x{:08X} ({})", exCode, ExceptionCodeToString(exCode));
+		crashLog->critical("Faulting address: {}", exAddr);
+		crashLog->critical("Thread ID: {}", GetCurrentThreadId());
+	}
 
 	if (exAddr)
 	{
 		char modName[MAX_PATH]{};
 		DWORD_PTR modOffset = 0;
 		GetModuleFromAddress(exAddr, modName, sizeof(modName), &modOffset);
-		crashLog->critical("Faulting module: {} + 0x{:X}", modName, modOffset);
+		if (crashLog)
+			crashLog->critical("Faulting module: {} + 0x{:X}", modName, modOffset);
 	}
 
 	if (exInfo && exInfo->ContextRecord)
 	{
 		const CONTEXT& ctx = *exInfo->ContextRecord;
+		if (crashLog)
+		{
 #ifdef _WIN64
-		crashLog->critical("Registers: RIP=0x{:016X} RSP=0x{:016X} RBP=0x{:016X}",
-			ctx.Rip, ctx.Rsp, ctx.Rbp);
-		crashLog->critical("           RAX=0x{:016X} RBX=0x{:016X} RCX=0x{:016X}",
-			ctx.Rax, ctx.Rbx, ctx.Rcx);
-		crashLog->critical("           RDX=0x{:016X} RSI=0x{:016X} RDI=0x{:016X}",
-			ctx.Rdx, ctx.Rsi, ctx.Rdi);
-		crashLog->critical("           R8 =0x{:016X} R9 =0x{:016X} R10=0x{:016X}",
-			ctx.R8, ctx.R9, ctx.R10);
-		crashLog->critical("           R11=0x{:016X} R12=0x{:016X} R13=0x{:016X}",
-			ctx.R11, ctx.R12, ctx.R13);
-		crashLog->critical("           R14=0x{:016X} R15=0x{:016X}",
-			ctx.R14, ctx.R15);
+			crashLog->critical("Registers: RIP=0x{:016X} RSP=0x{:016X} RBP=0x{:016X}",
+				ctx.Rip, ctx.Rsp, ctx.Rbp);
+			crashLog->critical("           RAX=0x{:016X} RBX=0x{:016X} RCX=0x{:016X}",
+				ctx.Rax, ctx.Rbx, ctx.Rcx);
+			crashLog->critical("           RDX=0x{:016X} RSI=0x{:016X} RDI=0x{:016X}",
+				ctx.Rdx, ctx.Rsi, ctx.Rdi);
+			crashLog->critical("           R8 =0x{:016X} R9 =0x{:016X} R10=0x{:016X}",
+				ctx.R8, ctx.R9, ctx.R10);
+			crashLog->critical("           R11=0x{:016X} R12=0x{:016X} R13=0x{:016X}",
+				ctx.R11, ctx.R12, ctx.R13);
+			crashLog->critical("           R14=0x{:016X} R15=0x{:016X}",
+				ctx.R14, ctx.R15);
 #else
-		crashLog->critical("Registers: EIP=0x{:08X} ESP=0x{:08X} EBP=0x{:08X}",
-			ctx.Eip, ctx.Esp, ctx.Ebp);
-		crashLog->critical("           EAX=0x{:08X} EBX=0x{:08X} ECX=0x{:08X}",
-			ctx.Eax, ctx.Ebx, ctx.Ecx);
-		crashLog->critical("           EDX=0x{:08X} ESI=0x{:08X} EDI=0x{:08X}",
-			ctx.Edx, ctx.Esi, ctx.Edi);
+			crashLog->critical("Registers: EIP=0x{:08X} ESP=0x{:08X} EBP=0x{:08X}",
+				ctx.Eip, ctx.Esp, ctx.Ebp);
+			crashLog->critical("           EAX=0x{:08X} EBX=0x{:08X} ECX=0x{:08X}",
+				ctx.Eax, ctx.Ebx, ctx.Ecx);
+			crashLog->critical("           EDX=0x{:08X} ESI=0x{:08X} EDI=0x{:08X}",
+				ctx.Edx, ctx.Esi, ctx.Edi);
 #endif
+		}
 	}
 
-	crashLog->flush();
+	if (crashLog)
+		crashLog->flush();
 
 	// Invoke user callback if registered (uses snapshot-owned data only)
 	if (snap && snap->EvtCrashHandler)
 	{
 		if (!snap->EvtCrashHandler(snap->OwnerEngine, exCode, exInfo))
 		{
-			crashLog->critical("User crash callback returned FALSE, skipping dump file");
-			crashLog->flush();
+			if (crashLog)
+			{
+				crashLog->critical("User crash callback returned FALSE, skipping dump file");
+				crashLog->flush();
+			}
 			return;
 		}
 	}
@@ -261,31 +305,40 @@ static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 	GetLocalTime(&st);
 
 	std::string processName = GetProcessBaseName();
-	std::string dumpDir = ResolveDumpDirectory(snap);
+	const std::vector<std::string> dumpDirs = DumpDirectoryCandidates(snap);
 
 	char dumpPath[MAX_PATH]{};
-	_snprintf_s(dumpPath, _TRUNCATE,
-		"%sHydraHook-%s-%u-%04d%02d%02d-%02d%02d%02d-0x%08X.dmp",
-		dumpDir.c_str(),
-		processName.c_str(),
-		GetCurrentProcessId(),
-		st.wYear, st.wMonth, st.wDay,
-		st.wHour, st.wMinute, st.wSecond,
-		exCode);
+	HANDLE hFile = INVALID_HANDLE_VALUE;
+	for (const auto& dumpDir : dumpDirs)
+	{
+		_snprintf_s(dumpPath, _TRUNCATE,
+			"%sHydraHook-%s-%u-%04d%02d%02d-%02d%02d%02d-0x%08X.dmp",
+			dumpDir.c_str(),
+			processName.c_str(),
+			GetCurrentProcessId(),
+			st.wYear, st.wMonth, st.wDay,
+			st.wHour, st.wMinute, st.wSecond,
+			exCode);
 
-	HANDLE hFile = CreateFileA(
-		dumpPath,
-		GENERIC_WRITE,
-		0,
-		nullptr,
-		CREATE_ALWAYS,
-		FILE_ATTRIBUTE_NORMAL,
-		nullptr);
+		hFile = CreateFileA(
+			dumpPath,
+			GENERIC_WRITE,
+			0,
+			nullptr,
+			CREATE_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			nullptr);
+		if (hFile != INVALID_HANDLE_VALUE)
+			break;
+	}
 
 	if (hFile == INVALID_HANDLE_VALUE)
 	{
-		crashLog->critical("Failed to create dump file: {} (error {})", dumpPath, GetLastError());
-		crashLog->flush();
+		if (crashLog)
+		{
+			crashLog->critical("Failed to create dump file (error {})", GetLastError());
+			crashLog->flush();
+		}
 		return;
 	}
 
@@ -307,12 +360,14 @@ static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 
 	CloseHandle(hFile);
 
-	if (success)
-		crashLog->critical("Minidump written to: {}", dumpPath);
-	else
-		crashLog->critical("MiniDumpWriteDump failed (error {})", GetLastError());
-
-	crashLog->flush();
+	if (crashLog)
+	{
+		if (success)
+			crashLog->critical("Minidump written to: {}", dumpPath);
+		else
+			crashLog->critical("MiniDumpWriteDump failed (error {})", GetLastError());
+		crashLog->flush();
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -351,11 +406,11 @@ static void HydraHookTerminateHandler()
 // CRT invalid parameter handler
 // ---------------------------------------------------------------------------
 static void HydraHookInvalidParameterHandler(
-	const wchar_t* /*expression*/,
-	const wchar_t* /*function*/,
-	const wchar_t* /*file*/,
-	unsigned int   /*line*/,
-	uintptr_t      /*pReserved*/)
+	const wchar_t* expression,
+	const wchar_t* function,
+	const wchar_t* file,
+	unsigned int   line,
+	uintptr_t      pReserved)
 {
 	__try
 	{
@@ -366,7 +421,7 @@ static void HydraHookInvalidParameterHandler(
 	}
 
 	if (s_prevInvalidParamHandler)
-		s_prevInvalidParamHandler(nullptr, nullptr, nullptr, 0, 0);
+		s_prevInvalidParamHandler(expression, function, file, line, pReserved);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,12 +476,15 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 	std::lock_guard<std::mutex> lock(s_installMutex);
 
 	auto* newSnap = MakeSnapshot(engine);
+	if (!newSnap)
+		return;
+
+	s_registrations.push_back({ engine, newSnap });
 
 	if (s_refCount.fetch_add(1) == 0)
 	{
-		// First installer: publish the snapshot and register global handlers
 		auto* old = s_snapshot.exchange(newSnap, std::memory_order_release);
-		delete old;
+		RetireSnapshot(old);
 
 		s_prevUnhandledFilter = SetUnhandledExceptionFilter(HydraHookUnhandledExceptionFilter);
 		s_prevTerminateHandler = std::set_terminate(HydraHookTerminateHandler);
@@ -438,16 +496,12 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 			logger->clone("crash")->info("Crash handler installed (dump type: {})",
 				static_cast<int>(engine->EngineConfig.CrashHandler.DumpType));
 	}
-	else
-	{
-		// Additional installer: keep as a potential replacement but don't publish yet.
-		// The snapshot is ready if the current owner uninstalls first.
-		delete newSnap;
-	}
 }
 
 void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 {
+	CrashConfigSnapshot* retired = nullptr;
+	{
 	std::lock_guard<std::mutex> lock(s_installMutex);
 
 	int expected = s_refCount.load(std::memory_order_relaxed);
@@ -459,13 +513,27 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 
 	const int prev = expected;
 
-	// If the uninstalling engine owns the current snapshot, clear it now --
-	// before the engine struct can be freed -- so the crash path never sees a stale pointer.
-	CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
-	if (snap && snap->OwnerEngine == engine)
+	CrashConfigSnapshot* removed = nullptr;
+	for (auto it = s_registrations.begin(); it != s_registrations.end(); ++it)
 	{
-		auto* old = s_snapshot.exchange(nullptr, std::memory_order_release);
-		delete old;
+		if (it->Engine == engine)
+		{
+			removed = it->Snapshot;
+			s_registrations.erase(it);
+			break;
+		}
+	}
+
+	CrashConfigSnapshot* active = s_snapshot.load(std::memory_order_acquire);
+	if (removed && active == removed)
+	{
+		CrashConfigSnapshot* next = s_registrations.empty() ? nullptr : s_registrations.front().Snapshot;
+		s_snapshot.store(next, std::memory_order_release);
+		retired = removed;
+	}
+	else
+	{
+		delete removed;
 	}
 
 	if (prev == 1)
@@ -485,9 +553,18 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 		if (logger)
 			logger->clone("crash")->info("Crash handler uninstalled");
 	}
+	}
+	RetireSnapshot(retired);
 }
 
 void HydraHookCrashHandlerInstallThreadSEH()
 {
 	_set_se_translator(HydraHookSehTranslator);
+}
+
+PHYDRAHOOK_ENGINE HydraHookCrashHandlerActiveOwnerForTest()
+{
+	std::lock_guard<std::mutex> lock(s_installMutex);
+	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
+	return snap ? snap->OwnerEngine : nullptr;
 }

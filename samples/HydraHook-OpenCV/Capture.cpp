@@ -69,7 +69,8 @@ static ID3D11RenderTargetView* g_d3d11_mainRTV = nullptr;
 static bool g_d3d11_imguiInitialized = false;
 
 /* D3D12 */
-static constexpr UINT D3D12_NUM_BACK_BUFFERS = 2;
+static constexpr UINT D3D12_NUM_BACK_BUFFERS = DXGI_MAX_SWAP_CHAIN_BUFFERS;
+static bool g_d3d12Initialized = false;
 static ID3D12Device* g_d3d12_pDevice = nullptr;
 static ID3D12CommandQueue* g_d3d12_pCommandQueue = nullptr;
 static ID3D12CommandAllocator* g_d3d12_pCommandAllocator = nullptr;
@@ -260,6 +261,24 @@ void Capture_Shutdown()
 	if (g_captureShutdownDone.exchange(true))
 		return;
 	Overlay_UnhookWindowProc();
+	if (g_d3d11_imguiInitialized)
+	{
+		ImGui_ImplDX11_Shutdown();
+		g_d3d11_imguiInitialized = false;
+	}
+#ifdef _WIN64
+	if (g_d3d12_imguiInitialized)
+	{
+		ImGui_ImplDX12_Shutdown();
+		g_d3d12_imguiInitialized = false;
+	}
+#endif
+	if (ImGui::GetCurrentContext())
+	{
+		ImGui_ImplWin32_Shutdown();
+		ImGui::DestroyContext();
+	}
+	g_d3d12Initialized = false;
 	g_workerRunning = false;
 	{
 		std::lock_guard<std::mutex> lock(g_workerMutex);
@@ -636,6 +655,11 @@ static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT fo
 
 static void D3D12_CleanupInitResources()
 {
+	if (g_d3d12_pFence && g_d3d12_hFenceEvent && g_d3d12_fenceLastSignaledValue != 0)
+	{
+		g_d3d12_pFence->SetEventOnCompletion(g_d3d12_fenceLastSignaledValue, g_d3d12_hFenceEvent);
+		WaitForSingleObject(g_d3d12_hFenceEvent, 2000);
+	}
 	D3D12_CleanupOverlayResources();
 	D3D12_ReleaseCaptureResources();
 #ifdef _WIN64
@@ -739,9 +763,7 @@ static void EvtHydraHookD3D12PrePresent(
 	(void)Flags;
 	(void)Extension;
 
-	static bool initialized = false;
-
-	if (!initialized)
+	if (!g_d3d12Initialized)
 	{
 		HydraHookEngineLogInfo("HydraHook-OpenCV: Grabbing D3D12 device and command queue from swapchain");
 
@@ -810,10 +832,10 @@ static void EvtHydraHookD3D12PrePresent(
 #endif
 
 		HydraHookEngineLogInfo("HydraHook-OpenCV: D3D12 initialized");
-		initialized = true;
+		g_d3d12Initialized = true;
 	}
 
-	if (!initialized)
+	if (!g_d3d12Initialized)
 		return;
 
 	DXGI_SWAP_CHAIN_DESC sd = {};
@@ -978,7 +1000,7 @@ static void EvtHydraHookD3D12PreResizeBuffers(
 	if (g_d3d12_pFence && g_d3d12_hFenceEvent)
 	{
 		g_d3d12_pFence->SetEventOnCompletion(g_d3d12_fenceLastSignaledValue, g_d3d12_hFenceEvent);
-		WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
+		WaitForSingleObject(g_d3d12_hFenceEvent, 2000);
 	}
 #ifdef _WIN64
 	if (g_d3d12_imguiInitialized)
