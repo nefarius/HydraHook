@@ -114,6 +114,39 @@ namespace
 	private:
 		PSRWLOCK lock_;
 	};
+
+	struct LifecycleTryGuard
+	{
+		explicit LifecycleTryGuard(PSRWLOCK lock)
+			: lock_(lock)
+			, owned_(TryAcquireSRWLockExclusive(lock_) != FALSE)
+		{
+		}
+
+		~LifecycleTryGuard()
+		{
+			if (owned_)
+				ReleaseSRWLockExclusive(lock_);
+		}
+
+		explicit operator bool() const { return owned_; }
+		LifecycleTryGuard(const LifecycleTryGuard&) = delete;
+		LifecycleTryGuard& operator=(const LifecycleTryGuard&) = delete;
+
+	private:
+		PSRWLOCK lock_;
+		bool owned_;
+	};
+
+	void PinWorkerModule()
+	{
+		// PIN cannot be undone. The worker's code stays mapped for the process lifetime.
+		HMODULE module = nullptr;
+		GetModuleHandleExW(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+			reinterpret_cast<LPCWSTR>(&PinWorkerModule),
+			&module);
+	}
 }
 
 
@@ -364,7 +397,16 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	auto logger = base ? base->clone("api") : nullptr;
 
 	{
-		LifecycleGuard lifecycle(&engine->LifecycleLock);
+		// Unhook holds this lock for its worker wait. Blocking here would wait
+		// under the loader lock, so a busy lock keeps the engine allocated.
+		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
+		if (!lifecycle)
+		{
+			PinWorkerModule();
+			if (logger)
+				logger->warn("Engine kept alive; lifecycle lock is busy");
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
 		PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
 	}
 
@@ -376,15 +418,23 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (!workerExited && !onWorker)
 		workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
 
-	bool callbacksDrained = workerExited
-		&& !engine->DrainIncomplete.load(std::memory_order_acquire);
-	if (workerExited && !callbacksDrained)
-		callbacksDrained = HookActivityTracker::drain(0);
-
-	if (!workerExited || !callbacksDrained)
+	if (!workerExited)
 	{
+		PinWorkerModule();
 		if (logger)
-			logger->warn("Engine kept alive; worker or hook callbacks are still running");
+			logger->warn("Engine kept alive; worker is still running");
+		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+	}
+
+	// TerminateThread can signal the worker before it closes the tracker.
+	// A false DrainIncomplete flag is not a drain. Shut the tracker first so a
+	// callback cannot pass the check and then enter.
+	HookActivityTracker::shutdown();
+	if (!HookActivityTracker::drain(0))
+	{
+		PinWorkerModule();
+		if (logger)
+			logger->warn("Engine kept alive; hook callbacks are still running");
 		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
 	}
 
