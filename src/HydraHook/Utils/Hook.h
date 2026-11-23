@@ -364,7 +364,12 @@ public:
 
     /**
      * @brief Trampoline while applied; otherwise the address last passed to apply.
-     * The returned pointer does not depend on this object's lifetime.
+     *
+     * While the detour is attached, this is the Detours trampoline. A saved copy
+     * of that trampoline is valid only until detachment commits (`remove`,
+     * `remove_nothrow`, or a destructor that is not suppressed). Detours frees
+     * the trampoline at that commit. If destruction is suppressed, the trampoline
+     * stays valid until a later detach.
      */
     type original() const
     {
