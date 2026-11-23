@@ -197,7 +197,7 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <PropertyGroup>
-    <MakeSpriteFontExe>$(ProjectDir)..\..\vcpkg_installed\$(VcpkgTriplet)\tools\directxtk\makespritefont.exe</MakeSpriteFontExe>
+    <MakeSpriteFontExe>$(_ZVcpkgCurrentInstalledDir)tools\directxtk\makespritefont.exe</MakeSpriteFontExe>
     <SpriteFontOut>$(OutDir)Arial.spritefont</SpriteFontOut>
   </PropertyGroup>
   <Target Name="GenerateSpriteFont" BeforeTargets="ClCompile" Inputs="$(MakeSpriteFontExe)" Outputs="$(SpriteFontOut)">

@@ -51,7 +51,7 @@ There is no HydraHook section on docs.nefarius.at. Do not invent one.
 
 - Default branch is `master`. Solution is `HydraHook.sln`. Toolset is v143. Configurations: `Debug`, `Debug_LIB`, `Release`, `Release_LIB` for `Win32` and `x64`.
 - `Debug` / `Release` produce `HydraHook.dll`. `Debug_LIB` / `Release_LIB` produce the static library and build the samples and `tests/cpp` projects against it.
-- vcpkg is a submodule. The manifest baseline is pinned in `vcpkg-configuration.json`. Triplets are `x86-windows-static` and `x64-windows-static`. `Directory.Build.targets` keeps the install and consume paths on the same triplet directory.
+- vcpkg is a submodule. The manifest baseline is pinned in `vcpkg-configuration.json`. Triplets are `x86-windows-static` and `x64-windows-static`. `Directory.Build.targets` consumes `vcpkg_installed/<triplet>/<triplet>/`, the directory this vcpkg tool fills when the MSBuild install root is `vcpkg_installed/<triplet>/`.
 - Install dependencies with `prepare-deps.bat` (both triplets), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`.
 - Build:
 

@@ -15,11 +15,12 @@
   </ItemDefinitionGroup>
 
   <!--
-    This vcpkg revision sets the manifest install root to vcpkg_installed\<triplet>\
-    and then appends the triplet again when consuming headers and libraries.
-    Point consumption back at the directory vcpkg actually populates.
+    vcpkg writes the package tree to <install-root>/<triplet>/.
+    The MSBuild install root is already vcpkg_installed/<triplet>/, so headers,
+    libs, and tools land in vcpkg_installed/<triplet>/<triplet>/.
+    Keep each triplet in its own install root so an x86 install does not delete x64.
   -->
   <PropertyGroup Condition="'$(VcpkgEnableManifest)' == 'true'">
-    <_ZVcpkgCurrentInstalledDir>$(_ZVcpkgInstalledDir)</_ZVcpkgCurrentInstalledDir>
+    <_ZVcpkgCurrentInstalledDir>$(_ZVcpkgInstalledDir)$(VcpkgTriplet)\</_ZVcpkgCurrentInstalledDir>
   </PropertyGroup>
 </Project>

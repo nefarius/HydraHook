@@ -51,17 +51,19 @@ if /i "%PLATFORM%"=="all" (
 
 if /i "%PLATFORM%"=="Win32" set "PLATFORM=x86"
 
+REM vcpkg writes to <install-root>\<triplet>\. Pass the per-triplet directory as the
+REM install root so packages land in vcpkg_installed\<triplet>\<triplet>\, which is
+REM what MSBuild consumes. Separate roots keep an x86 install from deleting x64.
 if /i "%PLATFORM%"=="x86" (
     echo Installing dependencies for x86-windows-static...
-    vcpkg\vcpkg.exe install --triplet x86-windows-static %VCPKG_EXTRA_OPTIONS%
+    vcpkg\vcpkg.exe install --triplet x86-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed\x86-windows-static" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 ) else if /i "%PLATFORM%"=="x64" (
     echo Installing dependencies for x64-windows-static...
-    vcpkg\vcpkg.exe install --triplet x64-windows-static %VCPKG_EXTRA_OPTIONS%
+    vcpkg\vcpkg.exe install --triplet x64-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed\x64-windows-static" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 ) else if /i "%PLATFORM%"=="all" (
     echo Installing dependencies for x86-windows-static and x64-windows-static...
-    REM vcpkg manifest mode keeps only one triplet per install - use separate staging dirs then merge
 
     echo [1/2] Building x86-windows-static...
     call "!VS_PATH!\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul 2>&1
@@ -69,7 +71,7 @@ if /i "%PLATFORM%"=="x86" (
         echo vcvarsall x86 failed.
         exit /b 1
     )
-    vcpkg\vcpkg.exe install --triplet x86-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed_x86_stage" %VCPKG_EXTRA_OPTIONS%
+    vcpkg\vcpkg.exe install --triplet x86-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed\x86-windows-static" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
 
     echo [2/2] Building x64-windows-static...
@@ -78,16 +80,8 @@ if /i "%PLATFORM%"=="x86" (
         echo vcvarsall x64 failed.
         exit /b 1
     )
-    vcpkg\vcpkg.exe install --triplet x64-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed_x64_stage" %VCPKG_EXTRA_OPTIONS%
+    vcpkg\vcpkg.exe install --triplet x64-windows-static --x-install-root="!SCRIPT_DIR!\vcpkg_installed\x64-windows-static" %VCPKG_EXTRA_OPTIONS%
     if errorlevel 1 exit /b 1
-
-    if not exist "!SCRIPT_DIR!\vcpkg_installed" mkdir "!SCRIPT_DIR!\vcpkg_installed"
-    xcopy /E /I /Y /Q "!SCRIPT_DIR!\vcpkg_installed_x86_stage\*" "!SCRIPT_DIR!\vcpkg_installed\" >nul
-    if errorlevel 1 goto :merge_error
-    xcopy /E /I /Y /Q "!SCRIPT_DIR!\vcpkg_installed_x64_stage\*" "!SCRIPT_DIR!\vcpkg_installed\" >nul
-    if errorlevel 1 goto :merge_error
-    rmdir /S /Q "!SCRIPT_DIR!\vcpkg_installed_x86_stage" 2>nul
-    rmdir /S /Q "!SCRIPT_DIR!\vcpkg_installed_x64_stage" 2>nul
 ) else (
     echo Unknown platform: %PLATFORM%
     echo Usage: prepare-deps.bat [Win32^|x86^|x64]
@@ -97,7 +91,3 @@ if /i "%PLATFORM%"=="x86" (
 echo.
 echo Dependencies installed. You can now build from Visual Studio.
 exit /b 0
-
-:merge_error
-echo Failed to merge vcpkg staging directories into vcpkg_installed.
-exit /b 1
