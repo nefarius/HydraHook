@@ -7,17 +7,11 @@
     <ClCompile Include="Game\Hook\Window.cpp">
       <Filter>Game\Hook</Filter>
     </ClCompile>
-    <ClCompile Include="Game\Hook\Direct3D9.cpp">
-      <Filter>Game\Hook\D3D9</Filter>
-    </ClCompile>
     <ClCompile Include="Game\Hook\Direct3D9Ex.cpp">
       <Filter>Game\Hook\D3D9</Filter>
     </ClCompile>
     <ClCompile Include="Game\Hook\Direct3D10.cpp">
       <Filter>Game\Hook\D3D10</Filter>
-    </ClCompile>
-    <ClCompile Include="Game\Hook\DirectInput8.cpp">
-      <Filter>Game\Hook\DInput8</Filter>
     </ClCompile>
     <ClCompile Include="Game\Hook\Direct3D11.cpp">
       <Filter>Game\Hook\D3D11</Filter>
@@ -30,7 +24,6 @@
       <Filter>Game\Hook\CoreAudio</Filter>
     </ClCompile>
     <ClCompile Include="CrashHandler.cpp" />
-    <ClCompile Include="LdrLock.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Game">
@@ -50,9 +43,6 @@
     </Filter>
     <Filter Include="Game\Hook\D3D10">
       <UniqueIdentifier>{9b51e062-9c73-4803-b205-97d83c8501b3}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Game\Hook\DInput8">
-      <UniqueIdentifier>{2886b68a-63b5-495c-8bce-ef308db2b907}</UniqueIdentifier>
     </Filter>
     <Filter Include="Game\Hook\D3D11">
       <UniqueIdentifier>{170e4a2e-f495-444e-b4f2-491ad22e6b24}</UniqueIdentifier>
@@ -91,9 +81,6 @@
     </ClInclude>
     <ClInclude Include="Game\Hook\Direct3D10.h">
       <Filter>Game\Hook\D3D10</Filter>
-    </ClInclude>
-    <ClInclude Include="Game\Hook\DirectInput8.h">
-      <Filter>Game\Hook\DInput8</Filter>
     </ClInclude>
     <ClInclude Include="Game\Hook\Direct3DBase.h">
       <Filter>Game\Hook</Filter>
@@ -137,7 +124,6 @@
       <Filter>Shared\Engine</Filter>
     </ClInclude>
     <ClInclude Include="CrashHandler.h" />
-    <ClInclude Include="LdrLock.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="HydraHook.rc" />

@@ -47,7 +47,6 @@ using namespace HydraHook::Core::Exceptions;
 #include <Game/Hook/Direct3D10.h>
 #include <Game/Hook/Direct3D11.h>
 #include <Game/Hook/Direct3D12.h>
-#include <Game/Hook/DirectInput8.h>
 #include <Game/Hook/AudioRenderClientHook.h>
 
 //
@@ -132,25 +131,38 @@ static PHYDRAHOOK_ENGINE engine = nullptr;
 /// Once-per-hook announcements; re-armed at the start of every worker run.
 static struct HookAnnouncements
 {
-	ResettableOnce present9, reset9, endScene9, present9Ex, reset9Ex;
+	ResettableOnce present9, reset9, endScene9, reset9Ex;
 	ResettableOnce present10, resizeTarget10, resizeBuffers10;
 	ResettableOnce present11, resizeTarget11, resizeBuffers11;
 	ResettableOnce present12, resizeTarget12, resizeBuffers12;
-	ResettableOnce present1D3D12, present1D3D11, present1D3D10;
 	ResettableOnce resizeBuffers1D3D12, resizeBuffers1D3D11, resizeBuffers1D3D10;
 	ResettableOnce arcGetBuffer, arcReleaseBuffer;
 
 	void reset_all()
 	{
-		present9.reset(); reset9.reset(); endScene9.reset(); present9Ex.reset(); reset9Ex.reset();
+		present9.reset(); reset9.reset(); endScene9.reset(); reset9Ex.reset();
 		present10.reset(); resizeTarget10.reset(); resizeBuffers10.reset();
 		present11.reset(); resizeTarget11.reset(); resizeBuffers11.reset();
 		present12.reset(); resizeTarget12.reset(); resizeBuffers12.reset();
-		present1D3D12.reset(); present1D3D11.reset(); present1D3D10.reset();
 		resizeBuffers1D3D12.reset(); resizeBuffers1D3D11.reset(); resizeBuffers1D3D10.reset();
 		arcGetBuffer.reset(); arcReleaseBuffer.reset();
 	}
 } g_announce;
+
+/// True when this swap chain was created for TDevice and that API is enabled.
+template <typename TDevice>
+bool DispatchSwapChainDevice(IDXGISwapChain* chain, BOOL enabled)
+{
+	if (!enabled || !chain)
+		return false;
+
+	TDevice* device = nullptr;
+	if (FAILED(chain->GetDevice(IID_PPV_ARGS(&device))) || !device)
+		return false;
+
+	device->Release();
+	return true;
+}
 
 void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 {
@@ -204,6 +216,7 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 	{
 		g_postQuitMessageHook.remove_nothrow();
 		g_exitProcessHook.remove_nothrow();
+		g_freeLibraryHook.remove_nothrow();
 	}
 
 	else if (origin == ShutdownOrigin::ManualUnhook)
@@ -229,7 +242,7 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 	// A manual unhook waits long enough for HookActivityTracker::drain (5000 ms)
 	const DWORD waitTimeout = origin == ShutdownOrigin::DllMainProcessDetach
 		                          ? 0
-		                          : (origin == ShutdownOrigin::ManualUnhook ? 8000 : 3000);
+		                          : (origin == ShutdownOrigin::ManualUnhook ? 8000 : 6500);
 	const auto result = WaitForSingleObject(engine->EngineThread, waitTimeout);
 
 	switch (result)
@@ -264,22 +277,6 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		break;
 	}
 }
-
-// NOTE: DirectInput hooking is technically implemented but not really useful
-// #define HOOK_DINPUT8
-
-#ifdef HOOK_DINPUT8
-// DInput8
-Hook<CallConvention::stdcall_t, HRESULT, LPDIRECTINPUTDEVICE8> g_acquire8Hook;
-Hook<CallConvention::stdcall_t, HRESULT, LPDIRECTINPUTDEVICE8, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD>
-g_getDeviceData8Hook;
-Hook<CallConvention::stdcall_t, HRESULT, LPDIRECTINPUTDEVICE8, LPDIDEVICEINSTANCE> g_getDeviceInfo8Hook;
-Hook<CallConvention::stdcall_t, HRESULT, LPDIRECTINPUTDEVICE8, DWORD, LPVOID> g_getDeviceState8Hook;
-Hook<CallConvention::stdcall_t, HRESULT, LPDIRECTINPUTDEVICE8, LPDIDEVICEOBJECTINSTANCE, DWORD, DWORD>
-g_getObjectInfo8Hook;
-
-void HookDInput8(size_t* vtable8);
-#endif
 
 DWORD WINAPI HydraHookMainThread(LPVOID Params)
 {
@@ -411,10 +408,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		if (!g_freeLibraryHook.is_applied())
 		g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
 		{
-			if (hLibModule == engine->DllModule)
+			if (engine && hLibModule == engine->DllModule)
 			{
 				engine->FreeLibraryHookActive.store(true, std::memory_order_release);
 				PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
+				g_freeLibraryHook.remove_nothrow();
 				FreeLibraryAndExitThread(hLibModule, 0);
 			}
 			return g_freeLibraryHook.call_orig(hLibModule);
@@ -426,102 +424,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	}
 
 #pragma region D3D9
-
-	/*
-	 * The following section is disabled because hooking IDirect3DDevice9Ex functions
-	 * should work on "vanilla" D3D9 (like Half-Life 2) equally well while also supporting
-	 * both windowed and full-screen mode without modifications. Section will be left here
-	 * for experiments and tests.
-	 */
-#ifdef D3D9_LEGACY_HOOKING
-
-	try
-	{
-		AutoPtr<Direct3D9Hooking::Direct3D9> d3d(new Direct3D9Hooking::Direct3D9);
-
-		BOOST_LOG_TRIVIAL(info) << "Hooking IDirect3DDevice9::Present"
-		)
-		;
-
-		present9Hook.apply(d3d->vtable()[Direct3D9Hooking::Present], [](
-		                   LPDIRECT3DDEVICE9 dev,
-		                   CONST RECT* a1,
-		                   CONST RECT* a2,
-		                   HWND a3,
-		                   CONST RGNDATA* a4
-	                   ) -> HRESULT
-		                   {
-			                   static std::once_flag flag;
-			                   std::call_once(flag, []()
-			                   {
-				                   Logger::get("HookDX9").information("++ IDirect3DDevice9::Present called");
-
-				                   INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion9);
-			                   });
-
-			                   INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PrePresent, dev, a1, a2, a3, a4);
-
-			                   auto ret = present9Hook.callOrig(dev, a1, a2, a3, a4);
-
-			                   INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PostPresent, dev, a1, a2, a3, a4);
-
-			                   return ret;
-		                   });
-
-		BOOST_LOG_TRIVIAL(info) << "Hooking IDirect3DDevice9::Reset"
-		)
-		;
-
-		reset9Hook.apply(d3d->vtable()[Direct3D9Hooking::Reset], [](
-		                 LPDIRECT3DDEVICE9 dev,
-		                 D3DPRESENT_PARAMETERS* pp
-	                 ) -> HRESULT
-		                 {
-			                 static std::once_flag flag;
-			                 std::call_once(flag, []()
-			                 {
-				                 Logger::get("HookDX9").information("++ IDirect3DDevice9::Reset called");
-			                 });
-
-			                 INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PreReset, dev, pp);
-
-			                 auto ret = reset9Hook.callOrig(dev, pp);
-
-			                 INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PostReset, dev, pp);
-
-			                 return ret;
-		                 });
-
-		BOOST_LOG_TRIVIAL(info) << "Hooking IDirect3DDevice9::EndScene"
-		)
-		;
-
-		endScene9Hook.apply(d3d->vtable()[Direct3D9Hooking::EndScene], [](
-		                    LPDIRECT3DDEVICE9 dev
-	                    ) -> HRESULT
-		                    {
-			                    static std::once_flag flag;
-			                    std::call_once(flag, []()
-			                    {
-				                    Logger::get("HookDX9").information(
-					                    "++ IDirect3DDevice9::EndScene called");
-			                    });
-
-			                    INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PreEndScene, dev);
-
-			                    auto ret = endScene9Hook.callOrig(dev);
-
-			                    INVOKE_D3D9_CALLBACK(engine, EvtHydraHookD3D9PostEndScene, dev);
-
-			                    return ret;
-		                    });
-	}
-	catch (Poco::Exception& pex)
-	{
-		logger.error("Hooking D3D9 failed: %s", pex.displayText());
-	}
-
-#endif
 
 #ifndef HYDRAHOOK_NO_D3D9
 
@@ -642,7 +544,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                     if (guard.invoke)
 				                     {
-					                     g_announce.present9Ex.call([&pDev = dev]()
+					                     g_announce.present9.call([&pDev = dev]()
 					                     {
 						                     spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                     "++ IDirect3DDevice9Ex::PresentEx called");
@@ -1006,12 +908,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 					                           return swapChainPresentHook.call_orig(chain, SyncInterval, Flags);
 
 #ifndef HYDRAHOOK_NO_D3D12
-				                           if (engine->EngineConfig.Direct3D.HookDirect3D12)
-				                           {
-					                           ID3D12Device* pD12Device = nullptr;
-					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) && pD12Device)
-					                           {
-						                           pD12Device->Release();
+				                           if (DispatchSwapChainDevice<ID3D12Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D12))
+							{
+							{
 
 						                           g_announce.present12.call([&pChain = chain]()
 						                           {
@@ -1046,12 +945,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-				                           if (engine->EngineConfig.Direct3D.HookDirect3D11)
-				                           {
-					                           ID3D11Device* pD11Device = nullptr;
-					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) && pD11Device)
-					                           {
-						                           pD11Device->Release();
+				                           if (DispatchSwapChainDevice<ID3D11Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D11))
+							{
+							{
 
 						                           g_announce.present11.call([&pChain = chain]()
 						                           {
@@ -1098,17 +994,16 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-				                           if (engine->EngineConfig.Direct3D.HookDirect3D10)
-				                           {
-					                           ID3D10Device* pD10Device = nullptr;
-					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) && pD10Device)
-					                           {
-						                           pD10Device->Release();
+				                           if (DispatchSwapChainDevice<ID3D10Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D10))
+							{
+							{
 
-						                           g_announce.present10.call([]()
+						                           g_announce.present10.call([&pChain = chain]()
 						                           {
 							                           spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                           "++ IDXGISwapChain::Present called");
+
+							                           engine->RenderPipeline.pSwapChain = pChain;
 
 							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion10);
 						                           });
@@ -1154,13 +1049,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                                chain, pNewTargetParameters);
 
 #ifndef HYDRAHOOK_NO_D3D12
-				                                if (engine->EngineConfig.Direct3D.HookDirect3D12)
-				                                {
-					                                ID3D12Device* pD12Device = nullptr;
-					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
-						                                pD12Device)
-					                                {
-						                                pD12Device->Release();
+				                                if (DispatchSwapChainDevice<ID3D12Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D12))
+							{
+							{
 
 						                                g_announce.resizeTarget12.call([]()
 						                                {
@@ -1193,13 +1084,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-				                                if (engine->EngineConfig.Direct3D.HookDirect3D11)
-				                                {
-					                                ID3D11Device* pD11Device = nullptr;
-					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
-						                                pD11Device)
-					                                {
-						                                pD11Device->Release();
+				                                if (DispatchSwapChainDevice<ID3D11Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D11))
+							{
+							{
 
 						                                g_announce.resizeTarget11.call([]()
 						                                {
@@ -1240,13 +1127,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-				                                if (engine->EngineConfig.Direct3D.HookDirect3D10)
-				                                {
-					                                ID3D10Device* pD10Device = nullptr;
-					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
-						                                pD10Device)
-					                                {
-						                                pD10Device->Release();
+				                                if (DispatchSwapChainDevice<ID3D10Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D10))
+							{
+							{
 
 						                                g_announce.resizeTarget10.call([]()
 						                                {
@@ -1301,13 +1184,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                                 chain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
 #ifndef HYDRAHOOK_NO_D3D12
-				                                 if (engine->EngineConfig.Direct3D.HookDirect3D12)
-				                                 {
-					                                 ID3D12Device* pD12Device = nullptr;
-					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
-						                                 pD12Device)
-					                                 {
-						                                 pD12Device->Release();
+				                                 if (DispatchSwapChainDevice<ID3D12Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D12))
+							{
+							{
 
 						                                 g_announce.resizeBuffers12.call([]()
 						                                 {
@@ -1343,13 +1222,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-				                                 if (engine->EngineConfig.Direct3D.HookDirect3D11)
-				                                 {
-					                                 ID3D11Device* pD11Device = nullptr;
-					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
-						                                 pD11Device)
-					                                 {
-						                                 pD11Device->Release();
+				                                 if (DispatchSwapChainDevice<ID3D11Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D11))
+							{
+							{
 
 						                                 g_announce.resizeBuffers11.call([]()
 						                                 {
@@ -1385,13 +1260,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-				                                 if (engine->EngineConfig.Direct3D.HookDirect3D10)
-				                                 {
-					                                 ID3D10Device* pD10Device = nullptr;
-					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
-						                                 pD10Device)
-					                                 {
-						                                 pD10Device->Release();
+				                                 if (DispatchSwapChainDevice<ID3D10Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D10))
+							{
+							{
 
 						                                 g_announce.resizeBuffers10.call([]()
 						                                 {
@@ -1446,18 +1317,16 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                            chain, SyncInterval, PresentFlags, pPresentParameters);
 
 #ifndef HYDRAHOOK_NO_D3D12
-				                            if (engine->EngineConfig.Direct3D.HookDirect3D12)
-				                            {
-					                            ID3D12Device* pD12Device = nullptr;
-					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
-						                            pD12Device)
-					                            {
-						                            pD12Device->Release();
+				                            if (DispatchSwapChainDevice<ID3D12Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D12))
+							{
+							{
 
-						                            g_announce.present1D3D12.call([]()
+						                            g_announce.present12.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D12)");
+
+							                            engine->RenderPipeline.pSwapChain = pChain;
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion12);
@@ -1488,18 +1357,16 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-				                            if (engine->EngineConfig.Direct3D.HookDirect3D11)
-				                            {
-					                            ID3D11Device* pD11Device = nullptr;
-					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
-						                            pD11Device)
-					                            {
-						                            pD11Device->Release();
+				                            if (DispatchSwapChainDevice<ID3D11Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D11))
+							{
+							{
 
-						                            g_announce.present1D3D11.call([]()
+						                            g_announce.present11.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D11)");
+
+							                            engine->RenderPipeline.pSwapChain = pChain;
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion11);
@@ -1530,18 +1397,16 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-				                            if (engine->EngineConfig.Direct3D.HookDirect3D10)
-				                            {
-					                            ID3D10Device* pD10Device = nullptr;
-					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
-						                            pD10Device)
-					                            {
-						                            pD10Device->Release();
+				                            if (DispatchSwapChainDevice<ID3D10Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D10))
+							{
+							{
 
-						                            g_announce.present1D3D10.call([]()
+						                            g_announce.present10.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D10)");
+
+							                            engine->RenderPipeline.pSwapChain = pChain;
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion10);
@@ -1598,13 +1463,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                                  pCreationNodeMask, ppPresentQueue);
 
 #ifndef HYDRAHOOK_NO_D3D12
-				                                  if (engine->EngineConfig.Direct3D.HookDirect3D12)
-				                                  {
-					                                  ID3D12Device* pD12Device = nullptr;
-					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
-						                                  pD12Device)
-					                                  {
-						                                  pD12Device->Release();
+				                                  if (DispatchSwapChainDevice<ID3D12Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D12))
+							{
+							{
 
 						                                  g_announce.resizeBuffers1D3D12.call([]()
 						                                  {
@@ -1640,13 +1501,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-				                                  if (engine->EngineConfig.Direct3D.HookDirect3D11)
-				                                  {
-					                                  ID3D11Device* pD11Device = nullptr;
-					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
-						                                  pD11Device)
-					                                  {
-						                                  pD11Device->Release();
+				                                  if (DispatchSwapChainDevice<ID3D11Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D11))
+							{
+							{
 
 						                                  g_announce.resizeBuffers1D3D11.call([]()
 						                                  {
@@ -1682,13 +1539,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-				                                  if (engine->EngineConfig.Direct3D.HookDirect3D10)
-				                                  {
-					                                  ID3D10Device* pD10Device = nullptr;
-					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
-						                                  pD10Device)
-					                                  {
-						                                  pD10Device->Release();
+				                                  if (DispatchSwapChainDevice<ID3D10Device>(chain, engine->EngineConfig.Direct3D.HookDirect3D10))
+							{
+							{
 
 						                                  g_announce.resizeBuffers1D3D10.call([]()
 						                                  {
@@ -1837,43 +1690,16 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 #pragma endregion
 
-#ifdef HOOK_DINPUT8
-	//
-	// TODO: legacy, fix me up!
-	// 
-	if (engine->Configuration->getBool("DInput8.enabled", false))
-	{
-		bool dinput8_available;
-		size_t vtable8[DirectInput8Hooking::DirectInput8::VTableElements] = {0};
-
-		// Dinput8
-		{
-			DirectInput8Hooking::DirectInput8 di8;
-			dinput8_available = di8.GetVTable(vtable8);
-
-			if (!dinput8_available)
-			{
-				logger.warning("Could not get VTable for DirectInput8");
-			}
-		}
-
-		if (dinput8_available)
-		{
-			BOOST_LOG_TRIVIAL(info) << "Game uses DirectInput8"
-			)
-			;
-			HookDInput8(vtable8);
-		}
-	}
-#endif
-
 	logger->info("Library initialized successfully");
 
 	//
 	// Wait until cancellation requested
 	// 
 	const auto result = WaitForSingleObject(engine->EngineCancellationEvent, INFINITE);
-	logger->info("Shutting down hooks... (result: {}, error: {})", result, GetLastError());
+	if (result == WAIT_FAILED)
+		logger->error("Shutting down hooks... wait failed: {}", GetLastError());
+	else
+		logger->info("Shutting down hooks... (result: {})", result);
 	switch (result)
 	{
 	case WAIT_ABANDONED:
@@ -1881,9 +1707,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		break;
 	case WAIT_OBJECT_0:
 		logger->info("Shutting down hooks... Thread shutdown complete");
-		break;
-	case WAIT_TIMEOUT:
-		logger->info("Shutting down hooks... Thread hasn't finished clean-up within expected time, terminating");
 		break;
 	case WAIT_FAILED:
 		logger->info("Shutting down hooks... Unknown error, host process might crash");
@@ -2040,101 +1863,3 @@ ID3D12CommandQueue* GetD3D12CommandQueueForSwapChain(IDXGISwapChain* pSwapChain)
 #endif
 	return nullptr;
 }
-
-#ifdef HOOK_DINPUT8
-/**
- * @brief Installs hooks for key IDirectInputDevice8 methods on the provided vtable.
- *
- * Attaches wrappers for Acquire, GetDeviceData, GetDeviceInfo, GetDeviceState, and GetObjectInfo that perform a one-time informational log when each method is first invoked and then invoke the original implementation.
- *
- * @param vtable8 Pointer to the IDirectInputDevice8 virtual function table (array of function pointers) where hooks will be installed.
- */
-void HookDInput8(size_t* vtable8)
-{
-	auto& logger = Logger::get(__func__);
-	BOOST_LOG_TRIVIAL(info) << "Hooking IDirectInputDevice8::Acquire"
-	)
-	;
-
-	g_acquire8Hook.apply(vtable8[DirectInput8Hooking::Acquire], [](LPDIRECTINPUTDEVICE8 dev) -> HRESULT
-	{
-		static std::once_flag flag;
-		std::call_once(flag, []()
-		{
-			Logger::get("HookDInput8").information("++ IDirectInputDevice8::Acquire called");
-		});
-
-		return g_acquire8Hook.callOrig(dev);
-	});
-
-	BOOST_LOG_TRIVIAL(info) << "Hooking IDirectInputDevice8::GetDeviceData"
-	)
-	;
-
-	g_getDeviceData8Hook.apply(vtable8[DirectInput8Hooking::GetDeviceData],
-	                           [](LPDIRECTINPUTDEVICE8 dev, DWORD cbObjectData, LPDIDEVICEOBJECTDATA rgdod,
-	                              LPDWORD pdwInOut, DWORD dwFlags) -> HRESULT
-	                           {
-		                           static std::once_flag flag;
-		                           std::call_once(flag, []()
-		                           {
-			                           Logger::get("HookDInput8").information(
-				                           "++ IDirectInputDevice8::Acquire called");
-		                           });
-
-		                           return g_getDeviceData8Hook.callOrig(dev, cbObjectData, rgdod, pdwInOut, dwFlags);
-	                           });
-
-	BOOST_LOG_TRIVIAL(info) << "Hooking IDirectInputDevice8::GetDeviceInfo"
-	)
-	;
-
-	g_getDeviceInfo8Hook.apply(vtable8[DirectInput8Hooking::GetDeviceInfo],
-	                           [](LPDIRECTINPUTDEVICE8 dev, LPDIDEVICEINSTANCE pdidi) -> HRESULT
-	                           {
-		                           static std::once_flag flag;
-		                           std::call_once(flag, []()
-		                           {
-			                           Logger::get("HookDInput8").information(
-				                           "++ IDirectInputDevice8::GetDeviceInfo called");
-		                           });
-
-		                           return g_getDeviceInfo8Hook.callOrig(dev, pdidi);
-	                           });
-
-	BOOST_LOG_TRIVIAL(info) << "Hooking IDirectInputDevice8::GetDeviceState"
-	)
-	;
-
-	g_getDeviceState8Hook.apply(vtable8[DirectInput8Hooking::GetDeviceState],
-	                            [](LPDIRECTINPUTDEVICE8 dev, DWORD cbData, LPVOID lpvData) -> HRESULT
-	                            {
-		                            static std::once_flag flag;
-		                            std::call_once(flag, []()
-		                            {
-			                            Logger::get("HookDInput8").information(
-				                            "++ IDirectInputDevice8::GetDeviceState called");
-		                            });
-
-		                            return g_getDeviceState8Hook.callOrig(dev, cbData, lpvData);
-	                            });
-
-	BOOST_LOG_TRIVIAL(info) << "Hooking IDirectInputDevice8::GetObjectInfo"
-	)
-	;
-
-	g_getObjectInfo8Hook.apply(vtable8[DirectInput8Hooking::GetObjectInfo],
-	                           [](LPDIRECTINPUTDEVICE8 dev, LPDIDEVICEOBJECTINSTANCE pdidoi, DWORD dwObj,
-	                              DWORD dwHow) -> HRESULT
-	                           {
-		                           static std::once_flag flag;
-		                           std::call_once(flag, []()
-		                           {
-			                           Logger::get("HookDInput8").information(
-				                           "++ IDirectInputDevice8::GetObjectInfo called");
-		                           });
-
-		                           return g_getObjectInfo8Hook.callOrig(dev, pdidoi, dwObj, dwHow);
-	                           });
-}
-#endif

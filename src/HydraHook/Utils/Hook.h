@@ -43,6 +43,15 @@ SOFTWARE.
 #include <detours/detours.h>
 #include "Exceptions.hpp"
 
+/**
+ * @brief When set, ~Hook() does not detach.
+ *
+ * DLL_PROCESS_DETACH runs static destructors after a retained Destroy returns.
+ * Those destructors must not call DetourDetach while the worker or a callback
+ * is still inside a hook. A later successful Destroy clears this.
+ */
+inline bool g_hookDestructorDetachSuppressed = false;
+
 /** @brief Supported calling conventions for hook targets. */
 enum class CallConvention
 {
@@ -82,6 +91,9 @@ class Hook
 
     bool is_applied_;
     bool has_open_transaction_;
+
+    Hook(const Hook&) = delete;
+    Hook& operator=(const Hook&) = delete;
 
     void transaction_begin()
     {
@@ -176,26 +188,14 @@ public:
     {
     }
 
-    /** @brief Destroys hook; removes if applied. @throws DetourException on abort/remove failure. */
-    ~Hook() noexcept(false)
+    /** @brief Destroys hook; removes if applied. Never throws. */
+    ~Hook() noexcept
     {
-        if (has_open_transaction_)
-        {
-            const auto result = DetourTransactionAbort();
+        if (g_hookDestructorDetachSuppressed)
+            return;
 
-            if (result != NO_ERROR)
-            {
-                if (result == ERROR_INVALID_OPERATION)
-                {
-                    throw HydraHook::Core::Exceptions::DetourException(
-                        "No pending transaction exists"
-                    );
-                }
-                throw HydraHook::Core::Exceptions::DetourException("Unknown error");
-            }
-        }
-
-        remove();
+        abort_transaction_nothrow();
+        remove_nothrow();
     }
 
     /**
@@ -207,6 +207,11 @@ public:
     template <typename T>
     void apply(T pFunc, type detour)
     {
+        if (is_applied_)
+        {
+            throw HydraHook::Core::Exceptions::DetourException("Hook is already applied");
+        }
+
         detour_ = detour;
         orig_ = static_cast<size_t>(pFunc);
 
@@ -262,8 +267,6 @@ public:
         if (!is_applied_)
             return;
 
-        is_applied_ = false;
-
         transaction_begin();
         try
         {
@@ -302,6 +305,7 @@ public:
             }
 
             transaction_commit();
+            is_applied_ = false;
         }
         catch (...)
         {
@@ -356,5 +360,19 @@ public:
     bool is_applied() const
     {
         return is_applied_;
+    }
+
+    /**
+     * @brief Trampoline while applied; otherwise the address last passed to apply.
+     *
+     * While the detour is attached, this is the Detours trampoline. A saved copy
+     * of that trampoline is valid only until detachment commits (`remove`,
+     * `remove_nothrow`, or a destructor that is not suppressed). Detours frees
+     * the trampoline at that commit. If destruction is suppressed, the trampoline
+     * stays valid until a later detach.
+     */
+    type original() const
+    {
+        return reinterpret_cast<type>(orig_);
     }
 };

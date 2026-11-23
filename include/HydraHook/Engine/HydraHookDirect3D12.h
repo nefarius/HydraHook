@@ -191,6 +191,10 @@ VOID FORCEINLINE HYDRAHOOK_D3D12_EVENT_CALLBACKS_INIT(
     ZeroMemory(Callbacks, sizeof(HYDRAHOOK_D3D12_EVENT_CALLBACKS));
 }
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @brief Registers Direct3D 12 render pipeline callbacks.
  * @param[in] Engine Valid engine handle.
@@ -210,6 +214,10 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(
 HYDRAHOOK_API ID3D12CommandQueue* HydraHookEngineGetD3D12CommandQueue(
     _In_ IDXGISwapChain* pSwapChain
 );
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

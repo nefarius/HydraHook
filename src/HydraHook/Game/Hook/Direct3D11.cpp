@@ -69,8 +69,8 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 	UINT createDeviceFlags = 0;
 	D3D_FEATURE_LEVEL featureLevel;
 	// Note: requesting lower feature level in case of missing hardware support
-	const D3D_FEATURE_LEVEL featureLevelArray[3] = {
-		D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0
+	const D3D_FEATURE_LEVEL featureLevelArray[] = {
+		D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0
 	};
 
 	const auto hD3D11CreateDeviceAndSwapChain = static_cast<LPVOID>(GetProcAddress(
@@ -105,7 +105,7 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 		nullptr,
 		createDeviceFlags,
 		featureLevelArray,
-		1,
+		ARRAYSIZE(featureLevelArray),
 		D3D11_SDK_VERSION,
 		&sd,
 		&pSwapChain,
@@ -121,7 +121,7 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 			nullptr,
 			createDeviceFlags,
 			featureLevelArray,
-			1,
+			ARRAYSIZE(featureLevelArray),
 			D3D11_SDK_VERSION,
 			&sd,
 			&pSwapChain,
@@ -138,15 +138,27 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 
 std::vector<size_t> Direct3D11Hooking::Direct3D11::vtable() const
 {
-	IDXGISwapChain3* pSC3 = nullptr;
-	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&pSC3))))
+	auto capture = [this](int count)
 	{
-		pSC3->Release();
 		return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
-		                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChain3VTableElements);
+		                           *reinterpret_cast<size_t**>(pSwapChain) + count);
+	};
+
+	IDXGISwapChain3* swapChain3 = nullptr;
+	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&swapChain3))))
+	{
+		swapChain3->Release();
+		return capture(DXGIHooking::DXGI::SwapChain3VTableElements);
 	}
-	return std::vector<size_t>(*reinterpret_cast<size_t**>(pSwapChain),
-	                           *reinterpret_cast<size_t**>(pSwapChain) + DXGIHooking::DXGI::SwapChainVTableElements);
+
+	IDXGISwapChain1* swapChain1 = nullptr;
+	if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&swapChain1))))
+	{
+		swapChain1->Release();
+		return capture(DXGIHooking::DXGI::SwapChain1VTableElements);
+	}
+
+	return capture(DXGIHooking::DXGI::SwapChainVTableElements);
 }
 
 Direct3D11Hooking::Direct3D11::~Direct3D11()

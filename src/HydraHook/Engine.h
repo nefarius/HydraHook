@@ -80,41 +80,41 @@ private:
  */
 typedef struct _HYDRAHOOK_ENGINE
 {
-    HMODULE HostInstance;                    /**< Host DLL module handle. */
-    HMODULE DllModule;
-    HYDRAHOOK_D3D_VERSION GameVersion;       /**< Detected render API version. */
-    HYDRAHOOK_ENGINE_CONFIG EngineConfig;   /**< Configuration at creation. */
-    HYDRAHOOK_D3D9_EVENT_CALLBACKS EventsD3D9;   /**< D3D9 callbacks. */
-    HYDRAHOOK_D3D10_EVENT_CALLBACKS EventsD3D10; /**< D3D10 callbacks. */
-    HYDRAHOOK_D3D11_EVENT_CALLBACKS EventsD3D11; /**< D3D11 callbacks. */
-    HYDRAHOOK_D3D12_EVENT_CALLBACKS EventsD3D12; /**< D3D12 callbacks. */
-    HYDRAHOOK_ARC_EVENT_CALLBACKS EventsARC;    /**< Core Audio callbacks. */
-    HYDRAHOOK_D3D9_EVENT_CALLBACKS SavedEventsD3D9;   /**< Registered tables restored by rehook. */
-    HYDRAHOOK_D3D10_EVENT_CALLBACKS SavedEventsD3D10;
-    HYDRAHOOK_D3D11_EVENT_CALLBACKS SavedEventsD3D11;
-    HYDRAHOOK_D3D12_EVENT_CALLBACKS SavedEventsD3D12;
-    HYDRAHOOK_ARC_EVENT_CALLBACKS SavedEventsARC;
-    SRWLOCK LifecycleLock;                   /**< Serializes unhook and rehook. Zero is SRWLOCK_INIT. */
-    std::atomic<bool> SkipDllUnloadOnExit;   /**< Worker exits with ExitThread instead of FreeLibraryAndExitThread. */
-    std::atomic<bool> DrainIncomplete;       /**< Worker timed out draining in-flight callbacks; unhook is not complete until they return. */
-    HANDLE EngineThread;                     /**< Hook worker thread. */
-    HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
-    PVOID CustomContext;                     /**< User-allocated context. */
-    BOOL CrashHandlerInstalled;              /**< TRUE if this instance enabled the crash handler. */
-    std::atomic<bool> ShutdownCleanupDone;   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
-    std::atomic<bool> FreeLibraryHookActive; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
+    HMODULE HostInstance = nullptr;          /**< Host DLL module handle. */
+    HMODULE DllModule = nullptr;
+    HYDRAHOOK_D3D_VERSION GameVersion = HydraHookDirect3DVersionUnknown; /**< Detected render API version. */
+    HYDRAHOOK_ENGINE_CONFIG EngineConfig{}; /**< Configuration at creation. */
+    HYDRAHOOK_D3D9_EVENT_CALLBACKS EventsD3D9{};   /**< D3D9 callbacks. */
+    HYDRAHOOK_D3D10_EVENT_CALLBACKS EventsD3D10{}; /**< D3D10 callbacks. */
+    HYDRAHOOK_D3D11_EVENT_CALLBACKS EventsD3D11{}; /**< D3D11 callbacks. */
+    HYDRAHOOK_D3D12_EVENT_CALLBACKS EventsD3D12{}; /**< D3D12 callbacks. */
+    HYDRAHOOK_ARC_EVENT_CALLBACKS EventsARC{};    /**< Core Audio callbacks. */
+    HYDRAHOOK_D3D9_EVENT_CALLBACKS SavedEventsD3D9{};   /**< Registered tables restored by rehook. */
+    HYDRAHOOK_D3D10_EVENT_CALLBACKS SavedEventsD3D10{};
+    HYDRAHOOK_D3D11_EVENT_CALLBACKS SavedEventsD3D11{};
+    HYDRAHOOK_D3D12_EVENT_CALLBACKS SavedEventsD3D12{};
+    HYDRAHOOK_ARC_EVENT_CALLBACKS SavedEventsARC{};
+    SRWLOCK LifecycleLock = SRWLOCK_INIT;    /**< Serializes unhook and rehook. */
+    std::atomic<bool> SkipDllUnloadOnExit{false};   /**< Worker exits with ExitThread instead of FreeLibraryAndExitThread. */
+    std::atomic<bool> DrainIncomplete{false};       /**< Worker timed out draining in-flight callbacks; unhook is not complete until they return. */
+    HANDLE EngineThread = nullptr;           /**< Hook worker thread. */
+    HANDLE EngineCancellationEvent = nullptr; /**< Shutdown signal. */
+    PVOID CustomContext = nullptr;           /**< User-allocated context. */
+    BOOL CrashHandlerInstalled = FALSE;      /**< TRUE if this instance enabled the crash handler. */
+    std::atomic<bool> ShutdownCleanupDone{false};   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
+    std::atomic<bool> FreeLibraryHookActive{false}; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
 
     union
     {
         IDXGISwapChain* pSwapChain;      /**< D3D10/11/12 swap chain. */
         LPDIRECT3DDEVICE9 pD3D9Device;   /**< D3D9 device. */
         LPDIRECT3DDEVICE9EX pD3D9ExDevice; /**< D3D9Ex device. */
-    } RenderPipeline;
+    } RenderPipeline{};
 
     struct
     {
-        IAudioRenderClient *pARC;        /**< Core Audio render client. */
-    } CoreAudio;
+        IAudioRenderClient *pARC = nullptr; /**< Core Audio render client. */
+    } CoreAudio{};
 
 } HYDRAHOOK_ENGINE;
 
@@ -194,9 +194,11 @@ struct HookActivityTracker
 
 /** @brief Invokes EvtHydraHookGameHooked if non-NULL. */
 #define INVOKE_HYDRAHOOK_GAME_HOOKED(_engine_, _version_)    \
-                                    ((_engine_)->EngineConfig.EvtHydraHookGameHooked ? \
-                                    (_engine_)->EngineConfig.EvtHydraHookGameHooked(_engine_, _version_) : \
-                                    (void)0)
+    do {                                                     \
+        (_engine_)->GameVersion = (_version_);              \
+        if ((_engine_)->EngineConfig.EvtHydraHookGameHooked) \
+            (_engine_)->EngineConfig.EvtHydraHookGameHooked((_engine_), (_version_)); \
+    } while (0)
 
 /** @brief Invokes D3D9 callback if registered. */
 #define INVOKE_D3D9_CALLBACK(_engine_, _callback_, ...)              \

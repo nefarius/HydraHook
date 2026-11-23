@@ -35,8 +35,6 @@ SOFTWARE.
 #include <string>
 #include <Psapi.h>
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
 namespace HydraHook
 {
     namespace Core
@@ -46,39 +44,82 @@ namespace HydraHook
             /**
              * @brief Expands environment variables (e.g. %TEMP%) in a string.
              * @param str Input string possibly containing %VAR% placeholders.
-             * @return Expanded string.
+             * @return Expanded string. The result does not contain a trailing NUL inside size().
              */
             inline std::string expand_environment_variables(const std::string & str)
             {
-                std::string expandedStr;
-                const DWORD neededSize = ExpandEnvironmentStringsA(str.c_str(),
-                    nullptr, 0);
-                if (neededSize)
-                {
-                    expandedStr.resize(neededSize);
-                    if (0 == ExpandEnvironmentStringsA(str.c_str(),
-                        &expandedStr[0],
-                        neededSize))
-                    {
-                        // pathological case requires a copy
-                        expandedStr = str;
-                    }
-                }
-                // RVO here
-                return expandedStr;
+                const DWORD neededSize = ExpandEnvironmentStringsA(str.c_str(), nullptr, 0);
+                if (neededSize <= 1)
+                    return str;
+
+                std::string expanded(static_cast<size_t>(neededSize), '\0');
+                const DWORD written = ExpandEnvironmentStringsA(
+                    str.c_str(),
+                    expanded.data(),
+                    neededSize);
+                if (written == 0 || written > neededSize)
+                    return str;
+
+                // ExpandEnvironmentStringsA counts the terminating NUL.
+                expanded.resize(static_cast<size_t>(written - 1));
+                return expanded;
             }
 
             /**
              * @brief Returns the full path of the current process executable.
-             * @return Process image path (for example \\Device\\HarddiskVolume1\\...\\app.exe).
+             * @return Process image path (for example \\Device\\HarddiskVolume1\\...\\app.exe), or empty on failure.
              */
             inline std::string process_name()
             {
-                const auto nSize = MAX_PATH + 1;
-                char procName[nSize];
-                GetProcessImageFileNameA(GetCurrentProcess(), procName, nSize);
+                DWORD capacity = MAX_PATH;
+                std::string path(capacity, '\0');
+                for (;;)
+                {
+                    const DWORD len = GetProcessImageFileNameA(
+                        GetCurrentProcess(),
+                        path.data(),
+                        capacity);
+                    if (len == 0)
+                    {
+                        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || capacity > 32768)
+                            return std::string();
+                        capacity *= 2;
+                        path.assign(capacity, '\0');
+                        continue;
+                    }
+                    path.resize(len);
+                    return path;
+                }
+            }
 
-                return std::string(procName);
+            /**
+             * @brief Returns the directory containing the given module.
+             * @param hMod Module handle, or NULL for the process executable.
+             * @return Directory path with a trailing separator, or empty string on failure.
+             */
+            inline std::string get_module_directory(HMODULE hMod)
+            {
+                DWORD capacity = MAX_PATH;
+                std::string path(capacity, '\0');
+                for (;;)
+                {
+                    const DWORD len = GetModuleFileNameA(hMod, path.data(), capacity);
+                    if (len == 0)
+                        return std::string();
+                    if (len >= capacity)
+                    {
+                        if (capacity > 32768)
+                            return std::string();
+                        capacity *= 2;
+                        path.assign(capacity, '\0');
+                        continue;
+                    }
+                    path.resize(len);
+                    const auto pos = path.find_last_of("\\/");
+                    if (pos == std::string::npos)
+                        return std::string();
+                    return path.substr(0, pos + 1);
+                }
             }
 
             /**
@@ -87,35 +128,7 @@ namespace HydraHook
              */
             inline std::string get_process_directory()
             {
-                char path[MAX_PATH];
-                if (0 == GetModuleFileNameA(NULL, path, MAX_PATH)) {
-                    return std::string();
-                }
-                std::string s(path);
-                const auto pos = s.find_last_of("\\/");
-                if (pos == std::string::npos) {
-                    return std::string();
-                }
-                return s.substr(0, pos + 1);
-            }
-
-            /**
-             * @brief Returns the directory containing the given module (e.g. the DLL).
-             * @param hMod Module handle (HMODULE).
-             * @return Directory path, or empty string on failure.
-             */
-            inline std::string get_module_directory(HMODULE hMod)
-            {
-                char path[MAX_PATH];
-                if (0 == GetModuleFileNameA(hMod, path, MAX_PATH)) {
-                    return std::string();
-                }
-                std::string s(path);
-                const auto pos = s.find_last_of("\\/");
-                if (pos == std::string::npos) {
-                    return std::string();
-                }
-                return s.substr(0, pos + 1);
+                return get_module_directory(nullptr);
             }
         };
     };

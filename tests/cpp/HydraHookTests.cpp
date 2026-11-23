@@ -10,7 +10,6 @@
 #include "CrashHandler.h"
 #include "Engine.h"
 #include "Exceptions.hpp"
-#include "LdrLock.h"
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
 #include "FpsConfig.h"
@@ -21,6 +20,7 @@
 #include "WindowProcHook.h"
 
 #include <atomic>
+#include <new>
 #include <chrono>
 #include <clocale>
 #include <mutex>
@@ -57,14 +57,7 @@ namespace
 
     PHYDRAHOOK_ENGINE MakeBareEngine()
     {
-        auto* engine = static_cast<PHYDRAHOOK_ENGINE>(std::malloc(sizeof(HYDRAHOOK_ENGINE)));
-        if (!engine)
-            return nullptr;
-
-        std::memset(engine, 0, sizeof(HYDRAHOOK_ENGINE));
-        engine->ShutdownCleanupDone.store(false);
-        engine->FreeLibraryHookActive.store(false);
-        return engine;
+        return new (std::nothrow) HYDRAHOOK_ENGINE();
     }
 
     __declspec(noinline) int __stdcall StdTarget(int value)
@@ -90,6 +83,14 @@ namespace
     __declspec(noinline) int __stdcall StdDetour(int value)
     {
         return g_stdHook->call_orig(value) + 10;
+    }
+
+    using StdFn = int(__stdcall*)(int);
+    StdFn g_suppressOrig = nullptr;
+
+    __declspec(noinline) int __stdcall SuppressDetour(int value)
+    {
+        return g_suppressOrig(value) + 10;
     }
 
     __declspec(noinline) int __cdecl CdeclDetour(int value)
@@ -142,6 +143,9 @@ namespace
         HYDRAHOOK_ENGINE_CONFIG_INIT(&config);
         config.Logging.IsEnabled = FALSE;
 
+        Check(HydraHookEngineCreate(GetModuleHandleA(nullptr), nullptr, nullptr) ==
+              HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
+              "create rejects null config", __FILE__, __LINE__);
         Check(HydraHookEngineCreate(nullptr, &config, nullptr) == HYDRAHOOK_ERROR_GET_MODULE_HANDLE_FAILED,
               "create rejects null module", __FILE__, __LINE__);
         Check(HydraHookEngineCreate(reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1)), &config, nullptr) ==
@@ -155,6 +159,11 @@ namespace
 
         Check(HydraHookEngineAllocCustomContext(nullptr, nullptr, 8) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
               "alloc rejects null engine", __FILE__, __LINE__);
+        PHYDRAHOOK_ENGINE nullContextEngine = MakeBareEngine();
+        Check(nullContextEngine != nullptr
+              && HydraHookEngineAllocCustomContext(nullContextEngine, nullptr, 8) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
+              "alloc rejects null context", __FILE__, __LINE__);
+        delete nullContextEngine;
         Check(HydraHookEngineFreeCustomContext(nullptr) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
               "free rejects null engine", __FILE__, __LINE__);
         Check(HydraHookEngineGetCustomContext(nullptr) == nullptr, "get rejects null engine", __FILE__, __LINE__);
@@ -209,13 +218,77 @@ namespace
         Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device", __FILE__, __LINE__);
         Check(HydraHookEngineGetD3D12CommandQueue(nullptr) == nullptr, "null d3d12 queue", __FILE__, __LINE__);
+        using SetD3D12Callbacks = void (*)(PHYDRAHOOK_ENGINE, PHYDRAHOOK_D3D12_EVENT_CALLBACKS);
+        using GetD3D12Queue = ID3D12CommandQueue* (*)(IDXGISwapChain*);
+        const SetD3D12Callbacks setCallbacks = &HydraHookEngineSetD3D12EventCallbacks;
+        const GetD3D12Queue getQueue = &HydraHookEngineGetD3D12CommandQueue;
+        Check(setCallbacks != nullptr && getQueue != nullptr, "D3D12 exports have C linkage", __FILE__, __LINE__);
 
         HydraHookEngineLogDebug("unit-test %d", 1);
         HydraHookEngineLogInfo("unit-test %d", 2);
         HydraHookEngineLogWarning("unit-test %d", 3);
         HydraHookEngineLogError("unit-test %d", 4);
 
-        std::free(engine);
+        delete engine;
+
+        const std::string logPath = HydraHook::Core::Util::get_process_directory() + "HydraHook.log";
+        WIN32_FILE_ATTRIBUTE_DATA before{};
+        const BOOL existed = GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &before);
+
+        HYDRAHOOK_ENGINE_CONFIG quiet;
+        HYDRAHOOK_ENGINE_CONFIG_INIT(&quiet);
+        quiet.Logging.IsEnabled = FALSE;
+        quiet.Logging.FilePath = nullptr;
+        PHYDRAHOOK_ENGINE created = nullptr;
+        const HYDRAHOOK_ERROR createdError = HydraHookEngineCreate(GetModuleHandleA(nullptr), &quiet, &created);
+        Check(createdError == HYDRAHOOK_ERROR_NONE, "create with logging disabled", __FILE__, __LINE__);
+        if (createdError == HYDRAHOOK_ERROR_NONE)
+        {
+            std::string longMessage(300, 'A');
+            HydraHookEngineLogInfo("%s", longMessage.c_str());
+            Check(HydraHookEngineUnhook(created) == HYDRAHOOK_ERROR_NONE, "unhook disabled logger", __FILE__, __LINE__);
+            Check(HydraHookEngineDestroy(GetModuleHandleA(nullptr)) == HYDRAHOOK_ERROR_NONE,
+                  "destroy disabled logger", __FILE__, __LINE__);
+            HookActivityTracker::reset();
+        }
+
+        PHYDRAHOOK_ENGINE live = nullptr;
+        HYDRAHOOK_ENGINE_CONFIG liveConfig;
+        HYDRAHOOK_ENGINE_CONFIG_INIT(&liveConfig);
+        liveConfig.Logging.IsEnabled = FALSE;
+        const HMODULE self = GetModuleHandleA(nullptr);
+        Check(HydraHookEngineCreate(self, &liveConfig, &live) == HYDRAHOOK_ERROR_NONE,
+              "create before the worker exits", __FILE__, __LINE__);
+        if (live != nullptr)
+        {
+            const HYDRAHOOK_ERROR firstDestroy = HydraHookEngineDestroy(self);
+            if (firstDestroy == HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE)
+            {
+                Check(HydraHookEngineUnhook(live) == HYDRAHOOK_ERROR_NONE,
+                      "unhook engine retained by destroy", __FILE__, __LINE__);
+                Check(HydraHookEngineDestroy(self) == HYDRAHOOK_ERROR_NONE,
+                      "destroy after the retained worker exits", __FILE__, __LINE__);
+            }
+            else
+            {
+                Check(firstDestroy == HYDRAHOOK_ERROR_NONE,
+                      "destroy of a worker that had already exited", __FILE__, __LINE__);
+            }
+            HookActivityTracker::reset();
+        }
+
+        WIN32_FILE_ATTRIBUTE_DATA after{};
+        const BOOL existsAfter = GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &after);
+        if (!existed)
+        {
+            Check(!existsAfter, "disabled logging creates no log file", __FILE__, __LINE__);
+        }
+        else
+        {
+            Check(existsAfter
+                  && CompareFileTime(&before.ftLastWriteTime, &after.ftLastWriteTime) == 0,
+                  "disabled logging does not rewrite the log file", __FILE__, __LINE__);
+        }
     }
 
     void TestHooks()
@@ -227,6 +300,17 @@ namespace
             Check(!hook.is_applied(), "stdcall hook starts unapplied", __FILE__, __LINE__);
             hook.apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
             Check(hook.is_applied(), "stdcall hook applied", __FILE__, __LINE__);
+            bool doubleApplyThrew = false;
+            try
+            {
+                hook.apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+            }
+            catch (const HydraHook::Core::Exceptions::DetourException&)
+            {
+                doubleApplyThrew = true;
+            }
+            Check(doubleApplyThrew, "second apply is rejected", __FILE__, __LINE__);
+            Check(hook.is_applied(), "rejected apply leaves the hook applied", __FILE__, __LINE__);
             Check(StdTarget(4) == stdOriginal + 10, "stdcall detour invoked", __FILE__, __LINE__);
             Check(hook.call_orig(4) == stdOriginal, "stdcall call_orig", __FILE__, __LINE__);
             Check(hook.remove_nothrow(), "stdcall remove_nothrow", __FILE__, __LINE__);
@@ -246,6 +330,8 @@ namespace
             Check(hook.call_orig(4) == cdeclOriginal, "cdecl call_orig", __FILE__, __LINE__);
             hook.remove();
             Check(!hook.is_applied(), "cdecl hook removed", __FILE__, __LINE__);
+            hook.remove();
+            Check(!hook.is_applied(), "remove on an unapplied hook is a no-op", __FILE__, __LINE__);
             g_cdeclHook = nullptr;
         }
 
@@ -257,6 +343,37 @@ namespace
             g_stdHook = nullptr;
         }
         Check(StdTarget(4) == stdOriginal, "RAII teardown restored stdcall target", __FILE__, __LINE__);
+
+        {
+            using StdHook = Hook<CallConvention::stdcall_t, int, int>;
+            alignas(StdHook) unsigned char storage[sizeof(StdHook)];
+            auto* hook = new (storage) StdHook();
+            hook->apply(reinterpret_cast<size_t>(&StdTarget), &SuppressDetour);
+            g_suppressOrig = hook->original();
+            g_hookDestructorDetachSuppressed = true;
+            hook->~StdHook();
+            const int suppressed = StdTarget(4);
+            g_hookDestructorDetachSuppressed = false;
+            Check(suppressed == stdOriginal + 10, "suppressed destructor leaves the detour", __FILE__, __LINE__);
+            void* trampoline = reinterpret_cast<void*>(g_suppressOrig);
+            const LONG begun = DetourTransactionBegin();
+            Check(begun == NO_ERROR, "begin detach of suppressed hook", __FILE__, __LINE__);
+            if (begun == NO_ERROR)
+            {
+                const LONG updated = DetourUpdateThread(GetCurrentThread());
+                const LONG detached = updated == NO_ERROR
+                    ? DetourDetach(&trampoline, reinterpret_cast<void*>(&SuppressDetour))
+                    : updated;
+                const LONG committed = detached == NO_ERROR ? DetourTransactionCommit() : DetourTransactionAbort();
+                Check(updated == NO_ERROR, "update thread for suppressed hook", __FILE__, __LINE__);
+                Check(detached == NO_ERROR, "detach suppressed hook from saved trampoline", __FILE__, __LINE__);
+                Check(committed == NO_ERROR, "commit detach of suppressed hook", __FILE__, __LINE__);
+            }
+            Check(StdTarget(4) == stdOriginal, "saved trampoline clears a suppressed detour", __FILE__, __LINE__);
+            new (storage) StdHook();
+            hook->~StdHook();
+            g_suppressOrig = nullptr;
+        }
     }
 
     void TestActivityTracker()
@@ -312,6 +429,8 @@ namespace
         const std::string expanded = HydraHook::Core::Util::expand_environment_variables("%SystemRoot%");
         Check(expanded.find("Windows") != std::string::npos || expanded.find("WINDOWS") != std::string::npos,
               "SystemRoot expanded", __FILE__, __LINE__);
+        Check(!expanded.empty() && expanded.back() != '\0', "expanded string has no trailing NUL", __FILE__, __LINE__);
+        Check(expanded.find('\0') == std::string::npos, "expanded string size excludes the NUL", __FILE__, __LINE__);
 
         const std::string processDir = HydraHook::Core::Util::get_process_directory();
         Check(!processDir.empty(), "process directory", __FILE__, __LINE__);
@@ -323,8 +442,6 @@ namespace
 
         const std::string image = HydraHook::Core::Util::process_name();
         Check(!image.empty(), "process name", __FILE__, __LINE__);
-
-        Check(!HydraHook::Core::Util::IsLoaderLockHeld(), "loader lock not held", __FILE__, __LINE__);
     }
 
     void TestExceptions()
@@ -350,8 +467,11 @@ namespace
 
         HydraHookCrashHandlerInstall(engine);
         HydraHookCrashHandlerInstall(engine);
+        Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "first install owns the snapshot", __FILE__, __LINE__);
         HydraHookCrashHandlerUninstall(engine);
+        Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "second registration is promoted", __FILE__, __LINE__);
         HydraHookCrashHandlerUninstall(engine);
+        Check(HydraHookCrashHandlerActiveOwnerForTest() == nullptr, "last uninstall clears the snapshot", __FILE__, __LINE__);
         HydraHookCrashHandlerUninstall(engine);
 
         HydraHookCrashHandlerInstall(engine);
@@ -369,7 +489,23 @@ namespace
         }
         Check(caught, "SEH translator raises SehException", __FILE__, __LINE__);
 
-        std::free(engine);
+        PHYDRAHOOK_ENGINE other = MakeBareEngine();
+        Check(other != nullptr, "second crash-handler engine", __FILE__, __LINE__);
+        if (other)
+        {
+            HydraHookCrashHandlerInstall(engine);
+            HydraHookCrashHandlerUninstall(other);
+            Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "unregistered uninstall keeps the owner", __FILE__, __LINE__);
+            HydraHookCrashHandlerInstall(other);
+            Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "first engine stays active", __FILE__, __LINE__);
+            HydraHookCrashHandlerUninstall(engine);
+            Check(HydraHookCrashHandlerActiveOwnerForTest() == other, "surviving engine is promoted", __FILE__, __LINE__);
+            HydraHookCrashHandlerUninstall(other);
+            Check(HydraHookCrashHandlerActiveOwnerForTest() == nullptr, "final uninstall clears the snapshot", __FILE__, __LINE__);
+            delete other;
+        }
+
+        delete engine;
     }
 
     void TestFrameRate()
@@ -1377,7 +1513,7 @@ namespace
         Check(engine->SavedEventsD3D11.EvtHydraHookD3D11PrePresent == d3d11.EvtHydraHookD3D11PrePresent,
               "registered callbacks are saved for rehook", __FILE__, __LINE__);
 
-        std::free(engine);
+        delete engine;
     }
 }
 

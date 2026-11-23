@@ -26,66 +26,44 @@ SOFTWARE.
 #include <Windows.h>
 
 #include "Overlay.h"
-#include <unordered_map>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
+#include "../HydraHook-ImGui/KeyToggle.h"
+#include "../HydraHook-ImGui/WindowProcHook.h"
 
 #ifndef IMGUI_IMPL_API
 #define IMGUI_IMPL_API
 #endif
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-typedef LRESULT(CALLBACK* WndProc_t)(HWND, UINT, WPARAM, LPARAM);
-static WndProc_t g_originalWndProc = nullptr;
-static HWND g_hookedWindow = nullptr;
-
-static LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static LRESULT OverlayMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-		return 0;
-	return g_originalWndProc ? CallWindowProcW(g_originalWndProc, hWnd, msg, wParam, lParam) : DefWindowProcW(hWnd, msg, wParam, lParam);
+	return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
 }
 
 void Overlay_HookWindowProc(HWND hWnd)
 {
-	if (!hWnd || g_originalWndProc)
-		return;
-	WNDPROC current = (WNDPROC)GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
-	if (current == OverlayWndProc)
-		return;
-	g_originalWndProc = (WndProc_t)current;
-	g_hookedWindow = hWnd;
-	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)OverlayWndProc);
+	auto& hook = WindowProcHook::Instance();
+	hook.SetMessageHandler(OverlayMessageHandler);
+	hook.Hook(hWnd);
 }
 
-void Overlay_UnhookWindowProc(void)
+bool Overlay_UnhookWindowProc(void)
 {
-	if (g_hookedWindow && g_originalWndProc)
-	{
-		SetWindowLongPtrW(g_hookedWindow, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
-		g_originalWndProc = nullptr;
-		g_hookedWindow = nullptr;
-	}
+	return WindowProcHook::Instance().UnhookAll();
 }
 
 void Overlay_ToggleState(int key, bool& toggle)
 {
-	static std::unordered_map<int, bool> pressedPast;
-	static std::unordered_map<int, bool> pressedNow;
-	bool& past = pressedPast[key];
-	bool& now = pressedNow[key];
-	if (GetAsyncKeyState(key) & 0x8000)
-		now = true;
-	else
+	static KeyToggle keyToggle;
+	static int trackedKey = 0;
+	if (trackedKey != key)
 	{
-		past = false;
-		now = false;
+		keyToggle.Reset();
+		trackedKey = key;
 	}
-	if (!past && now)
-	{
+	if (keyToggle.Poll(key))
 		toggle = !toggle;
-		past = true;
-	}
 }
 
 void Overlay_Render(float displayWidth, float displayHeight, const PerceptionResults& res)

@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <d3d11.h>
+#include <dxgi1_2.h>
 
 #include <HydraHook/Engine/HydraHookCore.h>
 
@@ -159,6 +160,26 @@ int main()
 
     Check(state->hooked == 1, "game hooked callback");
     Check(state->version == HydraHookDirect3DVersion11, "hooked version is D3D11");
+    using GameVersionFn = HYDRAHOOK_D3D_VERSION (*)();
+    auto* gameVersion = reinterpret_cast<GameVersionFn>(GetProcAddress(host, "HydraHookTest_GameVersion"));
+    Check(gameVersion != nullptr && gameVersion() == HydraHookDirect3DVersion11, "engine GameVersion is D3D11");
+    if (swapChain != nullptr)
+    {
+        IDXGISwapChain1* swapChain1 = nullptr;
+        if (SUCCEEDED(swapChain->QueryInterface(IID_PPV_ARGS(&swapChain1))) && swapChain1 != nullptr)
+        {
+            DXGI_PRESENT_PARAMETERS presentParameters{};
+            const LONG hookedBeforePresent1 = state->hooked;
+            const LONG presentPreBeforePresent1 = state->presentPre;
+            const LONG presentPostBeforePresent1 = state->presentPost;
+            const HRESULT present1 = swapChain1->Present1(0, 0, &presentParameters);
+            Check(SUCCEEDED(present1), "Present1");
+            Check(state->hooked == hookedBeforePresent1, "Present1 does not announce a second hook");
+            Check(state->presentPre > presentPreBeforePresent1, "Present1 increments pre-Present");
+            Check(state->presentPost > presentPostBeforePresent1, "Present1 increments post-Present");
+            swapChain1->Release();
+        }
+    }
     Check(state->presentPre > 0, "pre-Present fired");
     Check(state->presentPost > 0, "post-Present fired");
 

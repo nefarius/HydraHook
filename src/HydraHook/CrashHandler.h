@@ -21,15 +21,17 @@
  * Subsequent calls increment the reference count without re-installing.
  *
  * @param engine Engine whose CrashHandler config controls dump output.
+ * @return false when @p engine is null or the snapshot could not be registered.
  */
-void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine);
+bool HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine);
 
 /**
  * @brief Decrements the crash handler reference count.
  *
- * If the uninstalling engine owns the active crash config snapshot, the
- * snapshot is cleared immediately so the crash path never sees a stale
- * pointer. When the last engine uninstalls, restores all previous handlers.
+ * If the uninstalling engine owns the active crash config snapshot, the next
+ * surviving registration is published. The previous snapshot is deleted only
+ * after in-flight dump writers have finished. When the last engine uninstalls,
+ * restores all previous handlers.
  *
  * @param engine The engine that is being destroyed.
  */
@@ -43,3 +45,12 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine);
  * existing try/catch blocks can catch hardware faults.
  */
 void HydraHookCrashHandlerInstallThreadSEH();
+
+/** @brief Test accessor. Returns the engine that owns the published crash snapshot. */
+PHYDRAHOOK_ENGINE HydraHookCrashHandlerActiveOwnerForTest();
+
+/**
+ * @brief True when a published or deferred snapshot still names this engine.
+ * Destroy must not free the engine while this is true.
+ */
+bool HydraHookCrashHandlerReferencesEngine(PHYDRAHOOK_ENGINE engine);
