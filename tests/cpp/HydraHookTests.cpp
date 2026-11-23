@@ -398,6 +398,38 @@ namespace
         Check(!key.Update(true), "held key does not repeat", __FILE__, __LINE__);
         Check(!key.Update(false), "release does not toggle", __FILE__, __LINE__);
         Check(key.Update(true), "next press toggles again", __FILE__, __LINE__);
+        key.Reset();
+        Check(key.Update(true), "press after reset toggles again", __FILE__, __LINE__);
+
+        // Two chords on one primary key. Each detector sees the same snapshot.
+        KeyToggle plain;
+        KeyToggle shifted;
+        Check(plain.Update(true, 0, 0), "F12 press toggles the plain binding", __FILE__, __LINE__);
+        Check(!shifted.Update(true, 0, kKeyModShift), "F12 press does not toggle Shift+F12", __FILE__, __LINE__);
+        Check(!plain.Update(true, 0, 0), "held F12 does not repeat", __FILE__, __LINE__);
+        Check(!shifted.Update(true, 0, kKeyModShift), "held F12 still does not match Shift+F12", __FILE__, __LINE__);
+        Check(!plain.Update(false, 0, 0), "F12 release does not toggle", __FILE__, __LINE__);
+        Check(!shifted.Update(false, 0, kKeyModShift), "F12 release does not toggle the chord", __FILE__, __LINE__);
+
+        Check(!plain.Update(true, kKeyModShift, 0), "Shift+F12 does not toggle the plain binding", __FILE__, __LINE__);
+        Check(shifted.Update(true, kKeyModShift, kKeyModShift), "Shift+F12 toggles the chord", __FILE__, __LINE__);
+        Check(!plain.Update(true, 0, 0), "releasing Shift while F12 is held does not toggle F12", __FILE__, __LINE__);
+        Check(!shifted.Update(true, 0, kKeyModShift), "releasing Shift while F12 is held does not toggle Shift+F12", __FILE__, __LINE__);
+        Check(!plain.Update(false, 0, 0), "F12 release after Shift does not toggle", __FILE__, __LINE__);
+        Check(!shifted.Update(false, 0, kKeyModShift), "F12 release after Shift does not toggle the chord", __FILE__, __LINE__);
+
+        plain.Reset();
+        shifted.Reset();
+        Check(plain.Update(true, 0, 0), "F12 press after reset toggles the plain binding", __FILE__, __LINE__);
+        Check(!shifted.Update(true, 0, kKeyModShift), "F12 press after reset does not arm Shift+F12", __FILE__, __LINE__);
+        Check(!plain.Update(true, kKeyModShift, 0), "adding Shift does not toggle F12 again", __FILE__, __LINE__);
+        Check(!shifted.Update(true, kKeyModShift, kKeyModShift), "adding Shift after F12 is down does not toggle Shift+F12", __FILE__, __LINE__);
+
+        KeyToggle exact;
+        Check(!exact.Update(true, kKeyModCtrl, 0), "Ctrl+F12 does not match F12", __FILE__, __LINE__);
+        Check(!exact.Update(true, 0, 0), "releasing Ctrl while F12 is held does not toggle F12", __FILE__, __LINE__);
+        exact.Reset();
+        Check(exact.Update(true, 0, 0), "F12 toggles after the extra modifier is forgotten", __FILE__, __LINE__);
     }
 
     void TestFpsConfig()
@@ -406,11 +438,17 @@ namespace
         FpsConfig defaults;
         Check(defaults.corner == FpsCorner::TopLeft && defaults.scalePercent == 100 && defaults.showCounter,
               "defaults", __FILE__, __LINE__);
+        Check(defaults.counterKey == kDefaultCounterKey && defaults.counterKey.vk == VK_F12 && defaults.counterKey.modifiers == 0,
+              "counter key defaults to F12", __FILE__, __LINE__);
+        Check(defaults.menuKey == kDefaultMenuKey && defaults.menuKey.vk == VK_F12 && defaults.menuKey.modifiers == kKeyModShift,
+              "menu key defaults to Shift+F12", __FILE__, __LINE__);
 
         FpsConfig written;
         written.corner = FpsCorner::BottomRight;
         written.scalePercent = 175;
         written.showCounter = false;
+        written.counterKey = { kKeyModCtrl, static_cast<uint8_t>('P') };
+        written.menuKey = { static_cast<uint8_t>(kKeyModAlt | kKeyModShift), VK_F1 };
         char text[512];
         const size_t length = FormatFpsConfig(written, text, sizeof(text));
         Check(length > 0, "format fits the buffer", __FILE__, __LINE__);
@@ -430,18 +468,92 @@ namespace
               "format ignores the C locale", __FILE__, __LINE__);
 
         // Tolerant parsing: comments, sections, whitespace, case, CRLF, unknown keys.
-        const char messy[] = "; c\n[Section]\n  corner =  topright \r\n# x\nUnknown=1\nSCALEPERCENT=9999\nShowCounter=0";
+        const char messy[] = "; c\n[Section]\n  corner =  topright \r\n# x\nUnknown=1\nSCALEPERCENT=9999\nShowCounter=0\ncounterkey = shift + f12\nMenuKey=None";
         FpsConfig messyConfig;
         ParseFpsConfig(messy, sizeof(messy) - 1, messyConfig);
         Check(messyConfig.corner == FpsCorner::TopRight, "corner parsed case-insensitively", __FILE__, __LINE__);
         Check(messyConfig.scalePercent == kFpsMaxScalePercent, "scale clamped high", __FILE__, __LINE__);
-        Check(!messyConfig.showCounter, "last line without newline parsed", __FILE__, __LINE__);
+        Check(!messyConfig.showCounter, "ShowCounter parsed before the hotkey lines", __FILE__, __LINE__);
+        Check(messyConfig.counterKey == kDefaultMenuKey, "counter chord parsed with spaces", __FILE__, __LINE__);
+        Check(messyConfig.menuKey.vk == 0 && messyConfig.menuKey.modifiers == 0, "None disables a shortcut", __FILE__, __LINE__);
 
-        const char bad[] = "Corner=Middle\nScalePercent=abc\nShowCounter=\nScalePercent=1\n";
+        const char bad[] = "Corner=Middle\nScalePercent=abc\nShowCounter=\nScalePercent=1\nCounterKey=Shift+None\nMenuKey=0x10\nCounterKey=Ctrl+\n";
         FpsConfig badConfig;
         ParseFpsConfig(bad, sizeof(bad) - 1, badConfig);
         Check(badConfig.corner == FpsCorner::TopLeft && badConfig.showCounter, "bad values keep defaults", __FILE__, __LINE__);
         Check(badConfig.scalePercent == kFpsMinScalePercent, "scale clamped low", __FILE__, __LINE__);
+        Check(badConfig.counterKey == kDefaultCounterKey && badConfig.menuKey == kDefaultMenuKey,
+              "invalid hotkeys keep defaults", __FILE__, __LINE__);
+
+        struct HotkeySample
+        {
+            const char* text;
+            uint8_t modifiers;
+            uint8_t vk;
+            const char* canonical;
+        };
+        const HotkeySample samples[] = {
+            { "F12", 0, VK_F12, "F12" },
+            { "shift+f12", kKeyModShift, VK_F12, "Shift+F12" },
+            { "  Ctrl + Alt + Shift + F24 ", static_cast<uint8_t>(kKeyModCtrl | kKeyModAlt | kKeyModShift), VK_F24, "Ctrl+Alt+Shift+F24" },
+            { "control+a", kKeyModCtrl, 'A', "Ctrl+A" },
+            { "Numpad5", 0, VK_NUMPAD5, "Num5" },
+            { "Num0", 0, VK_NUMPAD0, "Num0" },
+            { "0xba", 0, 0xBA, "0xBA" },
+            { "0x0D", 0, VK_RETURN, "Enter" },
+            { "None", 0, 0, "None" },
+            { "Space", 0, VK_SPACE, "Space" },
+            { "Delete", 0, VK_DELETE, "Delete" },
+            { "Left", 0, VK_LEFT, "Left" },
+            { "Shift+Ctrl+F1", static_cast<uint8_t>(kKeyModCtrl | kKeyModShift), VK_F1, "Ctrl+Shift+F1" },
+        };
+        for (const HotkeySample& sample : samples)
+        {
+            FpsHotkey hotkey;
+            Check(ParseFpsHotkey(sample.text, sample.text + std::strlen(sample.text), hotkey), sample.text, __FILE__, __LINE__);
+            Check(hotkey.modifiers == sample.modifiers && hotkey.vk == sample.vk, "parsed hotkey fields", __FILE__, __LINE__);
+            char canonical[40];
+            const size_t canonicalLength = FormatFpsHotkey(hotkey, canonical, sizeof(canonical));
+            Check(canonicalLength == std::strlen(sample.canonical) && std::strcmp(canonical, sample.canonical) == 0,
+                  "hotkey formats canonically", __FILE__, __LINE__);
+        }
+
+        const char* rejected[] = {
+            "", "Shift+None", "F25", "F0", "0x00", "0x10", "0xA0", "0xFF", "0x100", "Middle", "Ctrl+", "+F12",
+            "Shift+Shift+F12", "F12+Shift", "None+F12", "Ctrl+Control+A", "  "
+        };
+        for (const char* rejectedText : rejected)
+        {
+            FpsHotkey rejectedKey = kDefaultCounterKey;
+            Check(!ParseFpsHotkey(rejectedText, rejectedText + std::strlen(rejectedText), rejectedKey), rejectedText, __FILE__, __LINE__);
+            Check(rejectedKey == kDefaultCounterKey, "rejected hotkey leaves the output unchanged", __FILE__, __LINE__);
+        }
+
+        char tinyKey[4];
+        Check(FormatFpsHotkey(kDefaultMenuKey, tinyKey, sizeof(tinyKey)) == 0, "hotkey format reports a short buffer", __FILE__, __LINE__);
+        const std::string hotkeyLocale = std::setlocale(LC_ALL, nullptr);
+        std::setlocale(LC_ALL, "de-DE");
+        char localizedKey[40];
+        const size_t localizedKeyLength = FormatFpsHotkey(written.menuKey, localizedKey, sizeof(localizedKey));
+        std::setlocale(LC_ALL, hotkeyLocale.c_str());
+        char stableKey[40];
+        const size_t stableKeyLength = FormatFpsHotkey(written.menuKey, stableKey, sizeof(stableKey));
+        Check(localizedKeyLength == stableKeyLength && localizedKeyLength > 0
+              && std::memcmp(localizedKey, stableKey, localizedKeyLength) == 0,
+              "hotkey format ignores the C locale", __FILE__, __LINE__);
+
+        const char onlyCounter[] = "CounterKey=Ctrl+P\n";
+        FpsConfig onlyCounterConfig;
+        ParseFpsConfig(onlyCounter, sizeof(onlyCounter) - 1, onlyCounterConfig);
+        Check(onlyCounterConfig.counterKey.modifiers == kKeyModCtrl && onlyCounterConfig.counterKey.vk == 'P',
+              "INI can override only the counter key", __FILE__, __LINE__);
+        Check(onlyCounterConfig.menuKey == kDefaultMenuKey, "omitted menu key stays Shift+F12", __FILE__, __LINE__);
+        onlyCounterConfig.scalePercent = 80;
+        char savedKeys[512];
+        const size_t savedKeysLength = FormatFpsConfig(onlyCounterConfig, savedKeys, sizeof(savedKeys));
+        FpsConfig savedKeysConfig;
+        ParseFpsConfig(savedKeys, savedKeysLength, savedKeysConfig);
+        Check(savedKeysLength > 0 && savedKeysConfig == onlyCounterConfig, "save keeps the INI hotkey override", __FILE__, __LINE__);
 
         // Corner placement.
         const FpsCornerPlacement tl = ComputeFpsCornerPlacement(FpsCorner::TopLeft, 1920, 1080, 10);
