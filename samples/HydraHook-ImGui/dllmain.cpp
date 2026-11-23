@@ -110,6 +110,9 @@ static UINT OverlayReleaseMessage()
 
 static void RequestOverlayRelease()
 {
+	// Same lock as ReleaseOverlayInput. An older cleanup must not clear the hold
+	// after this hide has published it.
+	ImGuiScope scope;
 	g_ReleaseAttempts.store(0);
 	g_HoldInput.store(true);
 	g_ReleaseGeneration.fetch_add(1);
