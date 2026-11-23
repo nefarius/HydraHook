@@ -51,7 +51,8 @@ There is no HydraHook section on docs.nefarius.at. Do not invent one.
 
 - Default branch is `master`. Solution is `HydraHook.slnx`. Toolset is v145 (Visual Studio 2026) and the language standard is C++23. Configurations: `Debug`, `Debug_LIB`, `Release`, `Release_LIB` for `Win32` and `x64`.
 - `Debug` / `Release` produce `HydraHook.dll`. `Debug_LIB` / `Release_LIB` produce the static library and build the samples and `tests/cpp` projects against it.
-- vcpkg is a submodule. The manifest baseline is pinned in `vcpkg-configuration.json`. Triplets are `x86-windows-static` and `x64-windows-static`. `Directory.Build.targets` consumes `vcpkg_installed/<triplet>/<triplet>/`, the directory this vcpkg tool fills when the MSBuild install root is `vcpkg_installed/<triplet>/`.
+- vcpkg is a submodule. The manifest baseline is pinned in `vcpkg-configuration.json`. Triplets are `x86-windows-static` and `x64-windows-static` from the `triplets/` overlay: OpenCV is limited to the modules the sample links, with baseline SIMD only. CI passes `.github/vcpkg-triplets/`, which adds `VCPKG_BUILD_TYPE release`. `Directory.Build.targets` consumes `vcpkg_installed/<triplet>/<triplet>/`, the directory this vcpkg tool fills when the MSBuild install root is `vcpkg_installed/<triplet>/`.
+- `.github/workflows/build.yml` builds core/tests, the ImGui/FPS/DirectXTK samples, and the OpenCV sample in separate jobs. The OpenCV job installs its vcpkg dependencies and saves that cache.
 - Install dependencies with `prepare-deps.bat` (both triplets), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`.
 - Build:
 

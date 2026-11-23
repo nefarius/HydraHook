@@ -246,41 +246,9 @@ jobs:
           path: staged/${{ matrix.artifact }}
           if-no-files-found: error
 
-  deps-opencv:
-    name: OpenCV Dependencies (${{ matrix.artifact }})
-    runs-on: windows-2025-vs2026
-    permissions:
-      contents: read
-    env:
-      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - artifact: x86
-            triplet: x86-windows-static
-          - artifact: x64
-            triplet: x64-windows-static
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          submodules: false
-          persist-credentials: false
-
-      - name: Build and cache OpenCV vcpkg dependencies
-        uses: ./.github/actions/setup-vcpkg
-        with:
-          triplet: ${{ matrix.triplet }}
-          cache-scope: opencv
-          features: imgui opencv
-          save-cache: 'true'
-
   sample-opencv:
     name: "Sample: OpenCV (${{ matrix.artifact }})"
     runs-on: windows-2025-vs2026
-    needs: deps-opencv
     permissions:
       contents: read
     env:
@@ -303,13 +271,13 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Restore OpenCV vcpkg dependencies
+      - name: Setup OpenCV vcpkg dependencies
         uses: ./.github/actions/setup-vcpkg
         with:
           triplet: ${{ matrix.triplet }}
           cache-scope: opencv
           features: imgui opencv
-          save-cache: 'false'
+          save-cache: 'true'
 
       - name: Stamp version into resource files
         uses: ./.github/actions/stamp-version
