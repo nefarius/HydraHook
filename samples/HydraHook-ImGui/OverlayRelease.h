@@ -23,3 +23,14 @@ inline bool ClaimOverlayRelease(std::atomic<std::uint32_t>& current, std::atomic
 		return false;
 	return applied.compare_exchange_strong(expected, generation);
 }
+
+// Caller holds the same lock as the hide that publishes a new generation.
+// An older post must not clear the pending bit after that publish.
+inline bool ClearPendingIfCurrent(const std::atomic<std::uint32_t>& current, std::atomic<bool>& pending,
+	std::uint32_t generation)
+{
+	if (current.load() != generation)
+		return false;
+	pending.store(false);
+	return true;
+}

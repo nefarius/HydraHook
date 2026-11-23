@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -772,6 +773,24 @@ namespace
 
         Check(ClaimOverlayRelease(current, applied, 0, true), "unhook force still runs", __FILE__, __LINE__);
         Check(!ClaimOverlayRelease(current, applied, 2, false), "force consumes the current generation", __FILE__, __LINE__);
+
+        std::mutex gate;
+        std::atomic<bool> pending{true};
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            current.store(3);
+            pending.store(true);
+        }
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            Check(!ClearPendingIfCurrent(current, pending, 2), "older post does not clear a newer hide", __FILE__, __LINE__);
+        }
+        Check(pending.load(), "newer hide stays pending", __FILE__, __LINE__);
+        {
+            std::lock_guard<std::mutex> lock(gate);
+            Check(ClearPendingIfCurrent(current, pending, 3), "matching post clears pending", __FILE__, __LINE__);
+        }
+        Check(!pending.load(), "matching generation consumed the request", __FILE__, __LINE__);
     }
 
     void TestShutdownGuard()

@@ -131,26 +131,30 @@ static void DeliverPendingRelease()
 	const HWND window = g_InputWindow.load();
 	if (window == nullptr || !::IsWindow(window))
 	{
-		if (g_ReleaseGeneration.load() == generation)
-			g_ReleasePending.store(false);
-		g_HoldInput.store(false);
-		g_ForwardedButtons.store(0);
-		g_OverlayOwnsCapture.store(false);
+		ImGuiScope scope;
+		if (ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation))
+		{
+			g_HoldInput.store(false);
+			g_ForwardedButtons.store(0);
+			g_OverlayOwnsCapture.store(false);
+		}
 		return;
 	}
 
 	const UINT message = OverlayReleaseMessage();
 	if (message == 0)
 	{
-		if (g_ReleaseGeneration.load() == generation)
-			g_ReleasePending.store(false);
+		ImGuiScope scope;
+		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
 		return;
 	}
 
 	if (::PostMessageW(window, message, generation, 0))
 	{
-		if (g_ReleaseGeneration.load() == generation)
-			g_ReleasePending.store(false);
+		// Same lock as RequestOverlayRelease. The generation check and the clear
+		// must not straddle a newer hide, or that hide is never posted and input stays held.
+		ImGuiScope scope;
+		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
 		return;
 	}
 
