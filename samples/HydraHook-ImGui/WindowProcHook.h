@@ -294,6 +294,27 @@ private:
 		std::atomic<uint32_t>& entered_;
 	};
 
+	// Decrements the dispatch counters on every exit, including when logging throws.
+	struct DispatchExit
+	{
+		WindowProcHook& self;
+		HWND hwnd;
+		bool inFlight = false;
+
+		~DispatchExit()
+		{
+			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
+			if (inFlight)
+			{
+				const auto it = self.windows_.find(hwnd);
+				if (it != self.windows_.end() && it->second.inFlight > 0)
+					--it->second.inFlight;
+			}
+			if (self.entered_.load() > 0)
+				--self.entered_;
+		}
+	};
+
 	static RestoreResult RestoreLocked(HWND hWnd, const Entry& entry, DWORD* winError)
 	{
 		if (winError != nullptr)
@@ -374,11 +395,12 @@ private:
 		if (const BeforeDispatch gate = self.beforeDispatch_.load(std::memory_order_acquire))
 			gate(msg);
 		DispatchScope scope(self.entered_);
+		DispatchExit exit{ self, hWnd };
 
 		WNDPROC original = nullptr;
 		MessageHandler handler = nullptr;
 		bool found = false;
-		std::string destroyError;
+		char destroyError[160] = {};
 		{
 			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
 			const auto it = self.windows_.find(hWnd);
@@ -387,6 +409,7 @@ private:
 				found = true;
 				original = it->second.original;
 				++it->second.inFlight;
+				exit.inFlight = true;
 				const bool destroy = msg == WM_DESTROY || msg == WM_NCDESTROY;
 				if (!destroy && self.dispatchEnabled_ && !it->second.passthrough && !it->second.retired)
 					handler = self.messageHandler_;
@@ -401,21 +424,20 @@ private:
 						it->second.passthrough = true;
 						if (!self.PinLocked())
 						{
-							destroyError = "WindowProcHook: dispatcher remains installed during destruction and pinning the module failed";
+							std::snprintf(destroyError, sizeof(destroyError),
+								"WindowProcHook: dispatcher remains installed during destruction and pinning the module failed");
 						}
 					}
 					if (result == RestoreResult::Failed)
 					{
-						char buf[128];
-						std::snprintf(buf, sizeof(buf),
+						std::snprintf(destroyError, sizeof(destroyError),
 							"WindowProcHook: SetWindowLongPtrW failed during window destruction (error %lu)", winError);
-						destroyError = buf;
 					}
 				}
 			}
 		}
-		if (!destroyError.empty())
-			self.LogError(destroyError.c_str());
+		if (destroyError[0] != '\0')
+			self.LogError(destroyError);
 
 		LRESULT result;
 		if (!found)
@@ -434,17 +456,6 @@ private:
 				: ::DefWindowProcW(hWnd, msg, wParam, lParam);
 		}
 
-		{
-			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
-			const auto it = self.windows_.find(hWnd);
-			if (it != self.windows_.end() && it->second.inFlight > 0)
-				--it->second.inFlight;
-			// Drop this dispatch's count under the lock. The constructor increment happened
-			// before the lock, so a dispatch still waiting is visible to UnhookAll.
-			// The map entry stays: a caller paused before that increment may still need it.
-			if (self.entered_.load() > 0)
-				--self.entered_;
-		}
 		return result;
 	}
 

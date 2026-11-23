@@ -56,6 +56,12 @@ static std::atomic<uint32_t> g_ForwardedButtons{ 0 };
 static std::atomic<bool> g_OverlayOwnsCapture{ false };
 static std::atomic<bool> g_ReleasePending{ false };
 static std::atomic<int> g_ReleaseAttempts{ 0 };
+// Hide generation. A queued release carries the value from the hide that posted it.
+static std::atomic<uint32_t> g_ReleaseGeneration{ 0 };
+// New input stays out until the release for the current generation has run.
+static std::atomic<bool> g_HoldInput{ false };
+// Set before the final unhook release so a button-down cannot land after cleanup.
+static std::atomic<bool> g_InputClosed{ false };
 
 // Serializes ImGui context use between the render thread and the window thread.
 // Re-entry on the thread that already holds it does not lock again: Present and a
@@ -105,19 +111,24 @@ static UINT OverlayReleaseMessage()
 static void RequestOverlayRelease()
 {
 	g_ReleaseAttempts.store(0);
+	g_HoldInput.store(true);
+	g_ReleaseGeneration.fetch_add(1);
 	g_ReleasePending.store(true);
 }
 
-// Posts the release to the window thread. Retries are bounded and stop if the window is gone.
+// Posts the release for the generation observed at entry. A newer hide keeps its own pending bit.
 static void DeliverPendingRelease()
 {
 	if (!g_ReleasePending.load())
 		return;
 
+	const uint32_t generation = g_ReleaseGeneration.load();
 	const HWND window = g_InputWindow.load();
 	if (window == nullptr || !::IsWindow(window))
 	{
-		g_ReleasePending.store(false);
+		if (g_ReleaseGeneration.load() == generation)
+			g_ReleasePending.store(false);
+		g_HoldInput.store(false);
 		g_ForwardedButtons.store(0);
 		g_OverlayOwnsCapture.store(false);
 		return;
@@ -126,20 +137,21 @@ static void DeliverPendingRelease()
 	const UINT message = OverlayReleaseMessage();
 	if (message == 0)
 	{
-		g_ReleasePending.store(false);
+		if (g_ReleaseGeneration.load() == generation)
+			g_ReleasePending.store(false);
 		return;
 	}
 
-	if (::PostMessageW(window, message, 0, 0))
+	if (::PostMessageW(window, message, generation, 0))
 	{
-		g_ReleasePending.store(false);
+		if (g_ReleaseGeneration.load() == generation)
+			g_ReleasePending.store(false);
 		return;
 	}
 
 	const int attempt = g_ReleaseAttempts.fetch_add(1) + 1;
-	HydraHookEngineLogError("Couldn't post overlay input release (error %lu)", ::GetLastError());
-	if (attempt >= 8)
-		g_ReleasePending.store(false);
+	if (attempt <= 8)
+		HydraHookEngineLogError("Couldn't post overlay input release (error %lu)", ::GetLastError());
 }
 
 static void PollOverlayToggle()
@@ -1162,26 +1174,39 @@ static int OverlayButton(UINT msg, WPARAM wParam, bool* down)
 	}
 }
 
-static void ReleaseOverlayInput(HWND hWnd)
+static void ReleaseOverlayInput(HWND hWnd, uint32_t generation, bool force)
 {
-	g_ReleasePending.store(false);
+	if (!force && generation != g_ReleaseGeneration.load())
+		return;
+
 	ImGuiScope scope;
+	if (!force && generation != g_ReleaseGeneration.load())
+		return;
+
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 	{
 		g_ForwardedButtons.store(0);
 		g_OverlayOwnsCapture.store(false);
-		return;
 	}
-	const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
-	const uint32_t buttons = g_ForwardedButtons.exchange(0);
-	// Button-up would ReleaseCapture when the mask hits zero. Clear the private mask
-	// directly so a host-owned capture is left in place and the host sees no WM_CAPTURECHANGED.
-	ClearImGuiWin32Buttons(hWnd, buttons, ownedCapture);
+	else
+	{
+		const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
+		const uint32_t buttons = g_ForwardedButtons.exchange(0);
+		// Button-up would ReleaseCapture when the mask hits zero. Clear the private mask
+		// directly so a host-owned capture is left in place and the host sees no WM_CAPTURECHANGED.
+		ClearImGuiWin32Buttons(hWnd, buttons, ownedCapture);
 
-	ImGuiIO& io = ImGui::GetIO();
-	io.ClearEventsQueue();
-	io.ClearInputMouse();
-	io.ClearInputKeys();
+		ImGuiIO& io = ImGui::GetIO();
+		io.ClearEventsQueue();
+		io.ClearInputMouse();
+		io.ClearInputKeys();
+	}
+
+	if (force || g_ReleaseGeneration.load() == generation)
+	{
+		g_ReleasePending.store(false);
+		g_HoldInput.store(false);
+	}
 }
 
 static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1192,28 +1217,30 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	const UINT releaseMessage = OverlayReleaseMessage();
 	if (releaseMessage != 0 && msg == releaseMessage)
 	{
-		ReleaseOverlayInput(hWnd);
+		const uint32_t generation = static_cast<uint32_t>(wParam);
+		// wParam 0 is the unhook path and always runs. Hide posts start at 1.
+		ReleaseOverlayInput(hWnd, generation, generation == 0);
 		return 0;
 	}
 
-	// Capture can move while the overlay is hidden. Update our record before that early return,
-	// and let the backend drop buttons it recorded for this window.
+	// Capture moved to another window. 1.91.9 ignores WM_CAPTURECHANGED, so clear the tracked
+	// buttons in the backend mask without releasing or taking capture for the host.
 	if (msg == WM_CAPTURECHANGED && reinterpret_cast<HWND>(lParam) != hWnd)
 	{
+		const uint32_t buttons = g_ForwardedButtons.exchange(0);
 		g_OverlayOwnsCapture.store(false);
-		g_ForwardedButtons.store(0);
 		ImGuiScope scope;
-		if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendPlatformUserData)
-			ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+		ClearImGuiWin32Buttons(hWnd, buttons, false);
 		return 0;
 	}
 
-	// Hidden overlay: do not hand new input to ImGui. Held buttons and capture were released on hide.
-	if (!g_ShowOverlay.load())
+	// Hidden, waiting for a queued release, or tearing down: do not hand new input to ImGui.
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load())
 		return 0;
 
 	ImGuiScope scope;
-	if (!g_ShowOverlay.load() || !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load()
+		|| !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 		return 0;
 
 	bool down = false;
@@ -1263,6 +1290,14 @@ static void WindowProcHookLogError(const char* message)
  */
 void HookWindowProc(HWND hWnd)
 {
+	if (OverlayReleaseMessage() == 0)
+	{
+		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
+		return;
+	}
+
+	g_InputClosed.store(false);
+	g_HoldInput.store(false);
 	auto& hook = WindowProcHook::Instance();
 	hook.SetErrorLogger(WindowProcHookLogError);
 	hook.SetMessageHandler(ImGuiMessageHandler);
@@ -1285,13 +1320,20 @@ void HookWindowProc(HWND hWnd)
 bool UnhookWindowProc()
 {
 	g_ReleasePending.store(false);
+	g_HoldInput.store(true);
+	{
+		// Block new button-downs before the release runs. Drop the lock before SendMessage
+		// so the window thread can enter the handler.
+		ImGuiScope scope;
+		g_InputClosed.store(true);
+	}
 	const HWND window = g_InputWindow.exchange(nullptr);
 	const UINT releaseMessage = OverlayReleaseMessage();
 	if (window != nullptr && releaseMessage != 0 && ::IsWindow(window))
 	{
 		const DWORD owner = ::GetWindowThreadProcessId(window, nullptr);
 		if (owner == ::GetCurrentThreadId())
-			ReleaseOverlayInput(window);
+			ReleaseOverlayInput(window, 0, true);
 		else
 			::SendMessageW(window, releaseMessage, 0, 0);
 	}
@@ -1299,6 +1341,7 @@ bool UnhookWindowProc()
 	{
 		g_ForwardedButtons.store(0);
 		g_OverlayOwnsCapture.store(false);
+		g_HoldInput.store(false);
 	}
 
 	const bool drained = WindowProcHook::Instance().UnhookAll();
