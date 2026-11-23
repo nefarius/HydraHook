@@ -166,6 +166,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 ## Build Configuration
 
 - **Output**: DLL (Debug/Release) or static library (Debug_LIB/Release_LIB). See [HydraHook.vcxproj](HydraHook.vcxproj).
+- **Static library is the easier injection route**: linking it into the host DLL embeds the engine, so a single DLL is injected and no separate `HydraHook.dll` must be deployed or loaded. The DLL configurations suit consumers that want a shared engine binary.
 - **Preprocessor defines** to exclude APIs:
   - `HYDRAHOOK_NO_D3D9`
   - `HYDRAHOOK_NO_D3D10`

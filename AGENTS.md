@@ -62,7 +62,7 @@ msbuild HydraHook.slnx /m /p:Configuration=Release /p:Platform=x64 "/t:core\Hydr
 
 Use `Platform=Win32` for x86. `Release_LIB` writes test executables to `bin\x64` or `bin\x86`.
 
-`Release_LIB` (static library) and `Release` (DLL import library) write the same `bin\<arch>\HydraHook.lib`. Delete that file before switching between the static-library and DLL Release configurations, or the tests fail to link with unresolved externals. Debug configurations write to `bin\<Configuration>\<arch>\` and need no cleanup.
+The core project writes per-configuration output: `Release` produces `bin\<arch>\HydraHook.dll` plus its import library; `Release_LIB` produces the static `bin\Release_LIB\<arch>\HydraHook.lib`; Debug configurations use `bin\<Configuration>\<arch>\`. The outputs do not collide, so no cleanup is needed when switching configurations.
 
 - Run `bin\<arch>\HydraHookTests.exe` and `bin\<arch>\HydraHookWarpSmokeTests.exe`. The smoke test needs `HydraHookTestHost.dll` beside it and a D3D11 WARP device.
 
