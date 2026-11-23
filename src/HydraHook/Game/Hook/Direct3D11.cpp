@@ -82,7 +82,7 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 		throw ProcAddressNotFoundException("Could not get handle to D3D11CreateDeviceAndSwapChain");
 	}
 
-	const auto hr11 = static_cast<HRESULT(WINAPI *)(
+	const auto createDevice = static_cast<HRESULT(WINAPI *)(
 		IDXGIAdapter*,
 		D3D_DRIVER_TYPE,
 		HMODULE,
@@ -94,7 +94,12 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 		IDXGISwapChain**,
 		ID3D11Device**,
 		D3D_FEATURE_LEVEL*,
-		ID3D11DeviceContext**)>(hD3D11CreateDeviceAndSwapChain)(
+		ID3D11DeviceContext**)>(hD3D11CreateDeviceAndSwapChain);
+
+	// Hardware first so a real GPU is preferred. Fall back to WARP when the
+	// machine has no usable adapter (headless CI runners). The DXGI method
+	// addresses are the same for both drivers.
+	HRESULT hr11 = createDevice(
 		nullptr,
 		D3D_DRIVER_TYPE_HARDWARE,
 		nullptr,
@@ -107,6 +112,23 @@ Direct3D11Hooking::Direct3D11::Direct3D11() :
 		&pd3dDevice,
 		&featureLevel,
 		&pd3dDeviceContext);
+
+	if (FAILED(hr11))
+	{
+		hr11 = createDevice(
+			nullptr,
+			D3D_DRIVER_TYPE_WARP,
+			nullptr,
+			createDeviceFlags,
+			featureLevelArray,
+			1,
+			D3D11_SDK_VERSION,
+			&sd,
+			&pSwapChain,
+			&pd3dDevice,
+			&featureLevel,
+			&pd3dDeviceContext);
+	}
 
 	if (FAILED(hr11))
 	{

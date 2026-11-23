@@ -1,5 +1,11 @@
-*.h   text working-tree-encoding=UTF-8
-*.cpp text working-tree-encoding=UTF-8
-# Enforce CRLF for Windows batch scripts so they parse correctly on Windows
+*.h   text working-tree-encoding=UTF-8 eol=crlf
+*.hpp text working-tree-encoding=UTF-8 eol=crlf
+*.cpp text working-tree-encoding=UTF-8 eol=crlf
+*.c   text working-tree-encoding=UTF-8 eol=crlf
 *.bat text eol=crlf
-appveyor.yml text eol=crl
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.yml text eol=crlf
+*.yaml text eol=crlf
+*.json text eol=crlf
+*.md text eol=crlf

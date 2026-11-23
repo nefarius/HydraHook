@@ -2,7 +2,8 @@
 
 API-Hooking and rendering framework for DirectX-based games.
 
-[![Build status](https://ci.appveyor.com/api/projects/status/gi1n6yvtuhea55jl?svg=true)](https://ci.appveyor.com/project/nefarius/hydrahook)
+[![Build status](https://github.com/nefarius/HydraHook/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/nefarius/HydraHook/actions/workflows/build.yml)
+[![GitHub All Releases](https://img.shields.io/github/downloads/nefarius/HydraHook/total)](https://github.com/nefarius/HydraHook/releases)
 [![Discord](https://img.shields.io/discord/346756263763378176.svg)](https://discord.nefarius.at)
 [![Website](https://img.shields.io/website-up-down-green-red/https/docs.nefarius.at.svg?label=docs.nefarius.at)](https://docs.nefarius.at/)
 [![GitHub followers](https://img.shields.io/github/followers/nefarius.svg?style=social&label=Follow)](https://github.com/nefarius)
@@ -25,6 +26,14 @@ API-Hooking and rendering framework for DirectX-based games.
 - **Performance-focused** — Lock-free hot path for hook callbacks (atomic counters only; no mutex, no kernel transition). Shutdown uses loader-lock-safe `remove_nothrow` to avoid deadlocks during process exit.
 
 - **No external dependencies at runtime** — Everything needed is statically linked in. Just drop the DLL into the target process; no redistributables or runtime packages required.
+- **Core Audio** — Optional `IAudioRenderClient` buffer hooks alongside the Direct3D pipeline.
+
+## Supported platforms
+
+- Windows 10 and Windows 11
+- x86 and x64
+- Direct3D 12 hooking is built for x86 and x64. The D3D12 ImGui overlay is x64-only
+- ARM and UWP are not supported
 
 ## Supported DirectX versions
 
@@ -38,30 +47,42 @@ API-Hooking and rendering framework for DirectX-based games.
 
 ### Prerequisites
 
-- Visual Studio **2022** ([Community Edition](https://visualstudio.microsoft.com/downloads/) is free)
+- Visual Studio 2022 or newer with the **v143** toolset ([Community Edition](https://visualstudio.microsoft.com/downloads/) is free)
 - [Windows SDK](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads)
 
 ### Build steps
 
 1. Clone the repository and initialize submodules: `git submodule update --init --recursive`
-2. Open `HydraHook.sln` in Visual Studio and build
+2. From the repository root, run `prepare-deps.bat` (both x86 and x64), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`. With no arguments the script locates Visual Studio via `vswhere` and sets up the compiler itself.
+3. Open `HydraHook.sln` and build `Release_LIB` (static library, samples, and tests) or `Release` (standalone `HydraHook.dll`)
 
-Dependencies (spdlog, detours, imgui, directxtk) are declared in `vcpkg.json` and installed via [vcpkg](https://github.com/microsoft/vcpkg) (included as a submodule). Run `prepare-deps.bat` from a **Developer Command Prompt for VS 2022** (or x64 Native Tools Command Prompt) before the first build in Visual Studio; the build will use existing `vcpkg_installed` if present.
+Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared in `vcpkg.json` and installed via [vcpkg](https://github.com/microsoft/vcpkg) (included as a submodule). The manifest baseline is pinned in `vcpkg-configuration.json`. GitHub Actions builds core/tests, the ImGui/FPS/DirectXTK samples, and the OpenCV dependencies/sample in separate jobs and caches each slice's vcpkg archives per architecture. Publishing those packages to GitHub Packages requires the `VCPKG_NUGET_TOKEN` secret, a PAT with `read:packages` and `write:packages`. The workflow token cannot create packages under a personal account.
+
+### Tests
+
+`Release_LIB` builds the C++ tests for the selected platform. Executables are written to `bin\x64` or `bin\x86`:
+
+- `HydraHookTests.exe` — public API helpers, engine handle checks, the Detours wrapper, shutdown tracking, crash-handler refcounting, and the FPS sampler
+- `HydraHookWarpSmokeTests.exe` — headless D3D11 WARP device. It loads `HydraHookTestHost.dll` from the same directory and checks Present / ResizeBuffers callbacks
+
+```text
+bin\x64\HydraHookTests.exe
+bin\x64\HydraHookWarpSmokeTests.exe
+```
+
+### Releases
+
+A `vX.Y.Z` tag (for example `v4.2.0`) builds, tests, signs, and publishes a stable GitHub Release. A `vX.Y.Z-preN` tag (for example `v4.2.0-pre1`, where `N` is one or more digits) publishes a prerelease. Rerunning a tag that already has a published release returns that release to draft before the archives are replaced, and publishes it again only after both uploads succeed. Signing requires the `SIGN_RELAY_CI_TOKEN` repository secret. `SIGN_RELAY_SERVER` is optional and defaults to `https://signrelay.api.nefarius.systems/`.
 
 ### Pre-built binaries
 
-> [!WARNING]
-> The downloads contain a DLL Injector utility which might be flagged as unsafe by the browser due to it sharing behavior with malicious code. Use at your own risk!
-
-![Last updated](https://buildbot.nefarius.at/builds/HydraHook/latest/LAST_UPDATED_AT.svg)
-
-Pre-built binaries are available from the [buildbot](https://buildbot.nefarius.at/builds/HydraHook/latest/). Note: these builds may be outdated; for the latest code, build from source.
+Signed x86 and x64 archives are published on [GitHub Releases](https://github.com/nefarius/HydraHook/releases/latest). Each archive contains `HydraHook.dll` and the sample host DLLs. Inject them with [Injector](https://github.com/nefarius/Injector) or [HydraHookManager](https://github.com/nefarius/HydraHookManager).
 
 ## How to use
 
 For a ready-to-use FPS counter, build the [HydraHook-FPS sample](samples/HydraHook-FPS/).
 
-Inject the resulting host library (e.g. `HydraHook-ImGui.dll`) into the target process first using a DLL injection utility of your choice (you can ofc. [use mine as well](https://github.com/nefarius/Injector)). The following example loads the [imgui sample](samples/HydraHook-ImGui):
+Inject the resulting host library (e.g. `HydraHook-ImGui.dll`) into the target process with [Injector](https://github.com/nefarius/Injector) or [HydraHookManager](https://github.com/nefarius/HydraHookManager). The following example loads the [imgui sample](samples/HydraHook-ImGui):
 
 ```PowerShell
 .\Injector -n hl2.exe -i HydraHook-ImGui.dll
@@ -72,6 +93,10 @@ Just make sure your host library doesn't require any external dependencies not p
 ## Diagnostics
 
 The core library logs its progress and potential errors to `HydraHook.log`. It tries to write in this order: (1) the directory of the process executable, (2) the directory of the HydraHook DLL, (3) `%TEMP%` if both prior locations fail (e.g. no write permissions).
+
+## Support
+
+Report defects and compatibility problems on the [issue tracker](https://github.com/nefarius/HydraHook/issues). Usage questions belong on [Discord](https://discord.nefarius.at). Anti-cheat enforcement is outside the scope of this project; see the caution above.
 
 ## Demos
 
@@ -103,7 +128,7 @@ Road Redemption, 64-Bit
 
 ### DirectX 12
 
-Supported on 64-bit builds. The ImGui sample automatically detects and hooks DX12 games.
+Core Direct3D 12 hooking is built for x86 and x64. The ImGui sample's D3D12 overlay is x64-only.
 
 BEHEMOTH, 64-Bit
 
@@ -131,3 +156,7 @@ This project uses the following libraries (via [vcpkg](https://github.com/micros
 - [ion RE Library](https://github.com/scen/ionlib)
 - [C# – Screen capture and overlays for Direct3D 9, 10 and 11 using API hooks](https://web.archive.org/web/20240922031432/https://spazzarama.com/2011/03/14/c-screen-capture-and-overlays-for-direct3d-9-10-and-11-using-api-hooks/)
 - [HelloD3D12](https://github.com/GPUOpen-LibrariesAndSDKs/HelloD3D12)
+
+## License
+
+MIT. See [LICENSE](LICENSE).

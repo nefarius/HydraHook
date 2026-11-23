@@ -217,21 +217,6 @@ g_getObjectInfo8Hook;
 void HookDInput8(size_t* vtable8);
 #endif
 
-/**
- * @brief Entry point for the HydraHook engine worker thread that initializes, installs,
- *        and manages all runtime hooks for supported subsystems (D3D9/10/11/12, Core Audio,
- *        DirectInput8) and handles graceful shutdown.
- *
- * The thread sets up per-API hooks, captures runtime state required by the render/audio
- * pipelines, wires pre/post extension callbacks, waits for a cancellation event, then
- * uninstalls hooks and exits the host DLL thread.
- *
- * @param Params Pointer to a PHYDRAHOOK_ENGINE instance (passed as LPVOID). The function
- *               interprets this parameter as the engine context used for configuration,
- *               event callbacks, and shared state.
- * @return DWORD Thread exit code. Note: the function ends the thread via FreeLibraryAndExitThread,
- *               so it does not return to its caller in the usual way.
- */
 DWORD WINAPI HydraHookMainThread(LPVOID Params)
 {
 	auto logger = spdlog::get("HYDRAHOOK")->clone("game");
@@ -2108,15 +2093,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	}
 }
 
-/**
- * @brief Retrieves the ID3D12CommandQueue associated with a DXGI swap chain.
- *
- * Looks up a command queue first from the swap-chain-to-queue mapping populated at swap-chain creation,
- * and if not found, falls back to a device-to-queue mapping captured at runtime via ExecuteCommandLists.
- *
- * @param pSwapChain The swap chain to query; may be null.
- * @return ID3D12CommandQueue* The associated command queue with its reference count incremented via `AddRef`, or `nullptr` if none is available or `pSwapChain` is null.
- */
 ID3D12CommandQueue* GetD3D12CommandQueueForSwapChain(IDXGISwapChain* pSwapChain)
 {
 #ifndef HYDRAHOOK_NO_D3D12

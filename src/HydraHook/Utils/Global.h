@@ -37,21 +37,6 @@ SOFTWARE.
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
-/**
- * Get the full path of the current process executable.
- * @return Full process image path (e.g. \Device\HarddiskVolume1\...\app.exe).
- */
-
-/**
- * Get the directory containing the main process executable, including a trailing path separator.
- * @return Directory path with trailing separator (e.g. C:\Program Files\Game\), or empty string on failure.
- */
-
-/**
- * Get the directory containing the specified module, including a trailing path separator.
- * @param hMod Handle to the module (HMODULE).
- * @return Directory path with trailing separator, or empty string on failure.
- */
 namespace HydraHook
 {
     namespace Core
@@ -85,20 +70,20 @@ namespace HydraHook
 
             /**
              * @brief Returns the full path of the current process executable.
-             * @return Process image path (e.g. \Device\HarddiskVolume1\...\app.exe).
+             * @return Process image path (for example \\Device\\HarddiskVolume1\\...\\app.exe).
              */
             inline std::string process_name()
             {
                 const auto nSize = MAX_PATH + 1;
                 char procName[nSize];
-                GetProcessImageFileName(GetCurrentProcess(), procName, nSize);
+                GetProcessImageFileNameA(GetCurrentProcess(), procName, nSize);
 
                 return std::string(procName);
             }
 
             /**
              * @brief Returns the directory containing the main process executable.
-             * @return Directory path (e.g. C:\Program Files\Game\), or empty string on failure.
+             * @return Directory path (for example C:\\Program Files\\Game\\), or empty string on failure.
              */
             inline std::string get_process_directory()
             {

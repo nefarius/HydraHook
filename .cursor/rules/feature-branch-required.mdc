@@ -1,0 +1,21 @@
+---
+description: Introduce all changes on a new branch from master
+alwaysApply: true
+---
+
+# New branch required
+
+Do not implement or commit work on `master`. Before making changes, check whether the current
+branch already is the requested work.
+
+- If it is, continue on that branch.
+- Otherwise, create a new branch from current `master` first (`feat/…`, `fix/…`, or `chore/…`), then make changes there.
+- Do not merge or push to `master` unless the user explicitly asks.
+
+## Plans
+
+Every implementation plan must list "create the feature branch" as its explicit step 0 / first
+todo, and must state the `feat/…`, `fix/…`, or `chore/…` branch name.
+
+That step is executed and confirmed (`git branch --show-current`) before any non-plan file is
+created or edited.

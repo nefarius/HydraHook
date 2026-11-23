@@ -1,0 +1,15 @@
+# top-most EditorConfig file
+root = true
+
+[*]
+charset = utf-8
+trim_trailing_whitespace = true
+end_of_line = crlf
+insert_final_newline = true
+
+[Makefile]
+indent_style = tab
+
+[*.{c,h,cpp,hpp}]
+indent_style = space
+indent_size = 4

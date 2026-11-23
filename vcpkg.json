@@ -1,25 +1,54 @@
 {
   "name": "hydrahook",
-  "version": "0.1.0",
+  "version": "4.2.0",
+  "description": "DirectX and Core Audio API-hooking framework",
+  "license": "MIT",
+  "supports": "!(arm | uwp)",
   "dependencies": [
     "spdlog",
-    "detours",
-    {
-      "name": "imgui",
-      "platform": "x86",
-      "default-features": false,
-      "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "win32-binding" ]
+    "detours"
+  ],
+  "default-features": [
+    "imgui",
+    "directxtk",
+    "opencv"
+  ],
+  "features": {
+    "imgui": {
+      "description": "ImGui overlay samples",
+      "dependencies": [
+        {
+          "name": "imgui",
+          "platform": "x86",
+          "default-features": false,
+          "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "win32-binding" ]
+        },
+        {
+          "name": "imgui",
+          "platform": "!x86",
+          "default-features": false,
+          "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "dx12-binding", "win32-binding" ]
+        }
+      ]
     },
-    {
-      "name": "imgui",
-      "platform": "!x86",
-      "default-features": false,
-      "features": [ "dx9-binding", "dx10-binding", "dx11-binding", "dx12-binding", "win32-binding" ]
+    "directxtk": {
+      "description": "DirectXTK overlay sample",
+      "dependencies": [
+        {
+          "name": "directxtk",
+          "features": [ "tools" ]
+        }
+      ]
     },
-    {
-      "name": "directxtk",
-      "features": [ "tools" ]
-    },
-    "opencv4"
-  ]
+    "opencv": {
+      "description": "OpenCV capture sample",
+      "dependencies": [
+        {
+          "name": "opencv4",
+          "default-features": false,
+          "features": [ "calib3d", "fs", "intrinsics", "thread" ]
+        }
+      ]
+    }
+  }
 }

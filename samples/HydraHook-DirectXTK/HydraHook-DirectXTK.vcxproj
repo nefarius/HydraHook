@@ -196,12 +196,13 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
-  <Target Name="GenerateSpriteFont" BeforeTargets="ClCompile">
-    <PropertyGroup>
-      <MakeSpriteFontExe>$(ProjectDir)..\..\vcpkg_installed\$(VcpkgTriplet)\tools\directxtk\makespritefont.exe</MakeSpriteFontExe>
-      <SpriteFontOut>$(OutDir)Arial.spritefont</SpriteFontOut>
-    </PropertyGroup>
+  <PropertyGroup>
+    <MakeSpriteFontExe>$(_ZVcpkgCurrentInstalledDir)tools\directxtk\makespritefont.exe</MakeSpriteFontExe>
+    <SpriteFontOut>$(OutDir)Arial.spritefont</SpriteFontOut>
+  </PropertyGroup>
+  <Target Name="GenerateSpriteFont" BeforeTargets="ClCompile" Inputs="$(MakeSpriteFontExe)" Outputs="$(SpriteFontOut)">
+    <Error Condition="!Exists('$(MakeSpriteFontExe)')" Text="MakeSpriteFont was not found at $(MakeSpriteFontExe). Run prepare-deps.bat before building HydraHook-DirectXTK." />
     <MakeDir Directories="$(OutDir)" Condition="!Exists('$(OutDir)')" />
-    <Exec Command="&quot;$(MakeSpriteFontExe)&quot; Arial &quot;$(SpriteFontOut)&quot; /FontSize:24" Condition="Exists('$(MakeSpriteFontExe)')" />
+    <Exec Command="&quot;$(MakeSpriteFontExe)&quot; Arial &quot;$(SpriteFontOut)&quot; /FontSize:24" />
   </Target>
 </Project>

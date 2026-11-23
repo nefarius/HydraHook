@@ -1,0 +1,563 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-pre[0-9]+'
+    # paths-ignore is not evaluated for tag pushes, so releases always build.
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.png'
+  workflow_dispatch:
+
+# Tag pushes are never cancelled so a release is never half-published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Lint API comments
+        run: |
+          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
+
+  core:
+    name: Core & Tests (${{ matrix.artifact }})
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      # Optional. GITHUB_TOKEN cannot create packages in a personal-account
+      # GitHub Packages namespace (403). A PAT with read:packages and
+      # write:packages publishes the same archives for local restores.
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+            triplet: x86-windows-static
+          - platform: x64
+            artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Setup core vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: core
+
+      - name: Stamp version into HydraHook.rc
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build static library and tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook;tests\HydraHookTests;tests\HydraHookTestHost;tests\HydraHookWarpSmokeTests"
+          if ($LASTEXITCODE -ne 0) { throw "Core Release_LIB build failed ($LASTEXITCODE)" }
+
+      - name: Build standalone HydraHook.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook"
+          if ($LASTEXITCODE -ne 0) { throw "Core Release build failed ($LASTEXITCODE)" }
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "bin\${{ matrix.artifact }}"
+          foreach ($exe in @('HydraHookTests.exe', 'HydraHookWarpSmokeTests.exe')) {
+            & (Join-Path $bin $exe)
+            if ($LASTEXITCODE -ne 0) { throw "$exe failed with exit code $LASTEXITCODE" }
+          }
+
+      - name: Verify HydraHook.dll exports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found.' }
+          $dll = "bin\${{ matrix.artifact }}\HydraHook.dll"
+          $exportLines = @(& $dumpbin /EXPORTS $dll)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $dll (exit $LASTEXITCODE)" }
+          $exported = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          $inTable = $false
+          foreach ($line in $exportLines) {
+            if ($line -match '^\s+ordinal\s+hint\s+RVA\s+name') { $inTable = $true; continue }
+            if (-not $inTable) { continue }
+            if ($line -match '^\s+Summary') { break }
+            if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') {
+              [void]$exported.Add($Matches[1])
+            }
+          }
+          $required = @(
+            'HydraHookEngineCreate',
+            'HydraHookEngineDestroy',
+            'HydraHookEngineAllocCustomContext',
+            'HydraHookEngineFreeCustomContext',
+            'HydraHookEngineGetCustomContext',
+            'HydraHookEngineSetD3D9EventCallbacks',
+            'HydraHookEngineGetHandleFromD3D9Device',
+            'HydraHookEngineGetHandleFromD3D9ExDevice',
+            'HydraHookEngineSetD3D10EventCallbacks',
+            'HydraHookEngineSetD3D11EventCallbacks',
+            'HydraHookEngineSetD3D12EventCallbacks',
+            'HydraHookEngineGetD3D12CommandQueue',
+            'HydraHookEngineSetARCEventCallbacks',
+            'HydraHookEngineLogDebug',
+            'HydraHookEngineLogInfo',
+            'HydraHookEngineLogWarning',
+            'HydraHookEngineLogError'
+          )
+          foreach ($name in $required) {
+            $found = $false
+            foreach ($exportName in $exported) {
+              # C exports match the name column exactly. C++ exports are
+              # ?Name@@decoration, which is not a prefix of a longer identifier.
+              if ($exportName -eq $name -or $exportName.StartsWith('?' + $name + '@@')) {
+                $found = $true
+                break
+              }
+            }
+            if (-not $found) {
+              throw "$dll is missing export $name"
+            }
+          }
+          Write-Output "HydraHook.dll exports the public API."
+
+      - name: Stage core release file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $from = "bin\$arch\HydraHook.dll"
+          $dest = "staged\$arch"
+          if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item -LiteralPath $from -Destination (Join-Path $dest 'HydraHook.dll')
+
+      - name: Upload core artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-core-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  samples:
+    name: "Samples: ImGui, FPS, DirectXTK (${{ matrix.artifact }})"
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+            triplet: x86-windows-static
+          - platform: x64
+            artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Setup sample vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: samples
+          features: imgui directxtk
+
+      - name: Stamp version into resource files
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
+            samples\HydraHook-ImGui\HydraHook-ImGui.rc
+            samples\HydraHook-FPS\HydraHook-FPS.rc
+            samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build ImGui, FPS, and DirectXTK samples
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-ImGui;samples\HydraHook-FPS;samples\HydraHook-DirectXTK"
+          if ($LASTEXITCODE -ne 0) { throw "Samples build failed ($LASTEXITCODE)" }
+
+      - name: Stage sample release files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $source = "bin\$arch"
+          $dest = "staged\$arch"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          $names = @(
+            'HydraHook-ImGui.dll',
+            'HydraHook-FPS.dll',
+            'HydraHook-DirectXTK.dll',
+            'Arial.spritefont'
+          )
+          foreach ($name in $names) {
+            $from = Join-Path $source $name
+            if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+            Copy-Item -LiteralPath $from -Destination (Join-Path $dest $name)
+          }
+
+      - name: Upload samples artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-samples-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  deps-opencv:
+    name: OpenCV Dependencies (${{ matrix.artifact }})
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: x86
+            triplet: x86-windows-static
+          - artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Build and cache OpenCV vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: opencv
+          features: imgui opencv
+          save-cache: 'true'
+
+  sample-opencv:
+    name: "Sample: OpenCV (${{ matrix.artifact }})"
+    runs-on: windows-2022
+    needs: deps-opencv
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+            triplet: x86-windows-static
+          - platform: x64
+            artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Restore OpenCV vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: opencv
+          features: imgui opencv
+          save-cache: 'false'
+
+      - name: Stamp version into resource files
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
+            samples\HydraHook-OpenCV\HydraHook-OpenCV.rc
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build OpenCV sample
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-OpenCV"
+          if ($LASTEXITCODE -ne 0) { throw "OpenCV sample build failed ($LASTEXITCODE)" }
+
+      - name: Stage OpenCV release file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $from = "bin\$arch\HydraHook-OpenCV.dll"
+          $dest = "staged\$arch"
+          if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item -LiteralPath $from -Destination (Join-Path $dest 'HydraHook-OpenCV.dll')
+
+      - name: Upload OpenCV artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-opencv-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  sign:
+    name: Sign release binaries
+    runs-on: windows-2022
+    needs: [core, samples, sample-opencv]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    env:
+      SIGN_RELAY_SERVER: ${{ vars.SIGN_RELAY_SERVER || 'https://signrelay.api.nefarius.systems/' }}
+      SIGN_RELAY_CI_TOKEN: ${{ secrets.SIGN_RELAY_CI_TOKEN }}
+
+    steps:
+      - name: Require signing configuration
+        shell: pwsh
+        run: |
+          if (-not $env:SIGN_RELAY_SERVER) { throw 'SIGN_RELAY_SERVER is empty.' }
+          if (-not $env:SIGN_RELAY_CI_TOKEN) { throw 'Repository secret SIGN_RELAY_CI_TOKEN is not set.' }
+          Write-Output "SignRelay server: $env:SIGN_RELAY_SERVER"
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Download x86 core artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-core-x86
+          path: artifacts/x86
+
+      - name: Download x86 samples artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-samples-x86
+          path: artifacts/x86
+
+      - name: Download x86 OpenCV artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-opencv-x86
+          path: artifacts/x86
+
+      - name: Download x64 core artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-core-x64
+          path: artifacts/x64
+
+      - name: Download x64 samples artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-samples-x64
+          path: artifacts/x64
+
+      - name: Download x64 OpenCV artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-opencv-x64
+          path: artifacts/x64
+
+      - name: Assert release payload architectures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\.github\scripts\Assert-ReleaseArchitecture.ps1
+          Assert-ReleaseArchitecture -Path artifacts\x86 -Architecture x86
+          Assert-ReleaseArchitecture -Path artifacts\x64 -Architecture x64
+
+      - name: Assert binaries are unsigned
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -Path artifacts -Filter '*.dll' -Recurse -File)
+          if ($files.Count -eq 0) { throw 'No DLLs found in downloaded artifacts.' }
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($sig.Status -ne 'NotSigned') {
+              throw "Expected unsigned $($file.FullName) but Get-AuthenticodeSignature returned $($sig.Status)."
+            }
+            Write-Output "Unsigned as required: $($file.FullName)"
+          }
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Sign release binaries
+        uses: nefarius/SignRelay@39ccbe0cef16a383237130380a5aef8db040d5d0
+        with:
+          server: ${{ env.SIGN_RELAY_SERVER }}
+          token: ${{ env.SIGN_RELAY_CI_TOKEN }}
+          tool-version: 1.3.0
+          in-place: true
+          files: |
+            artifacts/**/*.dll
+
+      - name: Verify signed binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -Path artifacts -Filter '*.dll' -Recurse -File)
+          if ($files.Count -eq 0) { throw 'No DLLs found after signing.' }
+          foreach ($file in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate) {
+              throw "File is not validly signed: $($file.FullName) (Status=$($sig.Status))."
+            }
+            Write-Output "Signed: $($file.FullName) (Subject=$($sig.SignerCertificate.Subject))"
+          }
+
+      - name: Package per-architecture archives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          foreach ($arch in @('x86', 'x64')) {
+            $zip = "release\HydraHook-$arch.zip"
+            Compress-Archive -Path "artifacts\$arch\*" -DestinationPath $zip -Force
+            Write-Output "Packaged $zip"
+          }
+
+      - name: Verify archive contents
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\.github\scripts\Assert-ReleaseArchitecture.ps1
+          $staging = Join-Path $env:RUNNER_TEMP 'release-verify'
+          foreach ($arch in @('x86', 'x64')) {
+            Expand-Archive -LiteralPath "release\HydraHook-$arch.zip" `
+              -DestinationPath (Join-Path $staging $arch) -Force
+            Assert-ReleaseArchitecture -Path (Join-Path $staging $arch) -Architecture $arch -RequireSigned
+          }
+
+      - name: Upload release archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-release-assets
+          path: release/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: sign
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-release-assets
+          path: release
+
+      - name: Return an existing release to draft before replacing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          lookup_err=$(mktemp)
+          set +e
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>"$lookup_err")
+          status=$?
+          set -e
+          message=$(tr -d '\r\n' < "$lookup_err")
+          if [ "$status" -eq 0 ]; then
+            if [ "$draft" = "false" ]; then
+              echo "Returning published release $RELEASE_TAG to draft before replacing its assets"
+              gh release edit "$RELEASE_TAG" --draft
+            fi
+          elif [ "$status" -eq 1 ] && [ "$message" = "release not found" ]; then
+            echo "No existing release for $RELEASE_TAG; the publish step will create one"
+          else
+            echo "Release lookup failed with exit ${status}" >&2
+            cat "$lookup_err" >&2
+            exit "$status"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release/HydraHook-x86.zip
+            release/HydraHook-x64.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-pre') }}
+          draft: ${{ contains(github.ref_name, '-pre') }}
+
+      - name: Publish prerelease
+        if: contains(github.ref_name, '-pre')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
