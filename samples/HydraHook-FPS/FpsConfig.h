@@ -180,7 +180,8 @@ inline bool FpsDirectoryOfModule(HMODULE module, wchar_t (&directory)[MAX_PATH])
 
 // Finds and writes the INI file the same way the engine places HydraHook.log: the process
 // directory first, then the DLL directory. The file is read from whichever holds it and
-// written back there. Without one, the first directory that accepts a write wins.
+// written back there only (a failed write is reported, not redirected). Without one, the
+// first directory that accepts a write wins.
 class FpsConfigStore
 {
 public:
@@ -216,8 +217,10 @@ public:
 		const size_t length = FormatFpsConfig(cfg, text, sizeof(text));
 		if (length == 0)
 			return false;
-		if (active_ >= 0 && WriteAll(paths_[active_], text, static_cast<DWORD>(length)))
-			return true;
+		// A file that was loaded must be updated in place. Writing elsewhere would be ignored
+		// by the next Load, which prefers the earlier directory.
+		if (active_ >= 0)
+			return WriteAll(paths_[active_], text, static_cast<DWORD>(length));
 		for (int i = 0; i < kCandidates; ++i)
 		{
 			if (paths_[i][0] && WriteAll(paths_[i], text, static_cast<DWORD>(length)))

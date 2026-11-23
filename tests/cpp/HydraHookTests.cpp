@@ -496,6 +496,23 @@ namespace
             Check(std::wstring(store.ActivePath()) == dllDir + L"HydraHook-FPS.ini", "save stays where the file was found", __FILE__, __LINE__);
         }
         DeleteFileW((dllDir + L"HydraHook-FPS.ini").c_str());
+        {
+            // A read-only file that was loaded: save fails instead of writing a file Load would ignore.
+            const std::wstring locked = processDir + L"HydraHook-FPS.ini";
+            FpsConfigStore seed;
+            seed.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            seed.Save(written);
+            SetFileAttributesW(locked.c_str(), FILE_ATTRIBUTE_READONLY);
+            FpsConfigStore store;
+            store.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            FpsConfig loaded;
+            Check(store.Load(loaded), "read-only file still loads", __FILE__, __LINE__);
+            Check(!store.Save(written), "failed write is not redirected", __FILE__, __LINE__);
+            Check(GetFileAttributesW((dllDir + L"HydraHook-FPS.ini").c_str()) == INVALID_FILE_ATTRIBUTES,
+                  "no shadow file in the DLL directory", __FILE__, __LINE__);
+            SetFileAttributesW(locked.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(locked.c_str());
+        }
         RemoveDirectoryW((root + L"\\process").c_str());
         RemoveDirectoryW((root + L"\\dll").c_str());
         RemoveDirectoryW(root.c_str());

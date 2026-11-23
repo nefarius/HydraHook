@@ -31,7 +31,7 @@ Keys are read only while the host process owns the foreground window.
 Settings are stored in `HydraHook-FPS.ini`, placed like `HydraHook.log`:
 
 - Read: the process executable's directory first, then the DLL's directory.
-- Write: back to the file that was read. When none exists, the process directory is tried first and the DLL directory is the fallback if it is not writable.
+- Write: back to the file that was read; if that write fails (for example the file is read-only), the save fails and is retried every 5 seconds instead of writing a file the next load would ignore. When none exists, the process directory is tried first and the DLL directory is the fallback if it is not writable.
 - Changes are written when no menu widget is held, when the menu closes, after F12, and on unhook.
 
 ```ini

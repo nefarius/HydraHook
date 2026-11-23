@@ -17,11 +17,28 @@ namespace
 	bool g_menuOpen = false;
 	bool g_focusMenu = false;
 	bool g_dirty = false;
+	bool g_cursorDirty = false;     // One more frame is needed to apply io.MouseDrawCursor.
+	ULONGLONG g_retryAt = 0;        // Earliest tick of the next save attempt after a failure.
+	constexpr ULONGLONG kSaveRetryMs = 5000;
 
-	void FlushLocked()
+	void MarkDirtyLocked()
 	{
-		if (g_dirty && g_store.Save(g_config))
+		g_dirty = true;
+		g_retryAt = 0;
+	}
+
+	// A failed save keeps g_dirty and backs off, so unwritable locations do not cost file I/O per frame.
+	void FlushLocked(bool force = false)
+	{
+		if (!g_dirty)
+			return;
+		const ULONGLONG now = ::GetTickCount64();
+		if (!force && now < g_retryAt)
+			return;
+		if (g_store.Save(g_config))
 			g_dirty = false;
+		else
+			g_retryAt = now + kSaveRetryMs;
 	}
 
 	void DrawCounter(const FpsConfig& config, const ImGuiIO& io, const char* label)
@@ -97,16 +114,18 @@ OverlayFrameState UpdateOverlayState()
 	if (toggleCounter)
 	{
 		g_config.showCounter = !g_config.showCounter;
-		g_dirty = true;
+		MarkDirtyLocked();
 	}
 	if (toggleMenu)
 	{
 		g_menuOpen = !g_menuOpen;
 		g_focusMenu = g_menuOpen;
+		g_cursorDirty = true;
 	}
 	if (!g_menuOpen)
 		FlushLocked();
-	return { g_config.showCounter || g_menuOpen, g_menuOpen };
+	// Render one more frame after the menu closes so RenderScene can clear io.MouseDrawCursor.
+	return { g_config.showCounter || g_menuOpen || g_cursorDirty, g_menuOpen };
 }
 
 void OnOverlayContextCreated(ImGuiIO& io)
@@ -130,13 +149,16 @@ void OnOverlayContextCreated(ImGuiIO& io)
 	g_menuOpen = false;
 	g_focusMenu = false;
 	g_dirty = false;
+	g_cursorDirty = false;
+	g_retryAt = 0;
 }
 
 void OnOverlayShutdown()
 {
 	std::lock_guard<std::mutex> lock(g_mutex);
-	FlushLocked();
+	FlushLocked(true);
 	g_menuOpen = false;
+	g_cursorDirty = false;
 }
 
 // The shared ImGui host calls this once per visible frame on every backend.
@@ -162,18 +184,22 @@ void RenderScene()
 
 		// The host's game cursor is usually hidden; draw ImGui's own while the menu is open.
 		io.MouseDrawCursor = g_menuOpen;
+		g_cursorDirty = false;
 		if (g_menuOpen)
 		{
 			const bool focus = g_focusMenu;
 			g_focusMenu = false;
 			if (!DrawMenu(config, focus))
+			{
 				g_menuOpen = false;
+				g_cursorDirty = true; // Next frame clears the cursor flag.
+			}
 			if (!(config == g_config))
 			{
 				g_config = config;
-				g_dirty = true;
+				MarkDirtyLocked();
 			}
-			// Write when no widget is being dragged or edited, and when the menu closes.
+			// Write when no widget is held, and when the menu closes.
 			if (!ImGui::IsAnyItemActive() || !g_menuOpen)
 				FlushLocked();
 		}
