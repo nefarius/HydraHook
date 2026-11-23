@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "dllmain.h"
+#include "InitGuard.h"
 
 // 
 // Detours
@@ -52,6 +53,14 @@ t_WindowProc OriginalDefWindowProc = nullptr;
 t_WindowProc OriginalWindowProc = nullptr;
 
 static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
+
+// Per-backend render-path init guards; reset on unhook so a rehook re-initializes.
+static ResettableInitGuard g_d3d9InitGuard;
+static ResettableInitGuard g_d3d10InitGuard;
+static ResettableInitGuard g_d3d11InitGuard;
+#ifdef _WIN64
+static ResettableInitGuard g_d3d12InitGuard;
+#endif
 
 #ifdef _WIN64
 static void D3D12_CleanupInitResources();
@@ -278,6 +287,14 @@ void EvtHydraHookGameUnhooked(
 	D3D12_CleanupInitResources();
 #endif
 
+	// Allow render callbacks to re-initialize on a rehook without a DLL reload
+	g_d3d9InitGuard.Reset();
+	g_d3d10InitGuard.Reset();
+	g_d3d11InitGuard.Reset();
+#ifdef _WIN64
+	g_d3d12InitGuard.Reset();
+#endif
+
 #ifdef WNDPROC_HOOK
 	// Restore original window procedure by disabling MinHook trampolines and clearing hook state
 	if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK)
@@ -311,34 +328,31 @@ void EvtHydraHookD3D9Present(
 	const RGNDATA       *pDirtyRegion
 )
 {
-	static auto initialized = false;
 	static bool show_overlay = true;
-	static std::once_flag init;
 
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	std::call_once(init, [&](LPDIRECT3DDEVICE9 pd3dDevice)
+	const bool initialized = g_d3d9InitGuard.EnsureInitialized([&]()
 	{
 		D3DDEVICE_CREATION_PARAMETERS params;
 
-		const auto hr = pd3dDevice->GetCreationParameters(&params);
+		const auto hr = pDevice->GetCreationParameters(&params);
 		if (FAILED(hr))
 		{
 			HydraHookEngineLogError("Couldn't get creation parameters from device");
-			return;
+			return false;
 		}
 
 		ImGui_ImplWin32_Init(params.hFocusWindow);
-		ImGui_ImplDX9_Init(pd3dDevice);
+		ImGui_ImplDX9_Init(pDevice);
 
 		HydraHookEngineLogInfo("ImGui (DX9) initialized");
 
 		HookWindowProc(params.hFocusWindow);
 
-		initialized = true;
-
-	}, pDevice);
+		return true;
+	});
 
 	if (!initialized)
 		return;
@@ -425,25 +439,23 @@ void EvtHydraHookD3D10Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
-	static auto initialized = false;
 	static bool show_overlay = true;
-	static std::once_flag init;
 
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	std::call_once(init, [&](IDXGISwapChain *pChain)
+	const bool initialized = g_d3d10InitGuard.EnsureInitialized([&]()
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pChain, &g_d3d10Device)))
+		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pSwapChain, &g_d3d10Device)))
 		{
 			HydraHookEngineLogError("Couldn't get device from swapchain");
-			return;
+			return false;
 		}
 
 		DXGI_SWAP_CHAIN_DESC sd;
-		pChain->GetDesc(&sd);
+		pSwapChain->GetDesc(&sd);
 
 		HydraHookEngineLogInfo("Initializing ImGui");
 
@@ -454,9 +466,8 @@ void EvtHydraHookD3D10Present(
 
 		HookWindowProc(sd.OutputWindow);
 
-		initialized = true;
-
-	}, pSwapChain);
+		return true;
+	});
 
 	if (!initialized)
 		return;
@@ -503,26 +514,23 @@ void EvtHydraHookD3D11Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
-	static auto initialized = false;
 	static bool show_overlay = true;
-	static std::once_flag init;
-
 
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	std::call_once(init, [&](IDXGISwapChain *pChain)
+	const bool initialized = g_d3d11InitGuard.EnsureInitialized([&]()
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pChain, &g_d3d11Device, &g_d3d11Context)))
+		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pSwapChain, &g_d3d11Device, &g_d3d11Context)))
 		{
 			HydraHookEngineLogError("Couldn't get device and context from swapchain");
-			return;
+			return false;
 		}
 
 		DXGI_SWAP_CHAIN_DESC sd;
-		pChain->GetDesc(&sd);
+		pSwapChain->GetDesc(&sd);
 
 		HydraHookEngineLogInfo("Initializing ImGui");
 
@@ -533,9 +541,8 @@ void EvtHydraHookD3D11Present(
 
 		HookWindowProc(sd.OutputWindow);
 
-		initialized = true;
-
-	}, pSwapChain);
+		return true;
+	});
 
 	if (!initialized)
 		return;
@@ -716,6 +723,7 @@ static void D3D12_CleanupOverlayResources()
 			g_d3d12_mainRenderTargetResource[i]->Release();
 			g_d3d12_mainRenderTargetResource[i] = nullptr;
 		}
+		g_d3d12_mainRenderTargetDescriptor[i] = {};
 	}
 	if (g_d3d12_pRtvDescHeap)
 	{
@@ -738,6 +746,13 @@ static void D3D12_CleanupInitResources()
 	if (g_d3d12_pCommandAllocator) { g_d3d12_pCommandAllocator->Release(); g_d3d12_pCommandAllocator = nullptr; }
 	if (g_d3d12_pCommandQueue) { g_d3d12_pCommandQueue->Release(); g_d3d12_pCommandQueue = nullptr; }
 	if (g_d3d12_pDevice) { g_d3d12_pDevice->Release(); g_d3d12_pDevice = nullptr; }
+
+	// Scalar state must not leak into the next init (new fence starts at 0, heap is recreated)
+	g_d3d12_fenceLastSignaledValue = 0;
+	g_d3d12_srvDescriptorCount = 0;
+	g_d3d12_rtvDescriptorSize = 0;
+	g_d3d12_srvDescriptorIncrement = 0;
+	g_d3d12_numBackBuffers = D3D12_NUM_BACK_BUFFERS;
 }
 
 /**
@@ -747,6 +762,8 @@ static void D3D12_CleanupInitResources()
  */
 static void D3D12_WaitForGpu()
 {
+	if (!g_d3d12_pFence || !g_d3d12_hFenceEvent)
+		return;
 	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
 	if (g_d3d12_pFence->GetCompletedValue() >= fence)
 		return;
@@ -781,17 +798,17 @@ void EvtHydraHookD3D12Present(
 	(void)SyncInterval;
 	(void)Extension;
 
-	static auto initialized = false;
 	static bool show_overlay = true;
 
-	if (!initialized)
+	// Retries on failure: the command queue may not be captured yet (mid-process injection)
+	const bool initialized = g_d3d12InitGuard.EnsureInitialized([&]() -> bool
 	{
 		HydraHookEngineLogInfo("Grabbing D3D12 device and command queue from swapchain");
 
 		if (FAILED(D3D12_DEVICE_FROM_SWAPCHAIN(pSwapChain, &g_d3d12_pDevice)))
 		{
 			HydraHookEngineLogError("Couldn't get D3D12 device from swapchain");
-			return;
+			return false;
 		}
 
 		g_d3d12_pCommandQueue = HydraHookEngineGetD3D12CommandQueue(pSwapChain);
@@ -799,14 +816,14 @@ void EvtHydraHookD3D12Present(
 		{
 			HydraHookEngineLogInfo("D3D12 command queue not yet captured (mid-process injection); will retry next frame");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		if (FAILED(g_d3d12_pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_d3d12_pCommandAllocator))))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 command allocator");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		if (FAILED(g_d3d12_pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_d3d12_pCommandAllocator, nullptr, IID_PPV_ARGS(&g_d3d12_pCommandList))) ||
@@ -814,14 +831,14 @@ void EvtHydraHookD3D12Present(
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 command list");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		if (FAILED(g_d3d12_pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_d3d12_pFence))))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 fence");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		g_d3d12_hFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -829,7 +846,7 @@ void EvtHydraHookD3D12Present(
 		{
 			HydraHookEngineLogError("Couldn't create fence event");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		D3D12_DESCRIPTOR_HEAP_DESC srvDesc = {};
@@ -840,14 +857,14 @@ void EvtHydraHookD3D12Present(
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 SRV descriptor heap");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 		g_d3d12_srvDescriptorIncrement = g_d3d12_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
 		if (!D3D12_CreateOverlayResources(pSwapChain))
 		{
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		DXGI_SWAP_CHAIN_DESC sd;
@@ -867,14 +884,14 @@ void EvtHydraHookD3D12Present(
 		{
 			HydraHookEngineLogError("ImGui_ImplDX12_Init failed");
 			D3D12_CleanupInitResources();
-			return;
+			return false;
 		}
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
 		HydraHookEngineLogInfo("ImGui (DX12) initialized");
 		HookWindowProc(sd.OutputWindow);
-		initialized = true;
-	}
+		return true;
+	}, true);
 
 	if (!initialized)
 		return;

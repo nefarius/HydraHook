@@ -14,6 +14,7 @@
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
 #include "FrameRate.h"
+#include "InitGuard.h"
 
 #include <atomic>
 #include <chrono>
@@ -383,6 +384,71 @@ namespace
         Check(frameRate.AverageMilliseconds() == 0.0, "reset clears the average", __FILE__, __LINE__);
     }
 
+    void TestResettableInitGuard()
+    {
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            auto init = [&]() { ++calls; return true; };
+            Check(guard.EnsureInitialized(init), "init succeeds", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init), "init stays latched", __FILE__, __LINE__);
+            Check(calls == 1, "init runs once", __FILE__, __LINE__);
+            guard.Reset();
+            Check(guard.EnsureInitialized(init), "init runs after reset", __FILE__, __LINE__);
+            Check(calls == 2, "reset allows re-init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            bool succeed = false;
+            auto init = [&]() { ++calls; return succeed; };
+            Check(!guard.EnsureInitialized(init), "failure reported", __FILE__, __LINE__);
+            succeed = true;
+            Check(!guard.EnsureInitialized(init), "failure latched like call_once", __FILE__, __LINE__);
+            Check(calls == 1, "no retry without reset", __FILE__, __LINE__);
+            guard.Reset();
+            Check(guard.EnsureInitialized(init), "success after reset", __FILE__, __LINE__);
+            Check(calls == 2, "reset re-executed init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            int calls = 0;
+            int failuresLeft = 2;
+            auto init = [&]() { ++calls; return failuresLeft-- <= 0; };
+            Check(!guard.EnsureInitialized(init, true), "retry mode fails 1", __FILE__, __LINE__);
+            Check(!guard.EnsureInitialized(init, true), "retry mode fails 2", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init, true), "retry mode succeeds", __FILE__, __LINE__);
+            Check(guard.EnsureInitialized(init, true), "retry mode latches", __FILE__, __LINE__);
+            Check(calls == 3, "retry mode ran until success", __FILE__, __LINE__);
+            guard.Reset();
+            failuresLeft = 0;
+            Check(guard.EnsureInitialized(init, true), "retry mode re-inits after reset", __FILE__, __LINE__);
+            Check(calls == 4, "reset re-executed retry-mode init", __FILE__, __LINE__);
+        }
+
+        {
+            ResettableInitGuard guard;
+            std::atomic<int> calls{0};
+            std::atomic<bool> go{false};
+            std::thread threads[8];
+            for (auto& t : threads)
+            {
+                t = std::thread([&]()
+                {
+                    while (!go.load())
+                        SwitchToThread();
+                    guard.EnsureInitialized([&]() { ++calls; Sleep(20); return true; });
+                });
+            }
+            go.store(true);
+            for (auto& t : threads)
+                t.join();
+            Check(calls.load() == 1, "concurrent callers init exactly once", __FILE__, __LINE__);
+        }
+    }
+
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -401,6 +467,7 @@ int main()
     TestExceptions();
     TestCrashHandler();
     TestFrameRate();
+    TestResettableInitGuard();
     TestShutdownGuard();
 
     if (g_failures != 0)
