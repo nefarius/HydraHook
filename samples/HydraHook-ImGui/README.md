@@ -25,6 +25,10 @@ Replace `hl2.exe` with your target process name.
 - `WM_DESTROY` and `WM_NCDESTROY` always reach the host procedure.
 - On unhook the original procedure is restored. The first successful hook pins this DLL for the rest of the process (`GET_MODULE_HANDLE_EX_FLAG_PIN`), so a later `FreeLibrary` does not unmap a thread still inside the dispatcher. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through.
 
+## Shared host
+
+`dllmain.cpp` is also compiled into [HydraHook-FPS](../HydraHook-FPS/). A sample links one scene file that implements `UpdateOverlayState()`, `OnOverlayContextCreated()`, `OnOverlayShutdown()`, and `RenderScene()` (declared in `dllmain.h`). `UpdateOverlayState()` returns whether to render and whether to accept input; losing input acceptance queues the release described above. This sample's `DemoScene.cpp` ties both to `F12`. `KeyToggle.h` provides the hotkey edge detector, which ignores presses while another process owns the foreground window.
+
 ## Limitations
 
 > [!NOTE]

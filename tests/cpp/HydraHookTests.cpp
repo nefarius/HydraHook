@@ -13,13 +13,16 @@
 #include "LdrLock.h"
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
+#include "FpsConfig.h"
 #include "FrameRate.h"
 #include "InitGuard.h"
+#include "KeyToggle.h"
 #include "OverlayRelease.h"
 #include "WindowProcHook.h"
 
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <mutex>
 #include <cstdio>
 #include <cstdlib>
@@ -385,6 +388,134 @@ namespace
         Check(frameRate.Sample(start + std::chrono::milliseconds(500) + std::chrono::seconds(2)),
               "two second pause resets", __FILE__, __LINE__);
         Check(frameRate.AverageMilliseconds() == 0.0, "reset clears the average", __FILE__, __LINE__);
+    }
+
+    void TestKeyToggle()
+    {
+        KeyToggle key;
+        Check(!key.Update(false), "idle key does not toggle", __FILE__, __LINE__);
+        Check(key.Update(true), "press toggles", __FILE__, __LINE__);
+        Check(!key.Update(true), "held key does not repeat", __FILE__, __LINE__);
+        Check(!key.Update(false), "release does not toggle", __FILE__, __LINE__);
+        Check(key.Update(true), "next press toggles again", __FILE__, __LINE__);
+    }
+
+    void TestFpsConfig()
+    {
+        // Defaults and round trip.
+        FpsConfig defaults;
+        Check(defaults.corner == FpsCorner::TopLeft && defaults.scalePercent == 100 && defaults.showCounter,
+              "defaults", __FILE__, __LINE__);
+
+        FpsConfig written;
+        written.corner = FpsCorner::BottomRight;
+        written.scalePercent = 175;
+        written.showCounter = false;
+        char text[512];
+        const size_t length = FormatFpsConfig(written, text, sizeof(text));
+        Check(length > 0, "format fits the buffer", __FILE__, __LINE__);
+        char tiny[8];
+        Check(FormatFpsConfig(written, tiny, sizeof(tiny)) == 0, "format reports a short buffer", __FILE__, __LINE__);
+        FpsConfig parsed;
+        ParseFpsConfig(text, length, parsed);
+        Check(parsed == written, "format and parse round trip", __FILE__, __LINE__);
+
+        // Locale changes must not alter the format.
+        const std::string previousLocale = std::setlocale(LC_ALL, nullptr);
+        std::setlocale(LC_ALL, "de-DE");
+        char localized[512];
+        const size_t localizedLength = FormatFpsConfig(written, localized, sizeof(localized));
+        std::setlocale(LC_ALL, previousLocale.c_str());
+        Check(localizedLength == length && std::memcmp(localized, text, length) == 0,
+              "format ignores the C locale", __FILE__, __LINE__);
+
+        // Tolerant parsing: comments, sections, whitespace, case, CRLF, unknown keys.
+        const char messy[] = "; c\n[Section]\n  corner =  topright \r\n# x\nUnknown=1\nSCALEPERCENT=9999\nShowCounter=0";
+        FpsConfig messyConfig;
+        ParseFpsConfig(messy, sizeof(messy) - 1, messyConfig);
+        Check(messyConfig.corner == FpsCorner::TopRight, "corner parsed case-insensitively", __FILE__, __LINE__);
+        Check(messyConfig.scalePercent == kFpsMaxScalePercent, "scale clamped high", __FILE__, __LINE__);
+        Check(!messyConfig.showCounter, "last line without newline parsed", __FILE__, __LINE__);
+
+        const char bad[] = "Corner=Middle\nScalePercent=abc\nShowCounter=\nScalePercent=1\n";
+        FpsConfig badConfig;
+        ParseFpsConfig(bad, sizeof(bad) - 1, badConfig);
+        Check(badConfig.corner == FpsCorner::TopLeft && badConfig.showCounter, "bad values keep defaults", __FILE__, __LINE__);
+        Check(badConfig.scalePercent == kFpsMinScalePercent, "scale clamped low", __FILE__, __LINE__);
+
+        // Corner placement.
+        const FpsCornerPlacement tl = ComputeFpsCornerPlacement(FpsCorner::TopLeft, 1920, 1080, 10);
+        const FpsCornerPlacement tr = ComputeFpsCornerPlacement(FpsCorner::TopRight, 1920, 1080, 10);
+        const FpsCornerPlacement bl = ComputeFpsCornerPlacement(FpsCorner::BottomLeft, 1920, 1080, 10);
+        const FpsCornerPlacement br = ComputeFpsCornerPlacement(FpsCorner::BottomRight, 1920, 1080, 10);
+        Check(tl.x == 10 && tl.y == 10 && tl.pivotX == 0 && tl.pivotY == 0, "top left", __FILE__, __LINE__);
+        Check(tr.x == 1910 && tr.y == 10 && tr.pivotX == 1 && tr.pivotY == 0, "top right", __FILE__, __LINE__);
+        Check(bl.x == 10 && bl.y == 1070 && bl.pivotX == 0 && bl.pivotY == 1, "bottom left", __FILE__, __LINE__);
+        Check(br.x == 1910 && br.y == 1070 && br.pivotX == 1 && br.pivotY == 1, "bottom right", __FILE__, __LINE__);
+
+        // File placement: first writable directory wins, then the file stays where it was found.
+        wchar_t temp[MAX_PATH];
+        GetTempPathW(MAX_PATH, temp);
+        const std::wstring root = std::wstring(temp) + L"HydraHookFpsConfig" + std::to_wstring(GetCurrentProcessId());
+        const std::wstring processDir = root + L"\\process\\";
+        const std::wstring dllDir = root + L"\\dll\\";
+        CreateDirectoryW(root.c_str(), nullptr);
+        CreateDirectoryW((root + L"\\process").c_str(), nullptr);
+        CreateDirectoryW((root + L"\\dll").c_str(), nullptr);
+
+        {
+            FpsConfigStore store;
+            store.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            FpsConfig loaded;
+            Check(!store.Load(loaded), "no file yet", __FILE__, __LINE__);
+            Check(store.Save(written), "save succeeds", __FILE__, __LINE__);
+            Check(std::wstring(store.ActivePath()) == processDir + L"HydraHook-FPS.ini", "saved to the process directory", __FILE__, __LINE__);
+        }
+        {
+            FpsConfigStore store;
+            store.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            FpsConfig loaded;
+            Check(store.Load(loaded) && loaded == written, "loaded from the process directory", __FILE__, __LINE__);
+        }
+        DeleteFileW((processDir + L"HydraHook-FPS.ini").c_str());
+        {
+            // Process directory missing: falls back to the DLL directory.
+            FpsConfigStore store;
+            store.Init((root + L"\\missing\\").c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            Check(store.Save(written), "save falls back", __FILE__, __LINE__);
+            Check(std::wstring(store.ActivePath()) == dllDir + L"HydraHook-FPS.ini", "saved to the DLL directory", __FILE__, __LINE__);
+        }
+        {
+            FpsConfigStore store;
+            store.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            FpsConfig loaded;
+            Check(store.Load(loaded) && loaded == written, "loaded from the DLL directory", __FILE__, __LINE__);
+            FpsConfig changed = written;
+            changed.scalePercent = 80;
+            Check(store.Save(changed), "save after load", __FILE__, __LINE__);
+            Check(std::wstring(store.ActivePath()) == dllDir + L"HydraHook-FPS.ini", "save stays where the file was found", __FILE__, __LINE__);
+        }
+        DeleteFileW((dllDir + L"HydraHook-FPS.ini").c_str());
+        {
+            // A read-only file that was loaded: save fails instead of writing a file Load would ignore.
+            const std::wstring locked = processDir + L"HydraHook-FPS.ini";
+            FpsConfigStore seed;
+            seed.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            seed.Save(written);
+            SetFileAttributesW(locked.c_str(), FILE_ATTRIBUTE_READONLY);
+            FpsConfigStore store;
+            store.Init(processDir.c_str(), dllDir.c_str(), L"HydraHook-FPS.ini");
+            FpsConfig loaded;
+            Check(store.Load(loaded), "read-only file still loads", __FILE__, __LINE__);
+            Check(!store.Save(written), "failed write is not redirected", __FILE__, __LINE__);
+            Check(GetFileAttributesW((dllDir + L"HydraHook-FPS.ini").c_str()) == INVALID_FILE_ATTRIBUTES,
+                  "no shadow file in the DLL directory", __FILE__, __LINE__);
+            SetFileAttributesW(locked.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(locked.c_str());
+        }
+        RemoveDirectoryW((root + L"\\process").c_str());
+        RemoveDirectoryW((root + L"\\dll").c_str());
+        RemoveDirectoryW(root.c_str());
     }
 
     void TestResettableInitGuard()
@@ -891,6 +1022,8 @@ int main()
     TestExceptions();
     TestCrashHandler();
     TestFrameRate();
+    TestKeyToggle();
+    TestFpsConfig();
     TestResettableInitGuard();
     TestWindowProcHook();
     TestOverlayReleaseClaim();
