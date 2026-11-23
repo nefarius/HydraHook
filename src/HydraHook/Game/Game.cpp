@@ -743,16 +743,24 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 #ifndef HYDRAHOOK_NO_D3D12
 	size_t d3d12ExecuteCommandListsAddress = 0;
+	HMODULE ownedDxgiModule = nullptr;
 
 	if (config.Direct3D.HookDirect3D12)
 	{
 		// Install early-injection factory hooks BEFORE probing so concurrent game
 		// swap-chain creation on other threads is captured while the worker probes.
+		// Load system dxgi.dll if not already loaded so early injection before DXGI
+		// loads still captures the swap chain's presentation queue.
 		// Only this thread's temporary probe swap chains are suppressed via thread_local.
 		try
 		{
 			IDXGIFactory2* pFactory = nullptr;
 			HMODULE hModDXGI = GetModuleHandleW(L"dxgi.dll");
+			if (!hModDXGI)
+			{
+				ownedDxgiModule = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+				hModDXGI = ownedDxgiModule;
+			}
 			HRESULT hrFactory = E_FAIL;
 			if (hModDXGI)
 			{
@@ -856,6 +864,12 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		catch (DetourException& ex)
 		{
 			logger->error("Hooking D3D12 factory queue capture failed: {}", ex.what());
+		}
+
+		if (ownedDxgiModule && !createSwapChain12Hook.is_applied() && !createSwapChainForHwnd12Hook.is_applied())
+		{
+			FreeLibrary(ownedDxgiModule);
+			ownedDxgiModule = nullptr;
 		}
 
 		try
@@ -1966,6 +1980,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		ZeroMemory(&engine->EventsD3D11, sizeof(engine->EventsD3D11));
 		ZeroMemory(&engine->EventsD3D12, sizeof(engine->EventsD3D12));
 		ZeroMemory(&engine->EventsARC, sizeof(engine->EventsARC));
+
+#ifndef HYDRAHOOK_NO_D3D12
+		if (ownedDxgiModule && allRemoved)
+		{
+			FreeLibrary(ownedDxgiModule);
+			ownedDxgiModule = nullptr;
+		}
+#endif
 	}
 
 	//
