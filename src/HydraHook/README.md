@@ -169,7 +169,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 
 `tests/cpp/` builds three projects, wired into `HydraHook.sln` under the `tests` folder. They build with the `Debug_LIB` and `Release_LIB` solution configurations and link the static library (the smoke host does; the smoke runner loads that host).
 
-- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, and `FrameRate`.
+- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers). No test exercises a real game hook/unhook/rehook cycle.
 - `HydraHookTestHost` is a small DLL that enables D3D11 hooking and exports shared counters.
 - `HydraHookWarpSmokeTests` creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
 
