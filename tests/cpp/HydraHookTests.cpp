@@ -998,6 +998,130 @@ namespace
             }
         }
 
+        // Deferred capture-release fallback when SendMessageTimeoutW times out and PostMessageW fails:
+        // keeping the hook attached lets the next pumped message release capture on the window-owning
+        // thread while forwarding that message to the host WNDPROC.
+        {
+            static std::atomic<bool> s_inputClosed{false};
+            static std::atomic<bool> s_overlayOwnsCapture{false};
+            static std::atomic<uint32_t> s_forwardedButtons{0};
+            static std::atomic<DWORD> s_releaseThreadId{0};
+            static std::atomic<int> s_releaseCalls{0};
+            static HANDLE s_blockOwnerEvent = nullptr;
+            static HANDLE s_ownerBlockedEvent = nullptr;
+
+            s_inputClosed.store(false);
+            s_overlayOwnsCapture.store(true);
+            s_forwardedButtons.store(1u);
+            s_releaseThreadId.store(0);
+            s_releaseCalls.store(0);
+            s_blockOwnerEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            s_ownerBlockedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+            std::atomic<HWND> fbHwnd{nullptr};
+            std::atomic<DWORD> fbOwnerTid{0};
+            std::atomic<int> fbReady{0};
+            std::atomic<bool> captureAcquired{false};
+            static std::atomic<bool> s_captureClearedAfterFallback{false};
+            s_captureClearedAfterFallback.store(false);
+
+            std::thread fbOwner([&]()
+            {
+                fbOwnerTid.store(GetCurrentThreadId());
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    fbReady.store(-1);
+                    return;
+                }
+                SetCapture(hw);
+                captureAcquired.store(GetCapture() == hw);
+                fbHwnd.store(hw);
+                fbReady.store(1);
+
+                // Block briefly so cross-thread SendMessageTimeoutW times out.
+                SetEvent(s_ownerBlockedEvent);
+                WaitForSingleObject(s_blockOwnerEvent, 5000);
+
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+
+            while (fbReady.load() == 0)
+                SwitchToThread();
+            if (fbReady.load() < 0)
+            {
+                SetEvent(s_blockOwnerEvent);
+                fbOwner.join();
+                Check(false, "deferred-release owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = fbHwnd.load();
+                hook.SetMessageHandler([](HWND hWnd, UINT, WPARAM, LPARAM) -> LRESULT
+                {
+                    if (ShouldFallbackReleaseOnClosedInput(s_inputClosed, s_overlayOwnsCapture, s_forwardedButtons))
+                    {
+                        s_releaseThreadId.store(GetCurrentThreadId());
+                        const bool ownedCapture = s_overlayOwnsCapture.exchange(false);
+                        s_forwardedButtons.exchange(0);
+                        if (ownedCapture && GetCapture() == hWnd)
+                            ReleaseCapture();
+                        s_captureClearedAfterFallback.store(GetCapture() == nullptr);
+                        ++s_releaseCalls;
+                        return 0;
+                    }
+                    return 0;
+                });
+                Check(hook.Hook(hw), "hook installed for deferred-release fallback", __FILE__, __LINE__);
+                Check(WaitForSingleObject(s_ownerBlockedEvent, 2000) == WAIT_OBJECT_0,
+                      "owner thread entered blocked state", __FILE__, __LINE__);
+
+                // Simulate UnhookWindowProc: close input, attempt SendMessageTimeoutW (times out),
+                // simulate PostMessageW failure (no release message queued), keep state and hook intact.
+                s_inputClosed.store(true);
+                DWORD_PTR sendResult = 0;
+                const LRESULT sent = SendMessageTimeoutW(
+                    hw, WM_APP + 50, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 30, &sendResult);
+                Check(sent == 0, "SendMessageTimeoutW times out while window thread is blocked", __FILE__, __LINE__);
+                Check(ShouldFallbackReleaseOnClosedInput(s_inputClosed, s_overlayOwnsCapture, s_forwardedButtons),
+                      "release obligation retained after timeout and failed PostMessageW", __FILE__, __LINE__);
+
+                // Unblock window thread and send a normal host message without any queued release message.
+                SetEvent(s_blockOwnerEvent);
+                Check(SendMessageW(hw, WM_APP + 1, 0, 0) == 0x1234,
+                      "host WNDPROC still receives the next message after fallback release", __FILE__, __LINE__);
+                Check(s_releaseCalls.load() == 1,
+                      "fallback release ran once on next pumped message", __FILE__, __LINE__);
+                Check(s_releaseThreadId.load() == fbOwnerTid.load(),
+                      "fallback release ran on window-owning thread", __FILE__, __LINE__);
+                Check(!s_overlayOwnsCapture.load() && s_forwardedButtons.load() == 0,
+                      "fallback release cleared capture and button state", __FILE__, __LINE__);
+                if (captureAcquired.load())
+                    Check(s_captureClearedAfterFallback.load(),
+                          "fallback release cleared Win32 capture on owner thread", __FILE__, __LINE__);
+
+                Check(hook.UnhookAll(500), "UnhookAll succeeds after fallback release", __FILE__, __LINE__);
+                SendMessageW(hw, WM_APP + 9, 0, 0);
+                fbOwner.join();
+            }
+
+            if (s_blockOwnerEvent)
+            {
+                CloseHandle(s_blockOwnerEvent);
+                s_blockOwnerEvent = nullptr;
+            }
+            if (s_ownerBlockedEvent)
+            {
+                CloseHandle(s_ownerBlockedEvent);
+                s_ownerBlockedEvent = nullptr;
+            }
+        }
+
         hook.SetMessageHandler(nullptr);
         hook.SetErrorLogger(nullptr);
         hook.SetBeforeDispatch(nullptr);

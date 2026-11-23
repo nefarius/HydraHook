@@ -1335,7 +1335,7 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	// If unhook closed input while capture or forwarded buttons were still held (for example,
 	// SendMessageTimeoutW timed out and PostMessageW also failed), release directly on the
 	// window-owning thread as soon as any message is pumped, then forward the message normally.
-	if (g_InputClosed.load() && (g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0))
+	if (ShouldFallbackReleaseOnClosedInput(g_InputClosed, g_OverlayOwnsCapture, g_ForwardedButtons))
 	{
 		ReleaseOverlayInput(hWnd, 0, true);
 		return 0;
