@@ -16,7 +16,15 @@ Build the project, then inject `HydraHook-ImGui.dll` into a target process using
 
 Replace `hl2.exe` with your target process name.
 
+## Input
+
+- Mouse and keyboard messages reach ImGui through a per-window `WNDPROC` hook (`WindowProcHook.h`). It uses `SetWindowLongPtrW` and forwards to the original procedure with `CallWindowProcW`.
+- `F12` toggles the overlay. While it is hidden, no messages are passed to ImGui.
+- ImGui sees every message first. If it returns non-zero, the host window does not receive that message. The sample does not consult `WantCaptureMouse` / `WantCaptureKeyboard`.
+- `WM_DESTROY` and `WM_NCDESTROY` always reach the host procedure.
+- On unhook the original procedure is restored. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through until the window is destroyed.
+
 ## Limitations
 
 > [!NOTE]
-> Mouse, keyboard and gamepad support is currently not implemented.
+> Gamepad navigation is not enabled.

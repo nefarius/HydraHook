@@ -24,15 +24,12 @@ SOFTWARE.
 
 #include "dllmain.h"
 #include "InitGuard.h"
-
-// 
-// Detours
-// 
-#include <detours/detours.h>
+#include "WindowProcHook.h"
 
 // 
 // STL
 // 
+#include <atomic>
 #include <mutex>
 #include <wrl/client.h>
 
@@ -49,8 +46,8 @@ SOFTWARE.
 #endif
 #include <imgui_impl_win32.h>
 
-t_WindowProc OriginalDefWindowProc = nullptr;
-t_WindowProc OriginalWindowProc = nullptr;
+// Overlay visibility (F12). Shared with the window-proc hook so input is only fed to ImGui while visible.
+static std::atomic<bool> g_ShowOverlay{ true };
 
 static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
 
@@ -244,6 +241,9 @@ void EvtHydraHookGameUnhooked(
 
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
+	// Restore window procedures and drain in-flight messages before ImGui is torn down
+	UnhookWindowProc();
+
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 	{
@@ -295,26 +295,7 @@ void EvtHydraHookGameUnhooked(
 	g_d3d12InitGuard.Reset();
 #endif
 
-#ifdef WNDPROC_HOOK
-	// Restore original window procedure by disabling MinHook trampolines and clearing hook state
-	if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't disable WNDPROC hooks, host process might crash");
-	}
-	else
-	{
-		HydraHookEngineLogInfo("WNDPROC hooks disabled");
-	}
-
-	if (MH_Uninitialize() != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't shut down MinHook, host process might crash");
-	}
-
-	OriginalWindowProc = nullptr;
-	OriginalDefWindowProc = nullptr;
-#endif
-
+	g_ShowOverlay.store(true);
 	g_GameVersion = HydraHookDirect3DVersionUnknown;
 }
 
@@ -328,8 +309,6 @@ void EvtHydraHookD3D9Present(
 	const RGNDATA       *pDirtyRegion
 )
 {
-	static bool show_overlay = true;
-
 	//
 	// This section is only called once to initialize ImGui
 	// 
@@ -357,8 +336,10 @@ void EvtHydraHookD3D9Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	bool showOverlay = g_ShowOverlay.load();
+	TOGGLE_STATE(VK_F12, showOverlay);
+	g_ShowOverlay.store(showOverlay);
+	if (!showOverlay)
 		return;
 
 	// Start the Dear ImGui frame
@@ -439,8 +420,6 @@ void EvtHydraHookD3D10Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
-	static bool show_overlay = true;
-
 	//
 	// This section is only called once to initialize ImGui
 	// 
@@ -472,8 +451,10 @@ void EvtHydraHookD3D10Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	bool showOverlay = g_ShowOverlay.load();
+	TOGGLE_STATE(VK_F12, showOverlay);
+	g_ShowOverlay.store(showOverlay);
+	if (!showOverlay)
 		return;
 
 
@@ -514,8 +495,6 @@ void EvtHydraHookD3D11Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
-	static bool show_overlay = true;
-
 	//
 	// This section is only called once to initialize ImGui
 	// 
@@ -547,8 +526,10 @@ void EvtHydraHookD3D11Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	bool showOverlay = g_ShowOverlay.load();
+	TOGGLE_STATE(VK_F12, showOverlay);
+	g_ShowOverlay.store(showOverlay);
+	if (!showOverlay)
 		return;
 
 	// Start the Dear ImGui frame
@@ -798,8 +779,6 @@ void EvtHydraHookD3D12Present(
 	(void)SyncInterval;
 	(void)Extension;
 
-	static bool show_overlay = true;
-
 	// Retries on failure: the command queue may not be captured yet (mid-process injection)
 	const bool initialized = g_d3d12InitGuard.EnsureInitialized([&]() -> bool
 	{
@@ -896,8 +875,10 @@ void EvtHydraHookD3D12Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	bool showOverlay = g_ShowOverlay.load();
+	TOGGLE_STATE(VK_F12, showOverlay);
+	g_ShowOverlay.store(showOverlay);
+	if (!showOverlay)
 		return;
 
 	UINT backBufferIdx = 0;
@@ -1028,134 +1009,50 @@ void EvtHydraHookD3D12PostResizeBuffers(
 
 #pragma region WNDPROC Hooking
 
+static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	static std::once_flag flag;
+	std::call_once(flag, []() { HydraHookEngineLogInfo("++ WndProc hook received first message"); });
+
+	// Only feed input to ImGui while the overlay is visible and a context exists
+	if (!g_ShowOverlay.load() || !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
+		return 0;
+
+	return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+}
+
+static void WindowProcHookLogError(const char* message)
+{
+	HydraHookEngineLogError("%s", message);
+}
+
 /**
- * @brief Installs hooks for window-procedure dispatch to intercept input and forward to ImGui.
+ * @brief Hooks the window procedure of the given window to forward input to ImGui.
  *
- * Creates and enables hooks for DefWindowProcW, DefWindowProcA, and the specified window's
- * GWLP_WNDPROC, and stores the original function pointers in `OriginalDefWindowProc` and
- * `OriginalWindowProc` for later unhooking or forwarding.
- *
- * @note This function has effect only when `WNDPROC_HOOK` is enabled at build time.
+ * Validates the handle, stores the original WNDPROC per window and forwards unhandled
+ * messages with CallWindowProcW. See WindowProcHook.h for threading and teardown rules.
  *
  * @param hWnd Handle to the target window whose window procedure will be hooked.
  */
 void HookWindowProc(HWND hWnd)
 {
-	// TODO: fix me pls!
-#ifdef WNDPROC_HOOK
+	auto& hook = WindowProcHook::Instance();
+	hook.SetErrorLogger(WindowProcHookLogError);
+	hook.SetMessageHandler(ImGuiMessageHandler);
 
-	auto& logger = Logger::get(__func__);
-
-	MH_STATUS ret;
-
-	if ((ret = MH_CreateHook(
-		&DefWindowProcW,
-		&DetourDefWindowProc,
-		reinterpret_cast<LPVOID*>(&OriginalDefWindowProc))
-		) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't create hook for DefWindowProcW: %lu", static_cast<ULONG>(ret));
-		return;
-	}
-
-	if (ret == MH_OK && MH_EnableHook(&DefWindowProcW) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable DefWindowProcW hook");
-	}
-
-	if ((ret = MH_CreateHook(
-		&DefWindowProcA,
-		&DetourDefWindowProc,
-		reinterpret_cast<LPVOID*>(&OriginalDefWindowProc))
-		) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't create hook for DefWindowProcA: %lu", static_cast<ULONG>(ret));
-		return;
-	}
-
-	if (ret == MH_OK && MH_EnableHook(&DefWindowProcA) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable DefWindowProcW hook");
-	}
-
-	auto lptrWndProc = reinterpret_cast<t_WindowProc>(GetWindowLongPtr(hWnd, GWLP_WNDPROC));
-
-	if (MH_CreateHook(lptrWndProc, &DetourWindowProc, reinterpret_cast<LPVOID*>(&OriginalWindowProc)) != MH_OK)
-	{
-		logger.warning("Couldn't create hook for GWLP_WNDPROC");
-		return;
-	}
-
-	if (MH_EnableHook(lptrWndProc) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable GWLP_WNDPROC hook");
-	}
-#endif
-}
-
-LRESULT WINAPI DetourDefWindowProc(
-	_In_ HWND hWnd,
-	_In_ UINT Msg,
-	_In_ WPARAM wParam,
-	_In_ LPARAM lParam
-)
-{
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ DetourDefWindowProc called"); });
-
-	ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
-
-	return OriginalDefWindowProc(hWnd, Msg, wParam, lParam);
-}
-
-LRESULT WINAPI DetourWindowProc(
-	_In_ HWND hWnd,
-	_In_ UINT Msg,
-	_In_ WPARAM wParam,
-	_In_ LPARAM lParam
-)
-{
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ DetourWindowProc called"); });
-
-	ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
-
-	return OriginalWindowProc(hWnd, Msg, wParam, lParam);
-}
-
-#pragma endregion
-
-#pragma region ImGui-specific (taken from their examples unmodified)
-
-bool ImGui_ImplWin32_UpdateMouseCursor()
-{
-	ImGuiIO& io = ImGui::GetIO();
-	if (io.ConfigFlags & ImGuiConfigFlags_NoMouseCursorChange)
-		return false;
-
-	ImGuiMouseCursor imgui_cursor = io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor();
-	if (imgui_cursor == ImGuiMouseCursor_None)
-	{
-		// Hide OS mouse cursor if imgui is drawing it or if it wants no cursor
-		::SetCursor(NULL);
-	}
+	if (hook.Hook(hWnd))
+		HydraHookEngineLogInfo("WNDPROC hook installed");
 	else
-	{
-		// Hardware cursor type
-		LPTSTR win32_cursor = IDC_ARROW;
-		switch (imgui_cursor)
-		{
-		case ImGuiMouseCursor_Arrow:        win32_cursor = IDC_ARROW; break;
-		case ImGuiMouseCursor_TextInput:    win32_cursor = IDC_IBEAM; break;
-		case ImGuiMouseCursor_ResizeAll:    win32_cursor = IDC_SIZEALL; break;
-		case ImGuiMouseCursor_ResizeEW:     win32_cursor = IDC_SIZEWE; break;
-		case ImGuiMouseCursor_ResizeNS:     win32_cursor = IDC_SIZENS; break;
-		case ImGuiMouseCursor_ResizeNESW:   win32_cursor = IDC_SIZENESW; break;
-		case ImGuiMouseCursor_ResizeNWSE:   win32_cursor = IDC_SIZENWSE; break;
-		}
-		::SetCursor(::LoadCursor(NULL, win32_cursor));
-	}
-	return true;
+		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
+}
+
+/**
+ * @brief Restores all hooked window procedures and waits for in-flight messages to finish.
+ */
+void UnhookWindowProc()
+{
+	WindowProcHook::Instance().UnhookAll();
+	HydraHookEngineLogInfo("WNDPROC hooks removed");
 }
 
 #pragma endregion

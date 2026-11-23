@@ -15,6 +15,7 @@
 #include "Utils/Hook.h"
 #include "FrameRate.h"
 #include "InitGuard.h"
+#include "WindowProcHook.h"
 
 #include <atomic>
 #include <chrono>
@@ -449,6 +450,207 @@ namespace
         }
     }
 
+    std::atomic<int> g_origMessages{0};
+    std::atomic<int> g_origDestroy{0};
+    std::atomic<int> g_origNcDestroy{0};
+    std::atomic<int> g_handlerCalls{0};
+    std::atomic<int> g_errorCalls{0};
+    std::atomic<LRESULT> g_reentrantResult{-1};
+
+    LRESULT CALLBACK TestOrigProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        ++g_origMessages;
+        switch (msg)
+        {
+        case WM_APP + 1:
+            return 0x1234;
+        case WM_APP + 9:
+            DestroyWindow(hWnd);
+            PostQuitMessage(0);
+            return 0;
+        case WM_DESTROY:
+            ++g_origDestroy;
+            break;
+        case WM_NCDESTROY:
+            ++g_origNcDestroy;
+            break;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    LRESULT CALLBACK TestOuterProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    WNDPROC g_outerPrevious = nullptr;
+
+    LRESULT CALLBACK TestOuterProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        return CallWindowProcW(g_outerPrevious, hWnd, msg, wParam, lParam);
+    }
+
+    LRESULT TestHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        (void)wParam;
+        (void)lParam;
+        ++g_handlerCalls;
+        if (msg == WM_APP + 2)
+            return 0x77;
+        if (msg == WM_APP + 3)
+            g_reentrantResult = SendMessageW(hWnd, WM_APP + 1, 0, 0);
+        return 0;
+    }
+
+    void TestErrorLogger(const char*)
+    {
+        ++g_errorCalls;
+    }
+
+    HWND MakeTestWindow()
+    {
+        static bool registered = false;
+        if (!registered)
+        {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = TestOrigProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"HydraHookWndProcTest";
+            RegisterClassW(&wc);
+            registered = true;
+        }
+        return CreateWindowExW(0, L"HydraHookWndProcTest", L"t", WS_OVERLAPPED, 0, 0, 16, 16,
+                               nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    }
+
+    void TestWindowProcHook()
+    {
+        auto& hook = WindowProcHook::Instance();
+        hook.SetErrorLogger(TestErrorLogger);
+        hook.SetMessageHandler(TestHandler);
+
+        // Input validation
+        Check(!hook.Hook(nullptr), "hook rejects null window", __FILE__, __LINE__);
+        Check(g_errorCalls.load() == 1, "null window logged", __FILE__, __LINE__);
+        HWND dead = MakeTestWindow();
+        DestroyWindow(dead);
+        Check(!hook.Hook(dead), "hook rejects destroyed window", __FILE__, __LINE__);
+        Check(g_errorCalls.load() == 2, "destroyed window logged", __FILE__, __LINE__);
+
+        // Interception and forwarding
+        HWND w1 = MakeTestWindow();
+        Check(w1 != nullptr, "test window created", __FILE__, __LINE__);
+        Check(hook.Hook(w1), "hook window", __FILE__, __LINE__);
+        Check(hook.Hook(w1), "duplicate hook is idempotent", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 1 && hook.IsHooked(w1), "single tracked window", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w1, GWLP_WNDPROC) != reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "dispatcher installed", __FILE__, __LINE__);
+
+        g_handlerCalls = 0;
+        g_origMessages = 0;
+        Check(SendMessageW(w1, WM_APP + 1, 0, 0) == 0x1234, "unhandled message forwarded to original", __FILE__, __LINE__);
+        Check(g_handlerCalls.load() == 1 && g_origMessages.load() == 1, "handler then original", __FILE__, __LINE__);
+        g_origMessages = 0;
+        Check(SendMessageW(w1, WM_APP + 2, 0, 0) == 0x77, "handler result short-circuits", __FILE__, __LINE__);
+        Check(g_origMessages.load() == 0, "original skipped when handled", __FILE__, __LINE__);
+
+        // Re-entrant SendMessage from the handler
+        g_reentrantResult = -1;
+        SendMessageW(w1, WM_APP + 3, 0, 0);
+        Check(g_reentrantResult.load() == 0x1234, "re-entrant send does not deadlock", __FILE__, __LINE__);
+
+        // Independent windows, selective unhook
+        HWND w2 = MakeTestWindow();
+        Check(hook.Hook(w2), "hook second window", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 2, "two tracked windows", __FILE__, __LINE__);
+        Check(hook.Unhook(w1), "unhook restores", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w1, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "original restored", __FILE__, __LINE__);
+        Check(!hook.IsHooked(w1) && hook.IsHooked(w2), "second window untouched", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        SendMessageW(w1, WM_APP + 1, 0, 0);
+        Check(g_handlerCalls.load() == 0, "unhooked window bypasses handler", __FILE__, __LINE__);
+
+        // Destroy messages reach the original and clean up
+        g_origDestroy = 0;
+        g_origNcDestroy = 0;
+        DestroyWindow(w2);
+        Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "destroy messages forwarded", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "destroyed window removed from map", __FILE__, __LINE__);
+        DestroyWindow(w1);
+
+        // Re-hook after UnhookAll
+        HWND w3 = MakeTestWindow();
+        Check(hook.Hook(w3), "hook before UnhookAll", __FILE__, __LINE__);
+        hook.UnhookAll();
+        Check(hook.HookedCount() == 0, "UnhookAll clears map", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w3, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "UnhookAll restores", __FILE__, __LINE__);
+        Check(hook.Hook(w3), "re-hook after UnhookAll", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        SendMessageW(w3, WM_APP + 1, 0, 0);
+        Check(g_handlerCalls.load() == 1, "handler active after re-hook", __FILE__, __LINE__);
+        hook.UnhookAll();
+        DestroyWindow(w3);
+
+        // Another party subclasses after us: do not clobber it
+        HWND w4 = MakeTestWindow();
+        Check(hook.Hook(w4), "hook before external subclass", __FILE__, __LINE__);
+        g_outerPrevious = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(w4, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&TestOuterProc)));
+        Check(!hook.Unhook(w4), "unhook refuses to drop outer subclass", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(w4, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOuterProc),
+              "outer subclass kept", __FILE__, __LINE__);
+        g_handlerCalls = 0;
+        Check(SendMessageW(w4, WM_APP + 1, 0, 0) == 0x1234, "pass-through still reaches original", __FILE__, __LINE__);
+        Check(g_handlerCalls.load() == 0, "pass-through skips handler", __FILE__, __LINE__);
+        g_origDestroy = 0;
+        g_origNcDestroy = 0;
+        DestroyWindow(w4);
+        Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "chained destroy forwarded", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "chained window removed on destroy", __FILE__, __LINE__);
+
+        // Cross-thread: owner thread pumps messages while another thread hooks/unhooks and sends
+        std::atomic<HWND> shared{nullptr};
+        std::thread owner([&]()
+        {
+            HWND hw = MakeTestWindow();
+            shared.store(hw);
+            MSG m;
+            while (GetMessageW(&m, nullptr, 0, 0) > 0)
+            {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        });
+        while (!shared.load())
+            SwitchToThread();
+        HWND shw = shared.load();
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> sent{0};
+        std::thread sender([&]()
+        {
+            while (!stop.load())
+            {
+                if (SendMessageW(shw, WM_APP + 1, 0, 0) == 0x1234)
+                    ++sent;
+            }
+        });
+        for (int i = 0; i < 100; ++i)
+        {
+            hook.Hook(shw);
+            Sleep(1);
+            hook.UnhookAll();
+        }
+        stop.store(true);
+        sender.join();
+        Check(sent.load() > 0, "messages delivered during hook churn", __FILE__, __LINE__);
+        Check(GetWindowLongPtrW(shw, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+              "original restored after churn", __FILE__, __LINE__);
+        SendMessageW(shw, WM_APP + 9, 0, 0);
+        owner.join();
+        Check(hook.HookedCount() == 0, "no tracked windows remain", __FILE__, __LINE__);
+
+        hook.SetMessageHandler(nullptr);
+        hook.SetErrorLogger(nullptr);
+    }
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -468,6 +670,7 @@ int main()
     TestCrashHandler();
     TestFrameRate();
     TestResettableInitGuard();
+    TestWindowProcHook();
     TestShutdownGuard();
 
     if (g_failures != 0)

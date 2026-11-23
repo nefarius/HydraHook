@@ -29,6 +29,9 @@
     <ClInclude Include="InitGuard.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="WindowProcHook.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
