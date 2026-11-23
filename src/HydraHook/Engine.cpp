@@ -110,6 +110,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	engine->DllModule = hMod;
 	engine->ShutdownCleanupDone.store(false);
 	engine->FreeLibraryHookActive.store(false);
+	engine->SkipDllUnloadOnExit.store(false);
+	engine->DrainIncomplete.store(false);
+	InitializeSRWLock(&engine->LifecycleLock);
+	HookActivityTracker::reset();
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
 
 	//
@@ -261,14 +265,152 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		engine->CrashHandlerInstalled = FALSE;
 	}
 
-	CloseHandle(engine->EngineCancellationEvent);
-	CloseHandle(engine->EngineThread);
+	if (engine->EngineCancellationEvent)
+	{
+		CloseHandle(engine->EngineCancellationEvent);
+	}
+	if (engine->EngineThread)
+	{
+		CloseHandle(engine->EngineThread);
+	}
 
 	g_EngineHostInstances.erase(HostInstance);
 	free(engine);
 
 	logger->info("Engine shutdown complete");
 	logger->flush();
+
+	return HYDRAHOOK_ERROR_NONE;
+}
+
+namespace
+{
+	struct LifecycleGuard
+	{
+		explicit LifecycleGuard(PSRWLOCK lock) : lock_(lock) { AcquireSRWLockExclusive(lock_); }
+		~LifecycleGuard() { ReleaseSRWLockExclusive(lock_); }
+		LifecycleGuard(const LifecycleGuard&) = delete;
+		LifecycleGuard& operator=(const LifecycleGuard&) = delete;
+
+	private:
+		PSRWLOCK lock_;
+	};
+}
+
+HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(PHYDRAHOOK_ENGINE Engine)
+{
+	if (!Engine)
+	{
+		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
+	}
+
+	LifecycleGuard lifecycle(&Engine->LifecycleLock);
+
+	if (!Engine->EngineThread)
+	{
+		return HYDRAHOOK_ERROR_NONE;
+	}
+
+	// The worker cannot wait for itself
+	if (GetThreadId(Engine->EngineThread) == GetCurrentThreadId())
+	{
+		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
+	}
+
+	// Keep the DLL loaded even if another shutdown path already claimed cleanup
+	Engine->SkipDllUnloadOnExit.store(true, std::memory_order_release);
+
+	PerformShutdownCleanup(Engine, ShutdownOrigin::ManualUnhook);
+
+	// PerformShutdownCleanup returns early when another path owns cleanup, and
+	// never terminates the worker on a manual unhook; confirm the worker is gone
+	// before releasing its handle or any engine state.
+	if (WaitForSingleObject(Engine->EngineThread, 8000) != WAIT_OBJECT_0)
+	{
+		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+	}
+
+	// The worker exits even if a callback outlives the drain timeout; keep the
+	// engine until those callbacks have returned.
+	if (Engine->DrainIncomplete.load(std::memory_order_acquire))
+	{
+		if (!HookActivityTracker::drain(1000))
+		{
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
+
+		ZeroMemory(&Engine->EventsD3D9, sizeof(Engine->EventsD3D9));
+		ZeroMemory(&Engine->EventsD3D10, sizeof(Engine->EventsD3D10));
+		ZeroMemory(&Engine->EventsD3D11, sizeof(Engine->EventsD3D11));
+		ZeroMemory(&Engine->EventsD3D12, sizeof(Engine->EventsD3D12));
+		ZeroMemory(&Engine->EventsARC, sizeof(Engine->EventsARC));
+		Engine->DrainIncomplete.store(false, std::memory_order_release);
+	}
+
+	CloseHandle(Engine->EngineThread);
+	Engine->EngineThread = nullptr;
+
+	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
+	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
+
+	return HYDRAHOOK_ERROR_NONE;
+}
+
+HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
+{
+	if (!Engine)
+	{
+		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
+	}
+
+	LifecycleGuard lifecycle(&Engine->LifecycleLock);
+
+	if (Engine->EngineThread)
+	{
+		if (WaitForSingleObject(Engine->EngineThread, 0) == WAIT_TIMEOUT)
+		{
+			return HYDRAHOOK_ERROR_NONE;
+		}
+
+		if (Engine->DrainIncomplete.load(std::memory_order_acquire)
+			&& !HookActivityTracker::drain(0))
+		{
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
+
+		CloseHandle(Engine->EngineThread);
+		Engine->EngineThread = nullptr;
+	}
+
+	Engine->DrainIncomplete.store(false, std::memory_order_release);
+
+	HookActivityTracker::reset();
+	Engine->ShutdownCleanupDone.store(false);
+	Engine->FreeLibraryHookActive.store(false);
+	Engine->SkipDllUnloadOnExit.store(false);
+	ResetEvent(Engine->EngineCancellationEvent);
+
+	Engine->EventsD3D9 = Engine->SavedEventsD3D9;
+	Engine->EventsD3D10 = Engine->SavedEventsD3D10;
+	Engine->EventsD3D11 = Engine->SavedEventsD3D11;
+	Engine->EventsD3D12 = Engine->SavedEventsD3D12;
+	Engine->EventsARC = Engine->SavedEventsARC;
+
+	Engine->EngineThread = CreateThread(
+		nullptr,
+		0,
+		reinterpret_cast<LPTHREAD_START_ROUTINE>(HydraHookMainThread),
+		Engine,
+		0,
+		nullptr
+	);
+
+	if (!Engine->EngineThread)
+	{
+		Engine->ShutdownCleanupDone.store(true);
+		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
+	}
 
 	return HYDRAHOOK_ERROR_NONE;
 }
@@ -330,9 +472,10 @@ HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                         PHYDRAHOOK_D3D9_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine)
+	if (Engine && Callbacks)
 	{
 		Engine->EventsD3D9 = *Callbacks;
+		Engine->SavedEventsD3D9 = *Callbacks;
 	}
 }
 
@@ -373,9 +516,10 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIREC
 HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                          PHYDRAHOOK_D3D10_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine)
+	if (Engine && Callbacks)
 	{
 		Engine->EventsD3D10 = *Callbacks;
+		Engine->SavedEventsD3D10 = *Callbacks;
 	}
 }
 
@@ -386,9 +530,10 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engin
 HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                          PHYDRAHOOK_D3D11_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine)
+	if (Engine && Callbacks)
 	{
 		Engine->EventsD3D11 = *Callbacks;
+		Engine->SavedEventsD3D11 = *Callbacks;
 	}
 }
 
@@ -399,9 +544,10 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D11EventCallbacks(PHYDRAHOOK_ENGINE Engin
 HYDRAHOOK_API VOID HydraHookEngineSetD3D12EventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                          PHYDRAHOOK_D3D12_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine)
+	if (Engine && Callbacks)
 	{
 		Engine->EventsD3D12 = *Callbacks;
+		Engine->SavedEventsD3D12 = *Callbacks;
 	}
 }
 
@@ -417,9 +563,10 @@ HYDRAHOOK_API ID3D12CommandQueue* HydraHookEngineGetD3D12CommandQueue(IDXGISwapC
 HYDRAHOOK_API VOID HydraHookEngineSetARCEventCallbacks(PHYDRAHOOK_ENGINE Engine,
                                                        PHYDRAHOOK_ARC_EVENT_CALLBACKS Callbacks)
 {
-	if (Engine)
+	if (Engine && Callbacks)
 	{
 		Engine->EventsARC = *Callbacks;
+		Engine->SavedEventsARC = *Callbacks;
 	}
 }
 

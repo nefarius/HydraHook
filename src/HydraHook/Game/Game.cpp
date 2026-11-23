@@ -108,6 +108,36 @@ static Hook<CallConvention::stdcall_t, VOID, UINT> g_exitProcessHook;
 static Hook<CallConvention::stdcall_t, void, int> g_postQuitMessageHook;
 static Hook<CallConvention::stdcall_t, BOOL, HMODULE> g_freeLibraryHook;
 
+//
+// Per-run worker state. File scope so hook lambdas can reach it and so every
+// worker run (initial hook or rehook) starts from a clean slate.
+//
+static PHYDRAHOOK_ENGINE engine = nullptr;
+static HYDRAHOOK_D3D_VERSION deviceVersion = HydraHookDirect3DVersionUnknown;
+
+/// Once-per-hook announcements; re-armed at the start of every worker run.
+static struct HookAnnouncements
+{
+	ResettableOnce present9, reset9, endScene9, present9Ex, reset9Ex;
+	ResettableOnce present10, resizeTarget10, resizeBuffers10;
+	ResettableOnce present11, resizeTarget11, resizeBuffers11;
+	ResettableOnce present12, resizeTarget12, resizeBuffers12;
+	ResettableOnce present1D3D12, present1D3D11, present1D3D10;
+	ResettableOnce resizeBuffers1D3D12, resizeBuffers1D3D11, resizeBuffers1D3D10;
+	ResettableOnce arcGetBuffer, arcReleaseBuffer;
+
+	void reset_all()
+	{
+		present9.reset(); reset9.reset(); endScene9.reset(); present9Ex.reset(); reset9Ex.reset();
+		present10.reset(); resizeTarget10.reset(); resizeBuffers10.reset();
+		present11.reset(); resizeTarget11.reset(); resizeBuffers11.reset();
+		present12.reset(); resizeTarget12.reset(); resizeBuffers12.reset();
+		present1D3D12.reset(); present1D3D11.reset(); present1D3D10.reset();
+		resizeBuffers1D3D12.reset(); resizeBuffers1D3D11.reset(); resizeBuffers1D3D10.reset();
+		arcGetBuffer.reset(); arcReleaseBuffer.reset();
+	}
+} g_announce;
+
 void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 {
 	if (engine->ShutdownCleanupDone.exchange(true))
@@ -131,6 +161,10 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		break;
 	case ShutdownOrigin::DllMainProcessDetach:
 		logChannel = "detach";
+		break;
+	case ShutdownOrigin::ManualUnhook:
+		logChannel = "unhook";
+		logMessage = "HydraHookEngineUnhook called, removing hooks and stopping the worker";
 		break;
 	}
 
@@ -158,7 +192,15 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		g_exitProcessHook.remove_nothrow();
 	}
 
-	if (origin != ShutdownOrigin::DllMainProcessDetach && engine->EngineConfig.EvtHydraHookGamePreExit)
+	else if (origin == ShutdownOrigin::ManualUnhook)
+	{
+		// The worker removes every hook (including the flow-control ones) on its own
+		// thread; touching Detours from here could race a worker still installing hooks.
+		engine->SkipDllUnloadOnExit.store(true, std::memory_order_release);
+	}
+
+	if (origin != ShutdownOrigin::DllMainProcessDetach && origin != ShutdownOrigin::ManualUnhook
+		&& engine->EngineConfig.EvtHydraHookGamePreExit)
 	{
 		engine->EngineConfig.EvtHydraHookGamePreExit(engine);
 	}
@@ -170,7 +212,10 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 	}
 
 	// wait on thread shutdown or check state
-	const DWORD waitTimeout = (origin == ShutdownOrigin::DllMainProcessDetach) ? 0 : 3000;
+	// A manual unhook waits long enough for HookActivityTracker::drain (5000 ms)
+	const DWORD waitTimeout = origin == ShutdownOrigin::DllMainProcessDetach
+		                          ? 0
+		                          : (origin == ShutdownOrigin::ManualUnhook ? 8000 : 3000);
 	const auto result = WaitForSingleObject(engine->EngineThread, waitTimeout);
 
 	switch (result)
@@ -182,7 +227,12 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->info("Thread shutdown complete");
 		break;
 	case WAIT_TIMEOUT:
-		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		if (origin == ShutdownOrigin::ManualUnhook)
+		{
+			// Never terminate on a manual unhook: the caller keeps the engine and can retry
+			logger->error("Thread hasn't finished clean-up within expected time, unhook incomplete");
+		}
+		else if (origin != ShutdownOrigin::DllMainProcessDetach)
 		{
 			TerminateThread(engine->EngineThread, 0);
 			logger->error("Thread hasn't finished clean-up within expected time, terminating");
@@ -192,11 +242,11 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->error("Unknown error, host process might crash");
 		break;
 	default:
-		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		if (origin != ShutdownOrigin::DllMainProcessDetach && origin != ShutdownOrigin::ManualUnhook)
 		{
 			TerminateThread(engine->EngineThread, 0);
 		}
-		logger->error("Unexpected return value, terminating");
+		logger->error("Unexpected return value");
 		break;
 	}
 }
@@ -220,7 +270,9 @@ void HookDInput8(size_t* vtable8);
 DWORD WINAPI HydraHookMainThread(LPVOID Params)
 {
 	auto logger = spdlog::get("HYDRAHOOK")->clone("game");
-	static auto engine = reinterpret_cast<PHYDRAHOOK_ENGINE>(Params);
+	engine = reinterpret_cast<PHYDRAHOOK_ENGINE>(Params);
+	deviceVersion = HydraHookDirect3DVersionUnknown;
+	g_announce.reset_all();
 	const auto& config = engine->EngineConfig;
 
 	if (config.CrashHandler.IsEnabled)
@@ -322,6 +374,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	 */
 	try
 	{
+		if (!g_exitProcessHook.is_applied())
 		g_exitProcessHook.apply((size_t)ExitProcess, [](UINT uExitCode)
 		{
 			PerformShutdownCleanup(engine, ShutdownOrigin::ExitProcessHook);
@@ -340,6 +393,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	 */
 	try
 	{
+		if (!g_postQuitMessageHook.is_applied())
 		g_postQuitMessageHook.apply((size_t)PostQuitMessage, [](int nExitCode)
 		{
 			PerformShutdownCleanup(engine, ShutdownOrigin::PostQuitMessageHook);
@@ -358,6 +412,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	 */
 	try
 	{
+		if (!g_freeLibraryHook.is_applied())
 		g_freeLibraryHook.apply((size_t)FreeLibrary, [](HMODULE hLibModule) -> BOOL
 		{
 			if (hLibModule == engine->DllModule)
@@ -494,8 +549,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                   if (guard.invoke)
 				                   {
-					                   static std::once_flag flag;
-					                   std::call_once(flag, [&pDev = dev]()
+					                   g_announce.present9.call([&pDev = dev]()
 					                   {
 						                   spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                   "++ IDirect3DDevice9Ex::Present called");
@@ -529,8 +583,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                 if (guard.invoke)
 				                 {
-					                 static std::once_flag flag;
-					                 std::call_once(flag, []()
+					                 g_announce.reset9.call([]()
 					                 {
 						                 spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                 "++ IDirect3DDevice9Ex::Reset called");
@@ -559,8 +612,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                    if (guard.invoke)
 				                    {
-					                    static std::once_flag flag;
-					                    std::call_once(flag, []()
+					                    g_announce.endScene9.call([]()
 					                    {
 						                    spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                    "++ IDirect3DDevice9Ex::EndScene called");
@@ -594,8 +646,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                     if (guard.invoke)
 				                     {
-					                     static std::once_flag flag;
-					                     std::call_once(flag, [&pDev = dev]()
+					                     g_announce.present9Ex.call([&pDev = dev]()
 					                     {
 						                     spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                     "++ IDirect3DDevice9Ex::PresentEx called");
@@ -633,8 +684,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                   if (guard.invoke)
 				                   {
-					                   static std::once_flag flag;
-					                   std::call_once(flag, []()
+					                   g_announce.reset9Ex.call([]()
 					                   {
 						                   spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                   "++ IDirect3DDevice9Ex::ResetEx called");
@@ -673,7 +723,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 #pragma region D3D10
 
-	static HYDRAHOOK_D3D_VERSION deviceVersion = HydraHookDirect3DVersionUnknown;
 	size_t dxgiPresentAddress = 0;
 	size_t dxgiPresent1Address = 0;
 	size_t dxgiResizeBuffers1Address = 0;
@@ -699,8 +748,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                             if (guard.invoke)
 				                             {
-					                             static std::once_flag flag;
-					                             std::call_once(flag, [&pChain = chain]()
+					                             g_announce.present10.call([&pChain = chain]()
 					                             {
 						                             auto l = spdlog::get("HYDRAHOOK")->clone("d3d10");
 						                             l->info("++ IDXGISwapChain::Present called");
@@ -793,8 +841,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                                  if (guard.invoke)
 				                                  {
-					                                  static std::once_flag flag;
-					                                  std::call_once(flag, []()
+					                                  g_announce.resizeTarget10.call([]()
 					                                  {
 						                                  spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 							                                  "++ IDXGISwapChain::ResizeTarget called");
@@ -869,8 +916,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                                   if (guard.invoke)
 				                                   {
-					                                   static std::once_flag flag;
-					                                   std::call_once(flag, []()
+					                                   g_announce.resizeBuffers10.call([]()
 					                                   {
 						                                   spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 							                                   "++ IDXGISwapChain::ResizeBuffers called");
@@ -996,8 +1042,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                             if (guard.invoke)
 					                             {
-						                             static std::once_flag flag;
-						                             std::call_once(flag, [&pChain = chain]()
+						                             g_announce.present11.call([&pChain = chain]()
 						                             {
 							                             spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                             "++ IDXGISwapChain::Present called");
@@ -1070,8 +1115,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                                  if (guard.invoke)
 					                                  {
-						                                  static std::once_flag flag;
-						                                  std::call_once(flag, []()
+						                                  g_announce.resizeTarget11.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                                  "++ IDXGISwapChain::ResizeTarget called");
@@ -1141,8 +1185,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                                   if (guard.invoke)
 					                                   {
-						                                   static std::once_flag flag;
-						                                   std::call_once(flag, []()
+						                                   g_announce.resizeBuffers11.call([]()
 						                                   {
 							                                   spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                                   "++ IDXGISwapChain::ResizeBuffers called");
@@ -1340,8 +1383,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                             if (guard.invoke)
 				                             {
-					                             static std::once_flag flag;
-					                             std::call_once(flag, [&pChain = chain]()
+					                             g_announce.present12.call([&pChain = chain]()
 					                             {
 						                             spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 							                             "++ IDXGISwapChain::Present called");
@@ -1405,8 +1447,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                                  if (guard.invoke)
 				                                  {
-					                                  static std::once_flag flag;
-					                                  std::call_once(flag, []()
+					                                  g_announce.resizeTarget12.call([]()
 					                                  {
 						                                  spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 							                                  "++ IDXGISwapChain::ResizeTarget called");
@@ -1467,8 +1508,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                                   if (guard.invoke)
 				                                   {
-					                                   static std::once_flag flag;
-					                                   std::call_once(flag, []()
+					                                   g_announce.resizeBuffers12.call([]()
 					                                   {
 						                                   spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 							                                   "++ IDXGISwapChain::ResizeBuffers called");
@@ -1545,8 +1585,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D12)
 					                            {
-						                            static std::once_flag flag;
-						                            std::call_once(flag, [&pChain = chain]()
+						                            g_announce.present1D3D12.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D12)");
@@ -1589,8 +1628,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D11)
 					                            {
-						                            static std::once_flag flag;
-						                            std::call_once(flag, [&pChain = chain]()
+						                            g_announce.present1D3D11.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D11)");
@@ -1633,8 +1671,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D10)
 					                            {
-						                            static std::once_flag flag;
-						                            std::call_once(flag, []()
+						                            g_announce.present1D3D10.call([]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D10)");
@@ -1694,8 +1731,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D12)
 					                                  {
-						                                  static std::once_flag flag;
-						                                  std::call_once(flag, []()
+						                                  g_announce.resizeBuffers1D3D12.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 								                                  "++ IDXGISwapChain3::ResizeBuffers1 called (D3D12)");
@@ -1738,8 +1774,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D11)
 					                                  {
-						                                  static std::once_flag flag;
-						                                  std::call_once(flag, []()
+						                                  g_announce.resizeBuffers1D3D11.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                                  "++ IDXGISwapChain3::ResizeBuffers1 called (D3D11)");
@@ -1782,8 +1817,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D10)
 					                                  {
-						                                  static std::once_flag flag;
-						                                  std::call_once(flag, []()
+						                                  g_announce.resizeBuffers1D3D10.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                                  "++ IDXGISwapChain3::ResizeBuffers1 called (D3D10)");
@@ -1845,8 +1879,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                       if (guard.invoke)
 				                       {
-					                       static std::once_flag flag;
-					                       std::call_once(flag, [&pClient = client]()
+					                       g_announce.arcGetBuffer.call([&pClient = client]()
 					                       {
 						                       spdlog::get("HYDRAHOOK")->clone("arc")->info(
 							                       "++ IAudioRenderClient::GetBuffer called");
@@ -1887,8 +1920,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                           if (guard.invoke)
 				                           {
-					                           static std::once_flag flag;
-					                           std::call_once(flag, []()
+					                           g_announce.arcReleaseBuffer.call([]()
 					                           {
 						                           spdlog::get("HYDRAHOOK")->clone("arc")->info(
 							                           "++ IAudioRenderClient::ReleaseBuffer called");
@@ -2007,52 +2039,68 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	//
 	// Remove all hooks -- after this no new threads can enter any lambda
 	//
-	try
+	bool allRemoved = true;
+	const auto rm = [&allRemoved](auto& hook)
+	{
+		if (!hook.remove_nothrow())
+			allRemoved = false;
+	};
 	{
 #ifndef HYDRAHOOK_NO_D3D9
-		present9Hook.remove();
-		reset9Hook.remove();
-		endScene9Hook.remove();
-		present9ExHook.remove();
-		reset9ExHook.remove();
+		rm(present9Hook);
+		rm(reset9Hook);
+		rm(endScene9Hook);
+		rm(present9ExHook);
+		rm(reset9ExHook);
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D10
-		swapChainPresent10Hook.remove();
-		swapChainResizeTarget10Hook.remove();
-		swapChainResizeBuffers10Hook.remove();
+		rm(swapChainPresent10Hook);
+		rm(swapChainResizeTarget10Hook);
+		rm(swapChainResizeBuffers10Hook);
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11
-		swapChainPresent11Hook.remove();
-		swapChainResizeTarget11Hook.remove();
-		swapChainResizeBuffers11Hook.remove();
+		rm(swapChainPresent11Hook);
+		rm(swapChainResizeTarget11Hook);
+		rm(swapChainResizeBuffers11Hook);
 #endif
 
-		swapChainPresent1Hook.remove();
-		swapChainResizeBuffers1Hook.remove();
+		rm(swapChainPresent1Hook);
+		rm(swapChainResizeBuffers1Hook);
 
 #ifndef HYDRAHOOK_NO_D3D12
-		createSwapChain12Hook.remove();
-		createSwapChainForHwnd12Hook.remove();
-		executeCommandLists12Hook.remove();
-		swapChainPresent12Hook.remove();
-		swapChainResizeTarget12Hook.remove();
-		swapChainResizeBuffers12Hook.remove();
+		rm(createSwapChain12Hook);
+		rm(createSwapChainForHwnd12Hook);
+		rm(executeCommandLists12Hook);
+		rm(swapChainPresent12Hook);
+		rm(swapChainResizeTarget12Hook);
+		rm(swapChainResizeBuffers12Hook);
 		D3D12_ReleaseQueueMaps();
 #endif
 
 #ifndef HYDRAHOOK_NO_COREAUDIO
-		arcGetBufferHook.remove();
-		arcReleaseBufferHook.remove();
+		rm(arcGetBufferHook);
+		rm(arcReleaseBufferHook);
 #endif
 
-		logger->info("Hooks disabled");
 	}
-	catch (DetourException& pex)
+
+	//
+	// A manual unhook keeps the DLL loaded, so the flow-control hooks must go too
+	//
+	if (engine->SkipDllUnloadOnExit.load(std::memory_order_acquire)
+		&& !engine->FreeLibraryHookActive.load(std::memory_order_acquire))
 	{
-		logger->error("Unhooking failed: {}", pex.what());
+		rm(g_exitProcessHook);
+		rm(g_postQuitMessageHook);
+		rm(g_freeLibraryHook);
 	}
+
+	if (allRemoved)
+		logger->info("Hooks disabled");
+	else
+		logger->error("Unhooking failed for at least one hook");
 
 	//
 	// Wait for all in-flight hook lambdas to finish before touching
@@ -2061,10 +2109,12 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	if (!HookActivityTracker::drain())
 	{
 		logger->error("Timed out waiting for in-flight callbacks to drain");
+		engine->DrainIncomplete.store(true, std::memory_order_release);
 	}
 	else
 	{
 		logger->info("All in-flight hook callbacks drained");
+		engine->DrainIncomplete.store(false, std::memory_order_release);
 
 		ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
 		ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
@@ -2083,7 +2133,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 	logger->info("Exiting worker thread");
 
-	if (engine->FreeLibraryHookActive.load(std::memory_order_acquire))
+	if (engine->FreeLibraryHookActive.load(std::memory_order_acquire)
+		|| engine->SkipDllUnloadOnExit.load(std::memory_order_acquire))
 	{
 		ExitThread(0);
 	}
