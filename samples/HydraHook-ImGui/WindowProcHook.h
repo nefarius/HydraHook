@@ -118,6 +118,9 @@ public:
 						{
 							windows_[hWnd].original = reinterpret_cast<WNDPROC>(prev);
 							dispatchEnabled_ = true;
+							// A thread can be preempted after leaving this function but before its ret.
+							// Pinning keeps that ret inside a mapped module when the host unloads the DLL.
+							PinLocked();
 							return true;
 						}
 					}
@@ -247,13 +250,14 @@ private:
 		~DispatchScope()
 		{
 			--Depth();
-			--entered_;
 		}
 		std::atomic<uint32_t>& entered_;
 	};
 
-	static RestoreResult RestoreLocked(HWND hWnd, const Entry& entry)
+	static RestoreResult RestoreLocked(HWND hWnd, const Entry& entry, DWORD* winError)
 	{
+		if (winError != nullptr)
+			*winError = 0;
 		const LONG_PTR current = ::GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
 		if (current != reinterpret_cast<LONG_PTR>(&DispatchProc))
 			return RestoreResult::BlockedBySubclass;
@@ -261,14 +265,18 @@ private:
 		::SetLastError(0);
 		const LONG_PTR previous = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(entry.original));
 		if (previous == 0 && ::GetLastError() != 0)
+		{
+			if (winError != nullptr)
+				*winError = ::GetLastError();
 			return RestoreResult::Failed;
+		}
 		return RestoreResult::Restored;
 	}
 
 	// Caller holds mutex_. Restored entries stay until no dispatch still needs them.
 	bool RetireLocked(HWND hWnd, Entry& entry, std::string* error)
 	{
-		const RestoreResult result = RestoreLocked(hWnd, entry);
+		const RestoreResult result = RestoreLocked(hWnd, entry, nullptr);
 		if (result == RestoreResult::Restored)
 		{
 			entry.retired = true;
@@ -330,6 +338,7 @@ private:
 		WNDPROC original = nullptr;
 		MessageHandler handler = nullptr;
 		bool found = false;
+		std::string destroyError;
 		{
 			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
 			const auto it = self.windows_.find(hWnd);
@@ -343,7 +352,8 @@ private:
 					handler = self.messageHandler_;
 				if (destroy)
 				{
-					const RestoreResult result = RestoreLocked(hWnd, it->second);
+					DWORD winError = 0;
+					const RestoreResult result = RestoreLocked(hWnd, it->second, &winError);
 					if (result == RestoreResult::Restored || msg == WM_NCDESTROY)
 						it->second.retired = true;
 					else
@@ -351,9 +361,18 @@ private:
 						it->second.passthrough = true;
 						self.PinLocked();
 					}
+					if (result == RestoreResult::Failed)
+					{
+						char buf[128];
+						std::snprintf(buf, sizeof(buf),
+							"WindowProcHook: SetWindowLongPtrW failed during window destruction (error %lu)", winError);
+						destroyError = buf;
+					}
 				}
 			}
 		}
+		if (!destroyError.empty())
+			self.LogError(destroyError.c_str());
 
 		LRESULT result;
 		if (!found)
@@ -377,8 +396,11 @@ private:
 			const auto it = self.windows_.find(hWnd);
 			if (it != self.windows_.end() && it->second.inFlight > 0)
 				--it->second.inFlight;
-			// entered_ still counts this call. Any other dispatch incremented it before taking the mutex.
-			if (self.entered_.load() == 1)
+			// Drop this dispatch's count under the same lock as the erase decision.
+			// The constructor increment happened before the lock, so a dispatch still waiting is visible.
+			if (self.entered_.load() > 0)
+				--self.entered_;
+			if (self.entered_.load() == 0)
 				self.EraseRetiredLocked();
 		}
 		return result;

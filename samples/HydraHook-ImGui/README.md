@@ -23,7 +23,7 @@ Replace `hl2.exe` with your target process name.
 - ImGui sees every message first. If it returns non-zero, the host window does not receive that message. The sample does not consult `WantCaptureMouse` / `WantCaptureKeyboard`.
 - ImGui calls from the window thread and from Present share one lock.
 - `WM_DESTROY` and `WM_NCDESTROY` always reach the host procedure.
-- On unhook the original procedure is restored. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through and this DLL stays loaded for the rest of the process.
+- On unhook the original procedure is restored. The DLL stays loaded for the rest of the process after the first successful hook, so a thread still inside the dispatcher cannot resume in unmapped code. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through.
 
 ## Limitations
 
