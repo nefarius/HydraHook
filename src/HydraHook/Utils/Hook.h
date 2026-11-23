@@ -361,4 +361,13 @@ public:
     {
         return is_applied_;
     }
+
+    /**
+     * @brief Trampoline while applied; otherwise the address last passed to apply.
+     * The returned pointer does not depend on this object's lifetime.
+     */
+    type original() const
+    {
+        return reinterpret_cast<type>(orig_);
+    }
 };

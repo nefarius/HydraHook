@@ -85,6 +85,14 @@ namespace
         return g_stdHook->call_orig(value) + 10;
     }
 
+    using StdFn = int(__stdcall*)(int);
+    StdFn g_suppressOrig = nullptr;
+
+    __declspec(noinline) int __stdcall SuppressDetour(int value)
+    {
+        return g_suppressOrig(value) + 10;
+    }
+
     __declspec(noinline) int __cdecl CdeclDetour(int value)
     {
         return g_cdeclHook->call_orig(value) + 20;
@@ -340,17 +348,31 @@ namespace
             using StdHook = Hook<CallConvention::stdcall_t, int, int>;
             alignas(StdHook) unsigned char storage[sizeof(StdHook)];
             auto* hook = new (storage) StdHook();
-            g_stdHook = hook;
-            hook->apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+            hook->apply(reinterpret_cast<size_t>(&StdTarget), &SuppressDetour);
+            g_suppressOrig = hook->original();
             g_hookDestructorDetachSuppressed = true;
             hook->~StdHook();
-            Check(StdTarget(4) == stdOriginal + 10, "suppressed destructor leaves the detour", __FILE__, __LINE__);
+            const int suppressed = StdTarget(4);
             g_hookDestructorDetachSuppressed = false;
-            hook->remove();
-            Check(StdTarget(4) == stdOriginal, "explicit remove clears a suppressed detour", __FILE__, __LINE__);
+            Check(suppressed == stdOriginal + 10, "suppressed destructor leaves the detour", __FILE__, __LINE__);
+            void* trampoline = reinterpret_cast<void*>(g_suppressOrig);
+            const LONG begun = DetourTransactionBegin();
+            Check(begun == NO_ERROR, "begin detach of suppressed hook", __FILE__, __LINE__);
+            if (begun == NO_ERROR)
+            {
+                const LONG updated = DetourUpdateThread(GetCurrentThread());
+                const LONG detached = updated == NO_ERROR
+                    ? DetourDetach(&trampoline, reinterpret_cast<void*>(&SuppressDetour))
+                    : updated;
+                const LONG committed = detached == NO_ERROR ? DetourTransactionCommit() : DetourTransactionAbort();
+                Check(updated == NO_ERROR, "update thread for suppressed hook", __FILE__, __LINE__);
+                Check(detached == NO_ERROR, "detach suppressed hook from saved trampoline", __FILE__, __LINE__);
+                Check(committed == NO_ERROR, "commit detach of suppressed hook", __FILE__, __LINE__);
+            }
+            Check(StdTarget(4) == stdOriginal, "saved trampoline clears a suppressed detour", __FILE__, __LINE__);
             new (storage) StdHook();
             hook->~StdHook();
-            g_stdHook = nullptr;
+            g_suppressOrig = nullptr;
         }
     }
 
