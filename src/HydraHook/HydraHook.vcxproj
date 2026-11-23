@@ -171,7 +171,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_LIB|Win32'">
     <LinkIncremental>false</LinkIncremental>
     <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
-    <OutDir>$(SolutionDir)bin\$(PlatformShortName)\</OutDir>
+    <OutDir>$(SolutionDir)bin\$(Configuration)\$(PlatformShortName)\</OutDir>
     <IncludePath>$(SolutionDir)include;$(MSBuildProjectDirectory);$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -184,7 +184,7 @@
     <IncludePath>$(SolutionDir)include;$(MSBuildProjectDirectory);$(IncludePath)</IncludePath>
     <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
     <LinkIncremental>false</LinkIncremental>
-    <OutDir>$(SolutionDir)bin\$(PlatformShortName)\</OutDir>
+    <OutDir>$(SolutionDir)bin\$(Configuration)\$(PlatformShortName)\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
