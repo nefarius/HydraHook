@@ -36,31 +36,10 @@ SOFTWARE.
 #include <HydraHook/Engine/HydraHookDirect3D12.h>
 #endif
 
-typedef LRESULT(WINAPI *t_WindowProc)(
-	_In_ HWND hWnd,
-	_In_ UINT Msg,
-	_In_ WPARAM wParam,
-	_In_ LPARAM lParam
-	);
-
-LRESULT WINAPI DetourDefWindowProc(
-    _In_ HWND hWnd,
-    _In_ UINT Msg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-);
-
-LRESULT WINAPI DetourWindowProc(
-    _In_ HWND hWnd,
-    _In_ UINT Msg,
-    _In_ WPARAM wParam,
-    _In_ LPARAM lParam
-);
-
 void HookWindowProc(HWND hWnd);
+bool UnhookWindowProc();
 void RenderScene();
 
-bool ImGui_ImplWin32_UpdateMouseCursor();
 IMGUI_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 EVT_HYDRAHOOK_GAME_HOOKED EvtHydraHookGameHooked;
@@ -84,38 +63,3 @@ EVT_HYDRAHOOK_D3D12_PRE_PRESENT EvtHydraHookD3D12Present;
 EVT_HYDRAHOOK_D3D12_PRE_RESIZE_BUFFERS EvtHydraHookD3D12PreResizeBuffers;
 EVT_HYDRAHOOK_D3D12_POST_RESIZE_BUFFERS EvtHydraHookD3D12PostResizeBuffers;
 #endif
-
-/**
- * \fn	TOGGLE_STATE(int key, bool& toggle)
- *
- * \brief	Overly complicated key toggle helper
- *
- * \author	Benjamin "Nefarius" Höglinger-Stelzer
- * \date	7/09/2018
- *
- * \param 		  	key   	The key.
- * \param [in,out]	toggle	The value to toggle.
- */
-VOID
-FORCEINLINE
-TOGGLE_STATE(int key, bool& toggle)
-{
-	static auto pressedPast = false, pressedNow = false;
-
-	if (GetAsyncKeyState(key) & 0x8000)
-	{
-		pressedNow = true;
-	}
-	else
-	{
-		pressedPast = false;
-		pressedNow = false;
-	}
-
-	if (!pressedPast && pressedNow)
-	{
-		toggle = !toggle;
-
-		pressedPast = true;
-	}
-}

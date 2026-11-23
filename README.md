@@ -63,7 +63,7 @@ Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared
 
 `Release_LIB` builds the C++ tests for the selected platform. Executables are written to `bin\x64` or `bin\x86`:
 
-- `HydraHookTests.exe` — public API helpers, engine handle checks, the Detours wrapper, shutdown tracking, crash-handler refcounting, the FPS sampler, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers). No test exercises a real game hook/unhook/rehook cycle.
+- `HydraHookTests.exe` — public API helpers, engine handle checks, the Detours wrapper, shutdown tracking, crash-handler refcounting, the FPS sampler, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). No test exercises a real game hook/unhook/rehook cycle.
 - `HydraHookWarpSmokeTests.exe` — headless D3D11 WARP device. It loads `HydraHookTestHost.dll` from the same directory and checks Present / ResizeBuffers callbacks
 
 ```text

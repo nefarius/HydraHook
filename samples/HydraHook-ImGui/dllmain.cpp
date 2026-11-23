@@ -23,16 +23,16 @@ SOFTWARE.
 */
 
 #include "dllmain.h"
+#include "ImGuiWin32Buttons.h"
+#include "OverlayRelease.h"
 #include "InitGuard.h"
-
-// 
-// Detours
-// 
-#include <detours/detours.h>
+#include "WindowProcHook.h"
 
 // 
 // STL
 // 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <wrl/client.h>
 
@@ -49,8 +49,148 @@ SOFTWARE.
 #endif
 #include <imgui_impl_win32.h>
 
-t_WindowProc OriginalDefWindowProc = nullptr;
-t_WindowProc OriginalWindowProc = nullptr;
+// Overlay visibility (F12). The window-proc hook reads this and only feeds ImGui while it is set.
+static std::atomic<bool> g_ShowOverlay{ true };
+static std::atomic<HWND> g_InputWindow{ nullptr };
+// Buttons this hook forwarded to ImGui, and whether that caused the Win32 backend to take capture.
+static std::atomic<uint32_t> g_ForwardedButtons{ 0 };
+static std::atomic<bool> g_OverlayOwnsCapture{ false };
+static std::atomic<bool> g_ReleasePending{ false };
+static std::atomic<int> g_ReleaseAttempts{ 0 };
+// Hide generation. A queued release carries the value from the hide that posted it.
+static std::atomic<uint32_t> g_ReleaseGeneration{ 0 };
+static std::atomic<uint32_t> g_ReleaseApplied{ 0 };
+// New input stays out until the release for the current generation has run.
+static std::atomic<bool> g_HoldInput{ false };
+// Set before the final unhook release so a button-down cannot land after cleanup.
+static std::atomic<bool> g_InputClosed{ false };
+
+// Serializes ImGui context use between the render thread and the window thread.
+// Re-entry on the thread that already holds it does not lock again: Present and a
+// SendMessage it triggers can share a thread, and Dear ImGui is already on that stack.
+static std::mutex g_ImGuiMutex;
+static std::atomic<DWORD> g_ImGuiOwner{ 0 };
+
+struct ImGuiScope
+{
+	ImGuiScope()
+	{
+		const DWORD self = ::GetCurrentThreadId();
+		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+			return;
+		g_ImGuiMutex.lock();
+		g_ImGuiOwner.store(self, std::memory_order_relaxed);
+		locked_ = true;
+	}
+
+	~ImGuiScope()
+	{
+		if (!locked_)
+			return;
+		g_ImGuiOwner.store(0, std::memory_order_relaxed);
+		g_ImGuiMutex.unlock();
+	}
+
+	ImGuiScope(const ImGuiScope&) = delete;
+	ImGuiScope& operator=(const ImGuiScope&) = delete;
+
+private:
+	bool locked_ = false;
+};
+
+static UINT OverlayReleaseMessage()
+{
+	static UINT message = ::RegisterWindowMessageW(L"HydraHook.ImGui.ReleaseOverlayInput");
+	static bool logged = false;
+	if (message == 0 && !logged)
+	{
+		logged = true;
+		HydraHookEngineLogError("Couldn't register overlay input-release message (error %lu)", ::GetLastError());
+	}
+	return message;
+}
+
+static void RequestOverlayRelease()
+{
+	// Same lock as ReleaseOverlayInput. An older cleanup must not clear the hold
+	// after this hide has published it.
+	ImGuiScope scope;
+	g_ReleaseAttempts.store(0);
+	g_HoldInput.store(true);
+	g_ReleaseGeneration.fetch_add(1);
+	g_ReleasePending.store(true);
+}
+
+// Posts the release for the generation observed at entry. A newer hide keeps its own pending bit.
+static void DeliverPendingRelease()
+{
+	if (!g_ReleasePending.load())
+		return;
+
+	const uint32_t generation = g_ReleaseGeneration.load();
+	const HWND window = g_InputWindow.load();
+	if (window == nullptr || !::IsWindow(window))
+	{
+		ImGuiScope scope;
+		if (ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation))
+		{
+			g_HoldInput.store(false);
+			g_ForwardedButtons.store(0);
+			g_OverlayOwnsCapture.store(false);
+		}
+		return;
+	}
+
+	const UINT message = OverlayReleaseMessage();
+	if (message == 0)
+	{
+		ImGuiScope scope;
+		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
+		return;
+	}
+
+	if (::PostMessageW(window, message, generation, 0))
+	{
+		// Same lock as RequestOverlayRelease. The generation check and the clear
+		// must not straddle a newer hide, or that hide is never posted and input stays held.
+		ImGuiScope scope;
+		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
+		return;
+	}
+
+	const int attempt = g_ReleaseAttempts.fetch_add(1) + 1;
+	if (attempt <= 8)
+		HydraHookEngineLogError("Couldn't post overlay input release (error %lu)", ::GetLastError());
+}
+
+static void PollOverlayToggle()
+{
+	static std::mutex mutex;
+	static bool pressed = false;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	const bool down = (::GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+	if (!down)
+	{
+		pressed = false;
+		return;
+	}
+	if (pressed)
+		return;
+
+	pressed = true;
+	const bool show = !g_ShowOverlay.load();
+	g_ShowOverlay.store(show);
+	if (!show)
+		RequestOverlayRelease();
+}
+
+static bool BeginOverlayFrame()
+{
+	PollOverlayToggle();
+	DeliverPendingRelease();
+	return g_ShowOverlay.load();
+}
 
 static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
 
@@ -244,6 +384,16 @@ void EvtHydraHookGameUnhooked(
 
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
+	// Restore window procedures and wait for in-flight handlers before ImGui is torn down.
+	// A handler that called unhook itself cannot be waited on; destroying the context under it is a use-after-free.
+	if (!UnhookWindowProc())
+	{
+		HydraHookEngineLogError("WNDPROC unhook ran inside a message handler; leaving the ImGui context alive");
+		return;
+	}
+
+	ImGuiScope imguiShutdown;
+
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 	{
@@ -295,26 +445,7 @@ void EvtHydraHookGameUnhooked(
 	g_d3d12InitGuard.Reset();
 #endif
 
-#ifdef WNDPROC_HOOK
-	// Restore original window procedure by disabling MinHook trampolines and clearing hook state
-	if (MH_DisableHook(MH_ALL_HOOKS) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't disable WNDPROC hooks, host process might crash");
-	}
-	else
-	{
-		HydraHookEngineLogInfo("WNDPROC hooks disabled");
-	}
-
-	if (MH_Uninitialize() != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't shut down MinHook, host process might crash");
-	}
-
-	OriginalWindowProc = nullptr;
-	OriginalDefWindowProc = nullptr;
-#endif
-
+	g_ShowOverlay.store(true);
 	g_GameVersion = HydraHookDirect3DVersionUnknown;
 }
 
@@ -328,8 +459,6 @@ void EvtHydraHookD3D9Present(
 	const RGNDATA       *pDirtyRegion
 )
 {
-	static bool show_overlay = true;
-
 	//
 	// This section is only called once to initialize ImGui
 	// 
@@ -357,9 +486,10 @@ void EvtHydraHookD3D9Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX9_NewFrame();
@@ -380,7 +510,8 @@ void EvtHydraHookD3D9PreReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
@@ -389,7 +520,8 @@ void EvtHydraHookD3D9PostReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
@@ -412,7 +544,8 @@ void EvtHydraHookD3D9PreResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
@@ -422,7 +555,8 @@ void EvtHydraHookD3D9PostResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
@@ -438,8 +572,6 @@ void EvtHydraHookD3D10Present(
 {
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
-
-	static bool show_overlay = true;
 
 	//
 	// This section is only called once to initialize ImGui
@@ -472,9 +604,10 @@ void EvtHydraHookD3D10Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 
 	// Start the Dear ImGui frame
@@ -514,8 +647,6 @@ void EvtHydraHookD3D11Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
-	static bool show_overlay = true;
-
 	//
 	// This section is only called once to initialize ImGui
 	// 
@@ -547,9 +678,10 @@ void EvtHydraHookD3D11Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX11_NewFrame();
@@ -798,11 +930,10 @@ void EvtHydraHookD3D12Present(
 	(void)SyncInterval;
 	(void)Extension;
 
-	static bool show_overlay = true;
-
 	// Retries on failure: the command queue may not be captured yet (mid-process injection)
 	const bool initialized = g_d3d12InitGuard.EnsureInitialized([&]() -> bool
 	{
+		ImGuiScope imguiInit;
 		HydraHookEngineLogInfo("Grabbing D3D12 device and command queue from swapchain");
 
 		if (FAILED(D3D12_DEVICE_FROM_SWAPCHAIN(pSwapChain, &g_d3d12_pDevice)))
@@ -896,9 +1027,10 @@ void EvtHydraHookD3D12Present(
 	if (!initialized)
 		return;
 
-	TOGGLE_STATE(VK_F12, show_overlay);
-	if (!show_overlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	UINT backBufferIdx = 0;
 	IDXGISwapChain3* pSwapChain3 = nullptr;
@@ -977,7 +1109,8 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	if (!ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
 	D3D12_WaitForGpu();
@@ -1011,7 +1144,8 @@ void EvtHydraHookD3D12PostResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	if (!ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
 	if (!D3D12_CreateOverlayResources(pSwapChain))
@@ -1028,134 +1162,202 @@ void EvtHydraHookD3D12PostResizeBuffers(
 
 #pragma region WNDPROC Hooking
 
+static int OverlayButton(UINT msg, WPARAM wParam, bool* down)
+{
+	*down = false;
+	switch (msg)
+	{
+	case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: *down = true; return 0;
+	case WM_LBUTTONUP: return 0;
+	case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: *down = true; return 1;
+	case WM_RBUTTONUP: return 1;
+	case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: *down = true; return 2;
+	case WM_MBUTTONUP: return 2;
+	case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK:
+		*down = true;
+		return GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4;
+	case WM_XBUTTONUP:
+		return GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4;
+	default:
+		return -1;
+	}
+}
+
+static void ReleaseOverlayInput(HWND hWnd, uint32_t generation, bool force)
+{
+	if (!force && generation != g_ReleaseGeneration.load())
+		return;
+
+	ImGuiScope scope;
+	// A duplicate post of this hide must not clear input admitted after the first release.
+	if (!ClaimOverlayRelease(g_ReleaseGeneration, g_ReleaseApplied, generation, force))
+		return;
+
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
+	{
+		g_ForwardedButtons.store(0);
+		g_OverlayOwnsCapture.store(false);
+	}
+	else
+	{
+		const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
+		const uint32_t buttons = g_ForwardedButtons.exchange(0);
+		// Button-up would ReleaseCapture when the mask hits zero. Clear the private mask
+		// directly so a host-owned capture is left in place and the host sees no WM_CAPTURECHANGED.
+		ClearImGuiWin32Buttons(hWnd, buttons, ownedCapture);
+
+		ImGuiIO& io = ImGui::GetIO();
+		io.ClearEventsQueue();
+		io.ClearInputMouse();
+		io.ClearInputKeys();
+	}
+
+	if (force || g_ReleaseGeneration.load() == generation)
+	{
+		g_ReleasePending.store(false);
+		g_HoldInput.store(false);
+	}
+}
+
+static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	static std::once_flag flag;
+	std::call_once(flag, []() { HydraHookEngineLogInfo("++ WndProc hook received first message"); });
+
+	const UINT releaseMessage = OverlayReleaseMessage();
+	if (releaseMessage != 0 && msg == releaseMessage)
+	{
+		const uint32_t generation = static_cast<uint32_t>(wParam);
+		// wParam 0 is the unhook path and always runs. Hide posts start at 1.
+		ReleaseOverlayInput(hWnd, generation, generation == 0);
+		return 0;
+	}
+
+	// Capture moved to another window. 1.91.9 ignores WM_CAPTURECHANGED, so clear the tracked
+	// buttons in the backend mask without releasing or taking capture for the host.
+	if (msg == WM_CAPTURECHANGED && reinterpret_cast<HWND>(lParam) != hWnd)
+	{
+		const uint32_t buttons = g_ForwardedButtons.exchange(0);
+		g_OverlayOwnsCapture.store(false);
+		ImGuiScope scope;
+		ClearImGuiWin32Buttons(hWnd, buttons, false);
+		return 0;
+	}
+
+	// Hidden, waiting for a queued release, or tearing down: do not hand new input to ImGui.
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load())
+		return 0;
+
+	ImGuiScope scope;
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load()
+		|| !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
+		return 0;
+
+	bool down = false;
+	const int button = OverlayButton(msg, wParam, &down);
+	const HWND capturedBefore = button >= 0 ? ::GetCapture() : nullptr;
+	const bool ownedCapture = g_OverlayOwnsCapture.load();
+	// A host-owned capture must not go through the backend's button-up path: that path
+	// calls ReleaseCapture when the mask hits zero and the host observes WM_CAPTURECHANGED.
+	const bool keepHostCapture = button >= 0 && !down && !ownedCapture && capturedBefore == hWnd;
+	const LRESULT handled = keepHostCapture
+		? 0
+		: ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	if (keepHostCapture)
+		ClearImGuiWin32Buttons(hWnd, 1u << button, false);
+
+	if (button >= 0)
+	{
+		if (down)
+		{
+			g_ForwardedButtons.fetch_or(1u << button);
+			if (capturedBefore == nullptr && ::GetCapture() == hWnd)
+				g_OverlayOwnsCapture.store(true);
+		}
+		else
+		{
+			const uint32_t left = g_ForwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
+			if (left == 0)
+				g_OverlayOwnsCapture.store(false);
+		}
+	}
+
+	return handled;
+}
+
+static void WindowProcHookLogError(const char* message)
+{
+	HydraHookEngineLogError("%s", message);
+}
+
 /**
- * @brief Installs hooks for window-procedure dispatch to intercept input and forward to ImGui.
+ * @brief Hooks the window procedure of the given window to forward input to ImGui.
  *
- * Creates and enables hooks for DefWindowProcW, DefWindowProcA, and the specified window's
- * GWLP_WNDPROC, and stores the original function pointers in `OriginalDefWindowProc` and
- * `OriginalWindowProc` for later unhooking or forwarding.
- *
- * @note This function has effect only when `WNDPROC_HOOK` is enabled at build time.
+ * Validates the handle, stores the original WNDPROC per window and forwards unhandled
+ * messages with CallWindowProcW. See WindowProcHook.h for threading and teardown rules.
  *
  * @param hWnd Handle to the target window whose window procedure will be hooked.
  */
 void HookWindowProc(HWND hWnd)
 {
-	// TODO: fix me pls!
-#ifdef WNDPROC_HOOK
-
-	auto& logger = Logger::get(__func__);
-
-	MH_STATUS ret;
-
-	if ((ret = MH_CreateHook(
-		&DefWindowProcW,
-		&DetourDefWindowProc,
-		reinterpret_cast<LPVOID*>(&OriginalDefWindowProc))
-		) != MH_OK)
+	if (OverlayReleaseMessage() == 0)
 	{
-		HydraHookEngineLogError("Couldn't create hook for DefWindowProcW: %lu", static_cast<ULONG>(ret));
+		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
 		return;
 	}
 
-	if (ret == MH_OK && MH_EnableHook(&DefWindowProcW) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable DefWindowProcW hook");
-	}
+	g_InputClosed.store(false);
+	g_HoldInput.store(false);
+	auto& hook = WindowProcHook::Instance();
+	hook.SetErrorLogger(WindowProcHookLogError);
+	hook.SetMessageHandler(ImGuiMessageHandler);
 
-	if ((ret = MH_CreateHook(
-		&DefWindowProcA,
-		&DetourDefWindowProc,
-		reinterpret_cast<LPVOID*>(&OriginalDefWindowProc))
-		) != MH_OK)
+	if (hook.Hook(hWnd))
 	{
-		HydraHookEngineLogError("Couldn't create hook for DefWindowProcA: %lu", static_cast<ULONG>(ret));
-		return;
+		g_InputWindow.store(hWnd);
+		HydraHookEngineLogInfo("WNDPROC hook installed");
 	}
-
-	if (ret == MH_OK && MH_EnableHook(&DefWindowProcA) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable DefWindowProcW hook");
-	}
-
-	auto lptrWndProc = reinterpret_cast<t_WindowProc>(GetWindowLongPtr(hWnd, GWLP_WNDPROC));
-
-	if (MH_CreateHook(lptrWndProc, &DetourWindowProc, reinterpret_cast<LPVOID*>(&OriginalWindowProc)) != MH_OK)
-	{
-		logger.warning("Couldn't create hook for GWLP_WNDPROC");
-		return;
-	}
-
-	if (MH_EnableHook(lptrWndProc) != MH_OK)
-	{
-		HydraHookEngineLogError("Couldn't enable GWLP_WNDPROC hook");
-	}
-#endif
+	else
+		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
 }
 
-LRESULT WINAPI DetourDefWindowProc(
-	_In_ HWND hWnd,
-	_In_ UINT Msg,
-	_In_ WPARAM wParam,
-	_In_ LPARAM lParam
-)
+/**
+ * @brief Restores hooked window procedures and waits for in-flight handlers to finish.
+ *
+ * @return false when called from inside a hooked message. The caller must not destroy ImGui
+ *         until that handler has returned.
+ */
+bool UnhookWindowProc()
 {
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ DetourDefWindowProc called"); });
-
-	ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
-
-	return OriginalDefWindowProc(hWnd, Msg, wParam, lParam);
-}
-
-LRESULT WINAPI DetourWindowProc(
-	_In_ HWND hWnd,
-	_In_ UINT Msg,
-	_In_ WPARAM wParam,
-	_In_ LPARAM lParam
-)
-{
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ DetourWindowProc called"); });
-
-	ImGui_ImplWin32_WndProcHandler(hWnd, Msg, wParam, lParam);
-
-	return OriginalWindowProc(hWnd, Msg, wParam, lParam);
-}
-
-#pragma endregion
-
-#pragma region ImGui-specific (taken from their examples unmodified)
-
-bool ImGui_ImplWin32_UpdateMouseCursor()
-{
-	ImGuiIO& io = ImGui::GetIO();
-	if (io.ConfigFlags & ImGuiConfigFlags_NoMouseCursorChange)
-		return false;
-
-	ImGuiMouseCursor imgui_cursor = io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor();
-	if (imgui_cursor == ImGuiMouseCursor_None)
+	g_ReleasePending.store(false);
+	g_HoldInput.store(true);
 	{
-		// Hide OS mouse cursor if imgui is drawing it or if it wants no cursor
-		::SetCursor(NULL);
+		// Block new button-downs before the release runs. Drop the lock before SendMessage
+		// so the window thread can enter the handler.
+		ImGuiScope scope;
+		g_InputClosed.store(true);
+	}
+	const HWND window = g_InputWindow.exchange(nullptr);
+	const UINT releaseMessage = OverlayReleaseMessage();
+	if (window != nullptr && releaseMessage != 0 && ::IsWindow(window))
+	{
+		const DWORD owner = ::GetWindowThreadProcessId(window, nullptr);
+		if (owner == ::GetCurrentThreadId())
+			ReleaseOverlayInput(window, 0, true);
+		else
+			::SendMessageW(window, releaseMessage, 0, 0);
 	}
 	else
 	{
-		// Hardware cursor type
-		LPTSTR win32_cursor = IDC_ARROW;
-		switch (imgui_cursor)
-		{
-		case ImGuiMouseCursor_Arrow:        win32_cursor = IDC_ARROW; break;
-		case ImGuiMouseCursor_TextInput:    win32_cursor = IDC_IBEAM; break;
-		case ImGuiMouseCursor_ResizeAll:    win32_cursor = IDC_SIZEALL; break;
-		case ImGuiMouseCursor_ResizeEW:     win32_cursor = IDC_SIZEWE; break;
-		case ImGuiMouseCursor_ResizeNS:     win32_cursor = IDC_SIZENS; break;
-		case ImGuiMouseCursor_ResizeNESW:   win32_cursor = IDC_SIZENESW; break;
-		case ImGuiMouseCursor_ResizeNWSE:   win32_cursor = IDC_SIZENWSE; break;
-		}
-		::SetCursor(::LoadCursor(NULL, win32_cursor));
+		g_ForwardedButtons.store(0);
+		g_OverlayOwnsCapture.store(false);
+		g_HoldInput.store(false);
 	}
-	return true;
+
+	const bool drained = WindowProcHook::Instance().UnhookAll();
+	if (drained)
+		HydraHookEngineLogInfo("WNDPROC hooks removed");
+	return drained;
 }
 
 #pragma endregion
