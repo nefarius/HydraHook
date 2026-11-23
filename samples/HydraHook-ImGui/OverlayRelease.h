@@ -34,3 +34,12 @@ inline bool ClearPendingIfCurrent(const std::atomic<std::uint32_t>& current, std
 	pending.store(false);
 	return true;
 }
+
+// True when unhook has closed overlay input while capture or forwarded buttons are still
+// held (e.g. SendMessageTimeoutW timed out and PostMessageW failed), so the window thread
+// must release them directly on the next pumped message.
+inline bool ShouldFallbackReleaseOnClosedInput(const std::atomic<bool>& inputClosed,
+	const std::atomic<bool>& overlayOwnsCapture, const std::atomic<std::uint32_t>& forwardedButtons)
+{
+	return inputClosed.load() && (overlayOwnsCapture.load() || forwardedButtons.load() != 0);
+}

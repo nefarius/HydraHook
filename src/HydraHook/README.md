@@ -105,11 +105,10 @@ flowchart TB
 
 - **`HydraHookMainThread`**: Entry point for the worker thread. Receives `PHYDRAHOOK_ENGINE` as `LPVOID`.
 - **Flow**: Install ExitProcess/PostQuitMessage/FreeLibrary hooks -> Install D3D/Audio hooks (based on config) -> `WaitForSingleObject(EngineCancellationEvent)` -> Remove hooks -> `FreeLibraryAndExitThread` (unless shutdown was initiated by FreeLibrary hook).
-- **D3D10/11**: Share the same `IDXGISwapChain` vtable. The D3D10 path probes first and detects D3D11 via `GetDevice(__uuidof(ID3D11Device))` when Present is first called.
-- **DXGI 1.1 / 1.3**: When the probed swap chain exposes them, the worker also hooks `IDXGISwapChain1::Present1` and `IDXGISwapChain3::ResizeBuffers1`. Those hooks dispatch to the same D3D11 or D3D12 present / resize-buffers callbacks as the base interface.
+- **DXGI (D3D10/11/12)**: D3D10, D3D11, and D3D12 share the same `dxgi.dll` `IDXGISwapChain` implementation. The worker probes D3D12 -> D3D11 -> D3D10 until the shared vtable addresses are resolved, installs one Detours hook per vtable slot (`Present`, `ResizeTarget`, `ResizeBuffers`, plus `IDXGISwapChain1::Present1` and `IDXGISwapChain3::ResizeBuffers1` when exposed), and dispatches per call via `chain->GetDevice(...)`. Hooks are detached in reverse (LIFO) installation order on shutdown.
 - **D3D12**: Two capture paths for `ID3D12CommandQueue`:
-  - **Early injection**: Hook `IDXGIFactory::CreateSwapChain` and `CreateSwapChainForHwnd`; `pDevice` is the command queue.
-  - **Mid-process injection**: Hook `ID3D12CommandQueue::ExecuteCommandLists`; capture device->queue mapping at runtime.
+  - **Early injection**: Hook `IDXGIFactory::CreateSwapChain` and `CreateSwapChainForHwnd` before the D3D12 probe (suppressing capture on the worker thread during its own temporary probes so concurrent game swap chains are still captured); `pDevice` is the command queue.
+  - **Mid-process injection**: Hook `ID3D12CommandQueue::ExecuteCommandLists`; capture `D3D12_COMMAND_LIST_TYPE_DIRECT` device->queue mapping at runtime.
 
 ### Hook Template
 
@@ -125,7 +124,7 @@ flowchart TB
 **Directory:** [Game/Hook/](Game/Hook/)
 
 - **D3D9Ex**: Creates a temporary hidden window via `Window`, loads `d3d9.dll`, calls `Direct3DCreate9Ex` -> `CreateDeviceEx` -> extracts vtable from the device. Used for both D3D9 and D3D9Ex hooks.
-- **D3D10/11/12**: Load DXGI/D3D DLLs, create factory/device/swap chain, extract vtable from the swap chain. The D3D11 prober tries a hardware device and falls back to WARP when the machine has no usable adapter. `IDXGISwapChain::Present` is in `dxgi.dll`, so a hook installed from either driver covers the other.
+- **D3D10/11/12**: Check for already-loaded DXGI/D3D runtime DLLs via `GetModuleHandle` (they do not call `LoadLibrary`), then create a temporary factory/device/swap chain to extract the swap-chain vtable. If a runtime DLL such as `d3d12.dll` is not loaded in the process, its prober exits before any device creation attempt. Once the runtime DLL is available, the D3D11 and D3D12 probers try a hardware device and fall back to WARP when no usable hardware adapter exists. `IDXGISwapChain::Present` lives in `dxgi.dll`, so one hook per vtable slot covers D3D10, D3D11, and D3D12.
 - **DXGI**: [DXGI.h](Game/Hook/DXGI.h) defines vtable indices (e.g. `Present = 8`, `ResizeBuffers = 13`, `ResizeTarget = 14`, `IDXGISwapChain1::Present1 = 22`, `IDXGISwapChain3::ResizeBuffers1 = 37`).
 - **AudioRenderClient**: Uses MMDevice API (`IMMDeviceEnumerator` -> `IMMDevice` -> `IAudioClient` -> `IAudioRenderClient`) to obtain the vtable.
 - **DirectInput8** (optional, `HOOK_DINPUT8`): Creates DirectInput8 device via `DirectInput8Create`, enumerates joysticks, extracts vtable from `IDirectInputDevice8`. Hooks Acquire, GetDeviceData, GetDeviceState, GetDeviceInfo, GetObjectInfo. Experimental; not enabled by default.
@@ -138,7 +137,7 @@ For a typical `IDXGISwapChain::Present` hook:
 2. Detour redirects execution to the hook lambda.
 3. **First call only** (`std::call_once`): Store swap chain in `engine->RenderPipeline.pSwapChain`, invoke `EvtHydraHookGameHooked`.
 4. **Pre-callback** (if set): `EvtHydraHookD3D11PrePresent` with `HYDRAHOOK_EVT_PRE_EXTENSION` (engine handle, custom context).
-5. **Original call**: `swapChainPresent11Hook.call_orig(chain, SyncInterval, Flags)`.
+5. **Original call**: `swapChainPresentHook.call_orig(chain, SyncInterval, Flags)`.
 6. **Post-callback** (if set): `EvtHydraHookD3D11PostPresent` with `HYDRAHOOK_EVT_POST_EXTENSION`.
 7. Return result to host.
 
@@ -160,7 +159,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 - **Unhook**: runs the ManualUnhook shutdown above and never calls `TerminateThread`. It waits for the worker to exit (also when another shutdown path already claimed cleanup) and for in-flight callbacks to drain; if either fails it returns `HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE` and keeps the worker handle and state so it can be retried. On success it closes the worker handle and clears the render pipeline pointers and `GameVersion`. It is idempotent.
 - **Rehook**: calls `HookActivityTracker::reset()`, clears `ShutdownCleanupDone`, `FreeLibraryHookActive` and `SkipDllUnloadOnExit`, resets the cancellation event, restores `Events*` from `SavedEvents*`, and starts a new `HydraHookMainThread`. It is a no-op while a worker is running.
 - **Callback tables**: `HydraHookEngineSet*EventCallbacks` writes both the live table and a saved copy. The worker zeroes the live tables on unhook; rehook restores the saved copies before `EvtHydraHookGameHooked` fires again.
-- **Announcements**: the once-per-hook announcements are `ResettableOnce` members of `g_announce` in `Game.cpp`. The worker re-arms all of them, the engine pointer, and the DXGI device version at the start of each run.
+- **Announcements**: the once-per-hook announcements are `ResettableOnce` members of `g_announce` in `Game.cpp`. The worker re-arms all of them and the engine pointer at the start of each run.
 - **Serialization**: `LifecycleLock` (SRW lock in the engine struct) serializes unhook and rehook.
 
 ## Build Configuration
@@ -182,8 +181,8 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 `tests/cpp/` builds three projects, wired into `HydraHook.slnx` under the `tests` folder. They build with the `Debug_LIB` and `Release_LIB` solution configurations and link the static library (the smoke host does; the smoke runner loads that host).
 
 - `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
-- `HydraHookTestHost` is a small DLL that enables D3D11 hooking and exports shared counters.
-- `HydraHookWarpSmokeTests` creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers callbacks stop, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
+- `HydraHookTestHost` is a small DLL that enables D3D10/D3D11/D3D12 hooking and exports shared counters.
+- `HydraHookWarpSmokeTests` loads `d3d12.dll` alongside `d3d11.dll`, creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers still succeed without firing callbacks, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
 
 ## Extending HydraHook
 

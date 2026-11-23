@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "Direct3D12.h"
+#include <wrl/client.h>
 #include <dxgi.h>
 #include <dxgi1_4.h>
 #include <d3d12.h>
@@ -30,12 +31,11 @@ SOFTWARE.
 #include "Exceptions.hpp"
 
 using namespace HydraHook::Core::Exceptions;
+using Microsoft::WRL::ComPtr;
 
 Direct3D12Hooking::Direct3D12::Direct3D12() :
 	pd3dDevice(nullptr), pQueue(nullptr), pSwapChain(nullptr)
 {
-	temp_window = std::make_unique<Window>("TempDirect3D12OverlayWindow");
-
 	const auto hModDXGI = GetModuleHandle("DXGI.dll");
 	const auto hModD3D12 = GetModuleHandle("D3D12.dll");
 
@@ -62,7 +62,7 @@ Direct3D12Hooking::Direct3D12::Direct3D12() :
 		throw ProcAddressNotFoundException("Could not get handle to CreateDXGIFactory1");
 	}
 
-	IDXGIFactory4* pFactory;
+	ComPtr<IDXGIFactory4> pFactory;
 	auto hr = static_cast<HRESULT(WINAPI *)(
 		REFIID,
 		void**)>(hCreateDXGIFactory1)(IID_PPV_ARGS(&pFactory));
@@ -72,14 +72,32 @@ Direct3D12Hooking::Direct3D12::Direct3D12() :
 		throw DXAPIException("Could not create DXGI factory", hr);
 	}
 
-	const auto hr12 = static_cast<HRESULT(WINAPI *)(
+	const auto createDevice = static_cast<HRESULT(WINAPI *)(
 		IUnknown*,
 		D3D_FEATURE_LEVEL,
 		REFIID,
-		void**)>(hD3D12CreateDevice)(
+		void**)>(hD3D12CreateDevice);
+
+	// Hardware first so a real GPU is preferred. Fall back to WARP when the
+	// machine has no usable adapter (headless CI runners). The DXGI and
+	// ID3D12CommandQueue method addresses are the same for both drivers.
+	ComPtr<ID3D12Device> device;
+	HRESULT hr12 = createDevice(
 		nullptr,
 		D3D_FEATURE_LEVEL_11_0,
-		IID_PPV_ARGS(&pd3dDevice));
+		IID_PPV_ARGS(&device));
+
+	if (FAILED(hr12))
+	{
+		ComPtr<IDXGIAdapter> pWarpAdapter;
+		if (SUCCEEDED(pFactory->EnumWarpAdapter(IID_PPV_ARGS(&pWarpAdapter))))
+		{
+			hr12 = createDevice(
+				pWarpAdapter.Get(),
+				D3D_FEATURE_LEVEL_11_0,
+				IID_PPV_ARGS(&device));
+		}
+	}
 
 	if (FAILED(hr12))
 	{
@@ -90,12 +108,15 @@ Direct3D12Hooking::Direct3D12::Direct3D12() :
 	queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-	hr = pd3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&pQueue));
+	ComPtr<ID3D12CommandQueue> queue;
+	hr = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
 
 	if (FAILED(hr))
 	{
 		throw DXAPIException("Command queue creation failed", hr);
 	}
+
+	temp_window = std::make_unique<Window>("TempDirect3D12OverlayWindow");
 
 	DXGI_SWAP_CHAIN_DESC scDesc;
 	ZeroMemory(&scDesc, sizeof(scDesc));
@@ -112,16 +133,21 @@ Direct3D12Hooking::Direct3D12::Direct3D12() :
 	scDesc.Windowed = TRUE;
 	scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
+	ComPtr<IDXGISwapChain> swapChain;
 	hr = pFactory->CreateSwapChain(
-		pQueue,
+		queue.Get(),
 		&scDesc,
-		&pSwapChain
+		&swapChain
 	);
 
 	if (FAILED(hr))
 	{
 		throw DXAPIException("Swap chain creation failed", hr);
 	}
+
+	pd3dDevice = device.Detach();
+	pQueue = queue.Detach();
+	pSwapChain = swapChain.Detach();
 }
 
 std::vector<size_t> Direct3D12Hooking::Direct3D12::vtable() const
@@ -142,9 +168,9 @@ Direct3D12Hooking::Direct3D12::~Direct3D12()
 	if (pSwapChain)
 		pSwapChain->Release();
 
-	if (pd3dDevice)
-		pd3dDevice->Release();
-
 	if (pQueue)
 		pQueue->Release();
+
+	if (pd3dDevice)
+		pd3dDevice->Release();
 }

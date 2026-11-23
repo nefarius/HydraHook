@@ -5,6 +5,10 @@
  * Defines event callbacks for Present, ResizeTarget, and ResizeBuffers.
  * Use HydraHookEngineSetD3D10EventCallbacks to register.
  *
+ * D3D10, D3D11, and D3D12 share unified DXGI swap-chain hooks (`Present`/`Present1`,
+ * `ResizeTarget`, `ResizeBuffers`/`ResizeBuffers1`) that dispatch per call to the
+ * callback table matching the swap chain's enabled device runtime.
+ *
  * @copyright MIT License (c) 2018-2026 Benjamin Höglinger-Stelzer
  */
 

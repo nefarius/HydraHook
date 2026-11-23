@@ -90,6 +90,10 @@ int main()
     if (window == nullptr)
         return 1;
 
+    // Load d3d12.dll alongside d3d11.dll before the host initializes so the
+    // engine probes both APIs against the shared DXGI swap chain vtable.
+    const HMODULE d3d12Module = LoadLibraryW(L"d3d12.dll");
+
     const HMODULE host = LoadHost();
     Check(host != nullptr, "HydraHookTestHost.dll loaded");
     if (host == nullptr)
@@ -195,7 +199,7 @@ int main()
         const LONG resizePreBefore = state->resizePre;
         const LONG resizePostBefore = state->resizePost;
         for (int i = 0; i < 5; ++i)
-            swapChain->Present(0, 0);
+            Check(SUCCEEDED(swapChain->Present(0, 0)), "Present while unhooked");
         Check(SUCCEEDED(swapChain->ResizeBuffers(0, 64, 64, DXGI_FORMAT_UNKNOWN, 0)), "ResizeBuffers while unhooked");
         Check(state->presentPre == presentPreBefore && state->presentPost == presentPostBefore,
               "no Present callbacks while unhooked");
@@ -250,6 +254,9 @@ int main()
         CloseHandle(unloadThread);
     }
     Check(GetModuleHandleW(L"HydraHookTestHost.dll") == nullptr, "host unloaded");
+
+    if (d3d12Module != nullptr)
+        FreeLibrary(d3d12Module);
 
     if (g_failures != 0)
     {

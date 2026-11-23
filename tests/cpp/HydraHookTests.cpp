@@ -590,6 +590,10 @@ namespace
     std::atomic<int> g_errorCalls{0};
     std::atomic<LRESULT> g_reentrantResult{-1};
     std::atomic<int> g_beforeDispatchPhase{0};
+    std::atomic<int> g_origUnhookDrained{-1};
+    std::atomic<int> g_handlerUnhookDrained{-1};
+    HANDLE g_stalledHandlerEntered = nullptr;
+    HANDLE g_stalledHandlerRelease = nullptr;
 
     void TestBeforeDispatch(UINT msg)
     {
@@ -607,6 +611,17 @@ namespace
         {
         case WM_APP + 1:
             return 0x1234;
+        case WM_APP + 4:
+        {
+            // Simulate a host WNDPROC calling PostQuitMessage / ExitProcess and blocking
+            // while the engine worker thread calls UnhookAll().
+            std::thread worker([]()
+            {
+                g_origUnhookDrained.store(WindowProcHook::Instance().UnhookAll(500) ? 1 : 0);
+            });
+            worker.join();
+            return 0x44;
+        }
         case WM_APP + 9:
             DestroyWindow(hWnd);
             PostQuitMessage(0);
@@ -638,6 +653,19 @@ namespace
             return 0x77;
         if (msg == WM_APP + 3)
             g_reentrantResult = SendMessageW(hWnd, WM_APP + 1, 0, 0);
+        if (msg == WM_APP + 5)
+        {
+            g_handlerUnhookDrained.store(WindowProcHook::Instance().UnhookAll(500) ? 1 : 0);
+            return 0x55;
+        }
+        if (msg == WM_APP + 6)
+        {
+            if (g_stalledHandlerEntered)
+                SetEvent(g_stalledHandlerEntered);
+            if (g_stalledHandlerRelease)
+                WaitForSingleObject(g_stalledHandlerRelease, 5000);
+            return 0x66;
+        }
         return 0;
     }
 
@@ -883,6 +911,217 @@ namespace
         Check(hook.HookedCount() == 0, "no active hooks remain", __FILE__, __LINE__);
         }
 
+        // Cross-thread UnhookAll while the host original WNDPROC is blocked waiting for it
+        // (reproduces PostQuitMessage/ExitProcess called from inside a host WNDPROC).
+        {
+            HWND w5 = MakeTestWindow();
+            Check(w5 != nullptr, "orig-unhook window created", __FILE__, __LINE__);
+            Check(hook.Hook(w5), "hook before orig-triggered UnhookAll", __FILE__, __LINE__);
+            g_origUnhookDrained.store(-1);
+            Check(SendMessageW(w5, WM_APP + 4, 0, 0) == 0x44,
+                  "orig-triggered cross-thread UnhookAll does not deadlock", __FILE__, __LINE__);
+            Check(g_origUnhookDrained.load() == 1,
+                  "UnhookAll drains without waiting on original WNDPROC", __FILE__, __LINE__);
+            Check(GetWindowLongPtrW(w5, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+                  "original restored during orig-triggered UnhookAll", __FILE__, __LINE__);
+            Check(hook.HookedCount() == 0, "no active hooks after orig-triggered UnhookAll", __FILE__, __LINE__);
+            DestroyWindow(w5);
+        }
+
+        // Same-thread UnhookAll from inside MessageHandler skips the drain wait and returns false.
+        {
+            HWND w6 = MakeTestWindow();
+            Check(w6 != nullptr, "reentrant-unhook window created", __FILE__, __LINE__);
+            Check(hook.Hook(w6), "hook before handler-triggered UnhookAll", __FILE__, __LINE__);
+            g_handlerUnhookDrained.store(-1);
+            Check(SendMessageW(w6, WM_APP + 5, 0, 0) == 0x55, "handler-triggered UnhookAll returns", __FILE__, __LINE__);
+            Check(g_handlerUnhookDrained.load() == 0,
+                  "re-entrant UnhookAll from handler reports not drained", __FILE__, __LINE__);
+            Check(GetWindowLongPtrW(w6, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+                  "original restored during handler-triggered UnhookAll", __FILE__, __LINE__);
+            DestroyWindow(w6);
+        }
+
+        // Bounded drain timeout when another thread is stuck inside MessageHandler.
+        {
+            g_stalledHandlerEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_stalledHandlerRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            std::atomic<HWND> stalledHwnd{nullptr};
+            std::atomic<int> stalledReady{0};
+            std::thread stalledOwner([&]()
+            {
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    stalledReady.store(-1);
+                    return;
+                }
+                stalledHwnd.store(hw);
+                stalledReady.store(1);
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+            while (stalledReady.load() == 0)
+                SwitchToThread();
+            if (stalledReady.load() < 0)
+            {
+                stalledOwner.join();
+                Check(false, "stalled-handler owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = stalledHwnd.load();
+                Check(hook.Hook(hw), "hook before stalled-handler UnhookAll", __FILE__, __LINE__);
+                std::thread sender([hw]() { SendMessageW(hw, WM_APP + 6, 0, 0); });
+                Check(WaitForSingleObject(g_stalledHandlerEntered, 2000) == WAIT_OBJECT_0,
+                      "stalled handler entered", __FILE__, __LINE__);
+                Check(!hook.UnhookAll(50), "UnhookAll times out cleanly when handler is stalled", __FILE__, __LINE__);
+                SetEvent(g_stalledHandlerRelease);
+                sender.join();
+                Check(hook.UnhookAll(200), "UnhookAll drains once stalled handler returns", __FILE__, __LINE__);
+                SendMessageW(hw, WM_APP + 9, 0, 0);
+                stalledOwner.join();
+            }
+            if (g_stalledHandlerEntered)
+            {
+                CloseHandle(g_stalledHandlerEntered);
+                g_stalledHandlerEntered = nullptr;
+            }
+            if (g_stalledHandlerRelease)
+            {
+                CloseHandle(g_stalledHandlerRelease);
+                g_stalledHandlerRelease = nullptr;
+            }
+        }
+
+        // Deferred capture-release fallback when SendMessageTimeoutW times out and PostMessageW fails:
+        // keeping the hook attached lets the next pumped message release capture on the window-owning
+        // thread while forwarding that message to the host WNDPROC.
+        {
+            static std::atomic<bool> s_inputClosed{false};
+            static std::atomic<bool> s_overlayOwnsCapture{false};
+            static std::atomic<uint32_t> s_forwardedButtons{0};
+            static std::atomic<DWORD> s_releaseThreadId{0};
+            static std::atomic<int> s_releaseCalls{0};
+            static HANDLE s_blockOwnerEvent = nullptr;
+            static HANDLE s_ownerBlockedEvent = nullptr;
+
+            s_inputClosed.store(false);
+            s_overlayOwnsCapture.store(true);
+            s_forwardedButtons.store(1u);
+            s_releaseThreadId.store(0);
+            s_releaseCalls.store(0);
+            s_blockOwnerEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            s_ownerBlockedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+            std::atomic<HWND> fbHwnd{nullptr};
+            std::atomic<DWORD> fbOwnerTid{0};
+            std::atomic<int> fbReady{0};
+            std::atomic<bool> captureAcquired{false};
+            static std::atomic<bool> s_captureClearedAfterFallback{false};
+            s_captureClearedAfterFallback.store(false);
+
+            std::thread fbOwner([&]()
+            {
+                fbOwnerTid.store(GetCurrentThreadId());
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    fbReady.store(-1);
+                    return;
+                }
+                SetCapture(hw);
+                captureAcquired.store(GetCapture() == hw);
+                fbHwnd.store(hw);
+                fbReady.store(1);
+
+                // Block briefly so cross-thread SendMessageTimeoutW times out.
+                SetEvent(s_ownerBlockedEvent);
+                WaitForSingleObject(s_blockOwnerEvent, 5000);
+
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+
+            while (fbReady.load() == 0)
+                SwitchToThread();
+            if (fbReady.load() < 0)
+            {
+                SetEvent(s_blockOwnerEvent);
+                fbOwner.join();
+                Check(false, "deferred-release owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = fbHwnd.load();
+                hook.SetMessageHandler([](HWND hWnd, UINT, WPARAM, LPARAM) -> LRESULT
+                {
+                    if (ShouldFallbackReleaseOnClosedInput(s_inputClosed, s_overlayOwnsCapture, s_forwardedButtons))
+                    {
+                        s_releaseThreadId.store(GetCurrentThreadId());
+                        const bool ownedCapture = s_overlayOwnsCapture.exchange(false);
+                        s_forwardedButtons.exchange(0);
+                        if (ownedCapture && GetCapture() == hWnd)
+                            ReleaseCapture();
+                        s_captureClearedAfterFallback.store(GetCapture() == nullptr);
+                        ++s_releaseCalls;
+                        return 0;
+                    }
+                    return 0;
+                });
+                Check(hook.Hook(hw), "hook installed for deferred-release fallback", __FILE__, __LINE__);
+                Check(WaitForSingleObject(s_ownerBlockedEvent, 2000) == WAIT_OBJECT_0,
+                      "owner thread entered blocked state", __FILE__, __LINE__);
+
+                // Simulate UnhookWindowProc: close input, attempt SendMessageTimeoutW (times out),
+                // simulate PostMessageW failure (no release message queued), keep state and hook intact.
+                s_inputClosed.store(true);
+                DWORD_PTR sendResult = 0;
+                const LRESULT sent = SendMessageTimeoutW(
+                    hw, WM_APP + 50, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 30, &sendResult);
+                Check(sent == 0, "SendMessageTimeoutW times out while window thread is blocked", __FILE__, __LINE__);
+                Check(ShouldFallbackReleaseOnClosedInput(s_inputClosed, s_overlayOwnsCapture, s_forwardedButtons),
+                      "release obligation retained after timeout and failed PostMessageW", __FILE__, __LINE__);
+
+                // Unblock window thread and send a normal host message without any queued release message.
+                SetEvent(s_blockOwnerEvent);
+                Check(SendMessageW(hw, WM_APP + 1, 0, 0) == 0x1234,
+                      "host WNDPROC still receives the next message after fallback release", __FILE__, __LINE__);
+                Check(s_releaseCalls.load() == 1,
+                      "fallback release ran once on next pumped message", __FILE__, __LINE__);
+                Check(s_releaseThreadId.load() == fbOwnerTid.load(),
+                      "fallback release ran on window-owning thread", __FILE__, __LINE__);
+                Check(!s_overlayOwnsCapture.load() && s_forwardedButtons.load() == 0,
+                      "fallback release cleared capture and button state", __FILE__, __LINE__);
+                if (captureAcquired.load())
+                    Check(s_captureClearedAfterFallback.load(),
+                          "fallback release cleared Win32 capture on owner thread", __FILE__, __LINE__);
+
+                Check(hook.UnhookAll(500), "UnhookAll succeeds after fallback release", __FILE__, __LINE__);
+                SendMessageW(hw, WM_APP + 9, 0, 0);
+                fbOwner.join();
+            }
+
+            if (s_blockOwnerEvent)
+            {
+                CloseHandle(s_blockOwnerEvent);
+                s_blockOwnerEvent = nullptr;
+            }
+            if (s_ownerBlockedEvent)
+            {
+                CloseHandle(s_ownerBlockedEvent);
+                s_ownerBlockedEvent = nullptr;
+            }
+        }
+
         hook.SetMessageHandler(nullptr);
         hook.SetErrorLogger(nullptr);
         hook.SetBeforeDispatch(nullptr);
@@ -979,6 +1218,24 @@ namespace
             Check(hook.remove_nothrow(), "remove_nothrow on each cycle", __FILE__, __LINE__);
             Check(StdTarget(4) == original, "target restored on each cycle", __FILE__, __LINE__);
         }
+
+        // A failed apply() must abort its Detours transaction so subsequent apply() calls succeed.
+        Hook<CallConvention::stdcall_t, int, int> failedHook;
+        bool threw = false;
+        try
+        {
+            failedHook.apply(static_cast<size_t>(0), &StdDetour);
+        }
+        catch (const HydraHook::Core::Exceptions::DetourException&)
+        {
+            threw = true;
+        }
+        Check(threw, "apply(0) throws DetourException", __FILE__, __LINE__);
+        Check(!failedHook.is_applied(), "failed apply leaves hook unapplied", __FILE__, __LINE__);
+
+        hook.apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+        Check(StdTarget(4) == original + 10, "apply succeeds after a failed apply aborted its transaction", __FILE__, __LINE__);
+        Check(hook.remove_nothrow(), "remove_nothrow after recovery apply", __FILE__, __LINE__);
         g_stdHook = nullptr;
     }
 
