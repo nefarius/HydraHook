@@ -67,7 +67,6 @@ SOFTWARE.
 //
 // STL
 // 
-#include <atomic>
 #include <map>
 #include <mutex>
 #include <new>
@@ -83,12 +82,26 @@ namespace
 {
 	std::mutex g_hostLoggerMutex;
 	std::shared_ptr<spdlog::logger> g_hostLogger;
-	std::atomic<bool> g_ownsDefaultLogger{false};
+	std::shared_ptr<spdlog::logger> g_installedDefaultLogger;
 
 	void ResetHostLogger()
 	{
 		std::lock_guard<std::mutex> lock(g_hostLoggerMutex);
 		g_hostLogger.reset();
+	}
+
+	void RememberInstalledDefaultLogger(const std::shared_ptr<spdlog::logger>& logger)
+	{
+		std::lock_guard<std::mutex> lock(g_hostLoggerMutex);
+		g_installedDefaultLogger = logger;
+	}
+
+	std::shared_ptr<spdlog::logger> TakeInstalledDefaultLogger()
+	{
+		std::lock_guard<std::mutex> lock(g_hostLoggerMutex);
+		auto installed = g_installedDefaultLogger;
+		g_installedDefaultLogger.reset();
+		return installed;
 	}
 
 	struct LifecycleGuard
@@ -225,7 +238,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	if (EngineConfig->Logging.IsEnabled)
 	{
 		spdlog::set_default_logger(logger);
-		g_ownsDefaultLogger.store(true);
+		RememberInstalledDefaultLogger(logger);
 	}
 
 	logger = logger->clone("api");
@@ -235,8 +248,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	//
 	if (EngineConfig->CrashHandler.IsEnabled)
 	{
-		HydraHookCrashHandlerInstall(engine);
-		engine->CrashHandlerInstalled = TRUE;
+		engine->CrashHandlerInstalled = HydraHookCrashHandlerInstall(engine) ? TRUE : FALSE;
 	}
 
 	//
@@ -406,7 +418,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (lastEngine)
 	{
 		ResetHostLogger();
-		if (g_ownsDefaultLogger.exchange(false))
+		const auto installedDefault = TakeInstalledDefaultLogger();
+		if (installedDefault && spdlog::default_logger() == installedDefault)
 		{
 			spdlog::set_default_logger(std::make_shared<spdlog::logger>(
 				"hydrahook-default",

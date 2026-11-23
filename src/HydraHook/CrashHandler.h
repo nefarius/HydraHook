@@ -21,8 +21,9 @@
  * Subsequent calls increment the reference count without re-installing.
  *
  * @param engine Engine whose CrashHandler config controls dump output.
+ * @return false when @p engine is null or the snapshot could not be registered.
  */
-void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine);
+bool HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine);
 
 /**
  * @brief Decrements the crash handler reference count.

@@ -481,19 +481,27 @@ static CrashConfigSnapshot* MakeSnapshot(PHYDRAHOOK_ENGINE engine)
 	return snap;
 }
 
-void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
+bool HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 {
 	if (!engine)
-		return;
+		return false;
 
 	std::lock_guard<std::mutex> lock(s_installMutex);
 	ReapDeferredSnapshots();
 
 	auto* newSnap = MakeSnapshot(engine);
 	if (!newSnap)
-		return;
+		return false;
 
-	s_registrations.push_back({ engine, newSnap });
+	try
+	{
+		s_registrations.push_back({ engine, newSnap });
+	}
+	catch (...)
+	{
+		delete newSnap;
+		return false;
+	}
 
 	if (s_refCount.fetch_add(1) == 0)
 	{
@@ -510,6 +518,7 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 			logger->clone("crash")->info("Crash handler installed (dump type: {})",
 				static_cast<int>(engine->EngineConfig.CrashHandler.DumpType));
 	}
+	return true;
 }
 
 void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
@@ -518,6 +527,18 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 	{
 	std::lock_guard<std::mutex> lock(s_installMutex);
 	ReapDeferredSnapshots();
+
+	auto found = s_registrations.end();
+	for (auto it = s_registrations.begin(); it != s_registrations.end(); ++it)
+	{
+		if (it->Engine == engine)
+		{
+			found = it;
+			break;
+		}
+	}
+	if (found == s_registrations.end())
+		return;
 
 	int expected = s_refCount.load(std::memory_order_relaxed);
 	do {
@@ -528,16 +549,8 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 
 	const int prev = expected;
 
-	CrashConfigSnapshot* removed = nullptr;
-	for (auto it = s_registrations.begin(); it != s_registrations.end(); ++it)
-	{
-		if (it->Engine == engine)
-		{
-			removed = it->Snapshot;
-			s_registrations.erase(it);
-			break;
-		}
-	}
+	CrashConfigSnapshot* removed = found->Snapshot;
+	s_registrations.erase(found);
 
 	CrashConfigSnapshot* active = s_snapshot.load(std::memory_order_acquire);
 	if (removed && active == removed)

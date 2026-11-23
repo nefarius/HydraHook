@@ -430,6 +430,8 @@ namespace
         if (other)
         {
             HydraHookCrashHandlerInstall(engine);
+            HydraHookCrashHandlerUninstall(other);
+            Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "unregistered uninstall keeps the owner", __FILE__, __LINE__);
             HydraHookCrashHandlerInstall(other);
             Check(HydraHookCrashHandlerActiveOwnerForTest() == engine, "first engine stays active", __FILE__, __LINE__);
             HydraHookCrashHandlerUninstall(engine);

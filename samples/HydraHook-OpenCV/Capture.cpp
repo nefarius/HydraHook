@@ -275,11 +275,29 @@ void Capture_Shutdown()
 {
 	if (g_captureShutdownDone.exchange(true))
 		return;
-	const bool windowDrained = Overlay_UnhookWindowProc();
+
+	g_workerRunning = false;
+	{
+		std::lock_guard<std::mutex> lock(g_workerMutex);
+		g_pendingApi = 0;
+		g_pendingD3D11Frame.release();
+		if (g_pendingD3D12Readback) { g_pendingD3D12Readback->Release(); g_pendingD3D12Readback = nullptr; }
+	}
+	g_workerCv.notify_all();
+	if (g_workerThread)
+	{
+		if (g_workerThread->joinable())
+			g_workerThread->join();
+		delete g_workerThread;
+		g_workerThread = nullptr;
+	}
+
+	bool windowDrained = false;
 	bool gpuIdle = false;
 	{
 		// In-flight Present callbacks hold g_renderMutex across ImGui use.
 		std::lock_guard<std::mutex> lock(g_renderMutex);
+		windowDrained = Overlay_UnhookWindowProc();
 		gpuIdle = D3D12_WaitForGpu(2000);
 		if (!windowDrained || !gpuIdle)
 		{
@@ -316,21 +334,6 @@ void Capture_Shutdown()
 			D3D11_ReleaseCaptureResources();
 			D3D12_CleanupInitResources();
 		}
-	}
-	g_workerRunning = false;
-	{
-		std::lock_guard<std::mutex> lock(g_workerMutex);
-		g_pendingApi = 0;
-		g_pendingD3D11Frame.release();
-		if (g_pendingD3D12Readback) { g_pendingD3D12Readback->Release(); g_pendingD3D12Readback = nullptr; }
-	}
-	g_workerCv.notify_all();
-	if (g_workerThread)
-	{
-		if (g_workerThread->joinable())
-			g_workerThread->join();
-		delete g_workerThread;
-		g_workerThread = nullptr;
 	}
 }
 
