@@ -1,0 +1,60 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Debug" />
+    <BuildType Name="Debug_LIB" />
+    <BuildType Name="Release" />
+    <BuildType Name="Release_LIB" />
+    <Platform Name="Win32" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/core/">
+    <Project Path="src/HydraHook/HydraHook.vcxproj" Id="db383579-da7f-48c0-ab1f-7c4c93544e2c" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/HydraHook-DirectXTK/HydraHook-DirectXTK.vcxproj" Id="32e54e8e-9bd1-4e71-aef6-b1e3090711aa">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+    </Project>
+    <Project Path="samples/HydraHook-FPS/HydraHook-FPS.vcxproj" Id="aa9b930a-b409-4cad-88f2-9edc4ab52139">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+    </Project>
+    <Project Path="samples/HydraHook-ImGui/HydraHook-ImGui.vcxproj" Id="fc86b49a-3a73-4d82-81ba-d72b54c9132d">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+    </Project>
+    <Project Path="samples/HydraHook-OpenCV/HydraHook-OpenCV.vcxproj" Id="7e8f9a0b-1c2d-4e5f-8a9b-0c1d2e3f4a5b">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+    </Project>
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="LICENSE" />
+    <File Path="prepare-deps.bat" />
+    <File Path="README.md" />
+    <File Path="vcpkg-configuration.json" />
+    <File Path="vcpkg.json" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/cpp/HydraHookTestHost.vcxproj" Id="c2f5d4b3-7011-4b88-ae32-3d8b9c6f2002">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+      <Build Solution="Debug|*" Project="false" />
+      <Build Solution="Release|*" Project="false" />
+    </Project>
+    <Project Path="tests/cpp/HydraHookTests.vcxproj" Id="b1e4c3a2-6f10-4a77-9d21-2c7a8b5e1f01">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+      <Build Solution="Debug|*" Project="false" />
+      <Build Solution="Release|*" Project="false" />
+    </Project>
+    <Project Path="tests/cpp/HydraHookWarpSmokeTests.vcxproj" Id="d306e5c4-8122-4c99-bf43-4e9cad703003">
+      <BuildType Solution="Debug_LIB|*" Project="Debug" />
+      <BuildType Solution="Release_LIB|*" Project="Release" />
+      <Build Solution="Debug|*" Project="false" />
+      <Build Solution="Release|*" Project="false" />
+    </Project>
+  </Folder>
+</Solution>

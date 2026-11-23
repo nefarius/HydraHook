@@ -1,6 +1,6 @@
 @echo off
-REM Install vcpkg dependencies. Run this from "Developer Command Prompt for VS 2022" or
-REM "x64 Native Tools Command Prompt for VS 2022" (or "x86 Native Tools") before building from Visual Studio.
+REM Install vcpkg dependencies. Run this from "Developer Command Prompt for VS 2026" or
+REM "x64 Native Tools Command Prompt for VS 2026" (or "x86 Native Tools") before building from Visual Studio.
 REM
 REM Usage: prepare-deps.bat [platform]
 REM   platform: Win32|x86 - install x86-windows-static only (for Win32 builds)

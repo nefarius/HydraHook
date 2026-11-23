@@ -49,18 +49,20 @@ There is no HydraHook section on docs.nefarius.at. Do not invent one.
 
 ## Build, tests, and dependencies
 
-- Default branch is `master`. Solution is `HydraHook.sln`. Toolset is v143. Configurations: `Debug`, `Debug_LIB`, `Release`, `Release_LIB` for `Win32` and `x64`.
+- Default branch is `master`. Solution is `HydraHook.slnx`. Toolset is v145 (Visual Studio 2026) and the language standard is C++23. Configurations: `Debug`, `Debug_LIB`, `Release`, `Release_LIB` for `Win32` and `x64`.
 - `Debug` / `Release` produce `HydraHook.dll`. `Debug_LIB` / `Release_LIB` produce the static library and build the samples and `tests/cpp` projects against it.
 - vcpkg is a submodule. The manifest baseline is pinned in `vcpkg-configuration.json`. Triplets are `x86-windows-static` and `x64-windows-static`. `Directory.Build.targets` consumes `vcpkg_installed/<triplet>/<triplet>/`, the directory this vcpkg tool fills when the MSBuild install root is `vcpkg_installed/<triplet>/`.
 - Install dependencies with `prepare-deps.bat` (both triplets), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`.
 - Build:
 
 ```text
-msbuild HydraHook.sln /m /p:Configuration=Release_LIB /p:Platform=x64
-msbuild HydraHook.sln /m /p:Configuration=Release /p:Platform=x64 "/t:core\HydraHook"
+msbuild HydraHook.slnx /m /p:Configuration=Release_LIB /p:Platform=x64
+msbuild HydraHook.slnx /m /p:Configuration=Release /p:Platform=x64 "/t:core\HydraHook"
 ```
 
 Use `Platform=Win32` for x86. `Release_LIB` writes test executables to `bin\x64` or `bin\x86`.
+
+`Release_LIB` (static library) and `Release` (DLL import library) write the same `bin\<arch>\HydraHook.lib`. Delete that file before switching between the static-library and DLL Release configurations, or the tests fail to link with unresolved externals. Debug configurations write to `bin\<Configuration>\<arch>\` and need no cleanup.
 
 - Run `bin\<arch>\HydraHookTests.exe` and `bin\<arch>\HydraHookWarpSmokeTests.exe`. The smoke test needs `HydraHookTestHost.dll` beside it and a D3D11 WARP device.
 
