@@ -34,26 +34,96 @@ runs:
     - name: Resolve vcpkg cache key
       id: cache-meta
       shell: pwsh
+      env:
+        VCPKG_TRIPLET: ${{ inputs.triplet }}
+        VCPKG_FEATURES: ${{ inputs.features }}
       run: |
         $ErrorActionPreference = 'Stop'
         $vcpkgSha = git rev-parse "HEAD:vcpkg"
         if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD:vcpkg failed ($LASTEXITCODE)" }
-        $imageVersion = $env:ImageVersion
+
+        $toolset = $env:ImageVersion
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path -LiteralPath $vswhere) {
+          $found = @(
+            & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\cl.exe'
+          ) | Where-Object { $_ }
+          $cl = $found | Sort-Object -Descending | Select-Object -First 1
+          if ($cl) {
+            $toolset = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $cl))))
+          }
+        }
+        if (-not $toolset) { throw 'Could not resolve an MSVC toolset version or ImageVersion.' }
+
+        function ConvertTo-CanonicalJson([object]$Value) {
+          if ($null -eq $Value) { return 'null' }
+          if ($Value -is [string]) { return ($Value | ConvertTo-Json -Compress) }
+          if ($Value -is [bool] -or $Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]) {
+            return ($Value | ConvertTo-Json -Compress)
+          }
+          if ($Value -is [System.Collections.IDictionary]) {
+            $pairs = foreach ($key in (@($Value.Keys) | Sort-Object)) {
+              (($key | ConvertTo-Json -Compress) + ':' + (ConvertTo-CanonicalJson $Value[$key]))
+            }
+            return '{' + ($pairs -join ',') + '}'
+          }
+          if ($Value -is [System.Collections.IList]) {
+            $items = foreach ($item in $Value) { ConvertTo-CanonicalJson $item }
+            return '[' + ($items -join ',') + ']'
+          }
+          $props = @($Value.PSObject.Properties)
+          if ($Value -is [System.Management.Automation.PSCustomObject]) {
+            $pairs = foreach ($prop in ($props | Sort-Object Name)) {
+              (($prop.Name | ConvertTo-Json -Compress) + ':' + (ConvertTo-CanonicalJson $prop.Value))
+            }
+            return '{' + ($pairs -join ',') + '}'
+          }
+          return ($Value | ConvertTo-Json -Compress -Depth 30)
+        }
+
+        $manifest = Get-Content -LiteralPath 'vcpkg.json' -Raw | ConvertFrom-Json
+        $featureNames = @()
+        if ($env:VCPKG_FEATURES) {
+          $featureNames = @($env:VCPKG_FEATURES.Trim() -split '\s+' | Where-Object { $_ })
+        }
+        $selectedFeatures = [ordered]@{}
+        foreach ($name in $featureNames) {
+          $feature = $manifest.features.$name
+          if ($null -eq $feature) { throw "vcpkg.json has no feature '$name'." }
+          $selectedFeatures[$name] = $feature
+        }
+        $slice = [ordered]@{
+          dependencies = $manifest.dependencies
+          supports = $manifest.supports
+          features = $selectedFeatures
+        }
+
+        $tripletFile = Join-Path '.github\vcpkg-triplets' ($env:VCPKG_TRIPLET + '.cmake')
+        if (-not (Test-Path -LiteralPath $tripletFile)) { throw "Missing overlay triplet $tripletFile" }
+        $payload = @(
+          (Get-Content -LiteralPath 'vcpkg-configuration.json' -Raw)
+          (ConvertTo-CanonicalJson $slice)
+          (Get-Content -LiteralPath $tripletFile -Raw)
+        ) -join "`n"
+        $hashBytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($payload))
+        $depsHash = [System.Convert]::ToHexString($hashBytes).ToLowerInvariant()
+
         "vcpkg-sha=$vcpkgSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        "image-version=$imageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        Write-Output "vcpkg $vcpkgSha (ImageVersion=$imageVersion)"
+        "toolset=$toolset" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "deps-hash=$depsHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        Write-Output "vcpkg $vcpkgSha (toolset=$toolset, deps=$depsHash)"
 
     - name: Restore vcpkg binary archives
       id: cache-restore
       uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       with:
         path: vcpkg-archives
-        # vcpkg checks each archive's ABI hash, so a restore without ImageVersion
-        # ignores packages built by an older runner image.
-        key: vcpkg-v3-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.image-version }}
+        # The toolset segment is the MSVC directory version. vcpkg checks each
+        # archive's ABI hash, so a restore from another toolset is not reused.
+        key: vcpkg-v4-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ steps.cache-meta.outputs.deps-hash }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.toolset }}
         restore-keys: |
-          vcpkg-v3-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.image-version }}-partial-
-          vcpkg-v3-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-
+          vcpkg-v4-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ steps.cache-meta.outputs.deps-hash }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.toolset }}-partial-
+          vcpkg-v4-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ steps.cache-meta.outputs.deps-hash }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-
 
     - name: Configure vcpkg files binary cache
       shell: pwsh
@@ -94,12 +164,16 @@ runs:
       run: |
         $ErrorActionPreference = 'Stop'
         $installRoot = Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed\$env:VCPKG_TRIPLET"
+        $overlayTriplets = Join-Path $env:GITHUB_WORKSPACE '.github\vcpkg-triplets'
+        $vcpkgRoot = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
         $vcpkgArgs = @(
           'install',
           '--x-wait-for-lock',
           '--triplet', $env:VCPKG_TRIPLET,
           "--x-manifest-root=$env:GITHUB_WORKSPACE",
           "--x-install-root=$installRoot",
+          "--overlay-triplets=$overlayTriplets",
+          "--vcpkg-root=$vcpkgRoot",
           '--x-no-default-features'
         )
         $featureList = if ($env:VCPKG_FEATURES) { $env:VCPKG_FEATURES.Trim() } else { '' }
@@ -128,11 +202,11 @@ runs:
       uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       with:
         path: vcpkg-archives
-        key: vcpkg-v3-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.image-version }}
+        key: vcpkg-v4-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ steps.cache-meta.outputs.deps-hash }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.toolset }}
 
     - name: Save partial vcpkg binary archives on failure
       if: ${{ always() && steps.vcpkg-install.outcome == 'failure' && inputs.save-cache == 'true' && steps.cache-restore.outputs.cache-hit != 'true' && steps.archives-check.outputs.has-archives == 'true' }}
       uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       with:
         path: vcpkg-archives
-        key: vcpkg-v3-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.image-version }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
+        key: vcpkg-v4-${{ inputs.cache-scope }}-${{ inputs.triplet }}-${{ steps.cache-meta.outputs.deps-hash }}-${{ steps.cache-meta.outputs.vcpkg-sha }}-${{ steps.cache-meta.outputs.toolset }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
