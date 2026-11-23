@@ -1,0 +1,97 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# Do not cancel a master deploy that is already publishing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs:
+    name: Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Install Doxygen 1.18.0
+        run: |
+          set -euo pipefail
+          archive=doxygen-1.18.0.linux.bin.tar.gz
+          curl -fsSL -o "$archive" \
+            "https://github.com/doxygen/doxygen/releases/download/Release_1_18_0/${archive}"
+          # GitHub release asset digest for the official Linux binary archive.
+          echo "14fa81bdc34171edb5f1f02b1d60e74802f0439b77fa44e592565d517d72df90  ${archive}" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/doxygen"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/doxygen"
+          bin=$(find "$RUNNER_TEMP/doxygen" -type f -name doxygen | head -n 1)
+          if [ -z "$bin" ]; then
+            echo "doxygen binary not found in the official archive" >&2
+            exit 1
+          fi
+          echo "$(dirname "$bin")" >> "$GITHUB_PATH"
+          version=$("$bin" --version)
+          echo "$version"
+          printf '%s\n' "$version" | grep -q '^1.18.0'
+
+      - name: Lint API comments
+        run: |
+          set -euo pipefail
+          rm -rf docs/html
+          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
+          test -f docs/html/index.html
+
+      - name: Check documentation output
+        run: python3 .github/scripts/check_doxygen_html.py docs/html
+
+      - name: Upload HTML preview
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: doxygen-html
+          path: docs/html
+          if-no-files-found: error
+
+  deploy:
+    name: GitHub Pages
+    needs: docs
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Download validated HTML
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: doxygen-html
+          path: docs/html
+
+      - name: Require the validated site root
+        run: test -f docs/html/index.html
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: docs/html
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

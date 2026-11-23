@@ -1,5 +1,7 @@
-# Doxyfile for HydraHook - Windows C++ API Documentation
-# Compatible with Doxygen 1.9+ and Visual Studio IntelliSense
+# HydraHook reference.
+# Build with Doxygen 1.18.0: doxygen Doxyfile
+# Entry point: docs/html/index.html
+# Theme: Doxygen Awesome 2.5.0, sidebar-only layout.
 
 PROJECT_NAME           = "HydraHook"
 PROJECT_NUMBER         =
@@ -7,40 +9,44 @@ PROJECT_BRIEF          = "Direct3D and Core Audio hooking library for Windows"
 OUTPUT_DIRECTORY       = docs
 CREATE_SUBDIRS         = NO
 
-# Input
-INPUT                  = include/HydraHook src/HydraHook
+# Input. Markdown files listed here are included even though FILE_PATTERNS is source only.
+INPUT                  = docs/mainpage.md \
+                         docs/architecture.md \
+                         include/HydraHook \
+                         src/HydraHook
 FILE_PATTERNS          = *.h *.hpp *.cpp *.c
 RECURSIVE              = YES
 EXCLUDE                = vcpkg
 EXCLUDE_PATTERNS       = */vcpkg/* */vcpkg_installed/* */detours/* */spdlog/* *.rc
+USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
 
-# Source browsing
+# Source browsing. Same setting for the public headers and the engine sources.
 SOURCE_BROWSER         = YES
 INLINE_SOURCES         = NO
 REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
+VERBATIM_HEADERS       = NO
 
-# Preprocessing
+# Preprocessing.
+# Strip only _Function_class_(x) and map FORCEINLINE to inline.
+# Leave _In_, _Out_, _In_opt_, and _Out_opt_ unexpanded so they stay in signatures.
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
-EXPAND_ONLY_PREDEF     = NO
+EXPAND_ONLY_PREDEF     = YES
 PREDEFINED             = "HYDRAHOOK_API=" \
                          "WINAPI=" \
                          "APIENTRY=" \
-                         "_In_=" \
-                         "_Out_=" \
-                         "_In_opt_=" \
-                         "_Out_opt_=" \
                          "_Function_class_(x)=" \
                          "FORCEINLINE=inline"
 
-# Extraction
+# Extraction. Engine headers are marked @internal; include them in this reference.
 EXTRACT_ALL            = YES
 EXTRACT_PRIVATE        = NO
 EXTRACT_STATIC         = YES
 EXTRACT_LOCAL_CLASSES  = YES
 HIDE_UNDOC_MEMBERS     = NO
 HIDE_UNDOC_CLASSES     = NO
+INTERNAL_DOCS          = YES
 
 # Output formats
 GENERATE_HTML          = YES
@@ -49,28 +55,34 @@ GENERATE_RTF           = NO
 GENERATE_XML           = NO
 GENERATE_MAN           = NO
 
-# HTML options
+# Sidebar-only Doxygen Awesome. FULL_SIDEBAR must stay NO.
 HTML_OUTPUT            = html
+HTML_COLORSTYLE        = LIGHT
+HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome/doxygen-awesome.css \
+                         docs/doxygen-awesome/doxygen-awesome-sidebar-only.css
+HTML_EXTRA_FILES       = docs/doxygen-awesome/mermaid-offline.js
+# The architecture page includes a Mermaid diagram. Render it from a local
+# module so the HTML tree does not depend on a CDN.
+MERMAID_RENDER_MODE    = CLIENT_SIDE
+MERMAID_JS_URL         = mermaid-offline.js
 HTML_DYNAMIC_SECTIONS  = NO
 DISABLE_INDEX          = NO
 GENERATE_TREEVIEW      = YES
+FULL_SIDEBAR           = NO
+SEARCHENGINE           = YES
+# Same file names on Windows and Linux.
+CASE_SENSE_NAMES       = NO
 
-# Alphabetical class index
 ALPHABETICAL_INDEX     = YES
 
-# Diagram (optional)
 HAVE_DOT               = NO
 
-# C/C++ specific
+# Keep the C++ class index for the engine. Public headers are still C.
 OPTIMIZE_OUTPUT_FOR_C  = NO
 OPTIMIZE_OUTPUT_JAVA   = NO
 TYPEDEF_HIDES_STRUCT   = YES
 
-# Warnings
 QUIET                  = NO
 WARNINGS               = YES
 WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
-
-# @internal - hide from public docs (set to YES to include)
-INTERNAL_DOCS          = NO
