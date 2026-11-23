@@ -23,10 +23,33 @@ SOFTWARE.
 */
 
 #include "dllmain.h"
+#include "KeyToggle.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
+
+// F12 shows or hides the whole overlay; while it is visible it also takes input.
+static std::atomic<bool> g_Visible{ true };
+
+OverlayFrameState UpdateOverlayState()
+{
+	static KeyToggle f12;
+	if (f12.Poll(VK_F12))
+		g_Visible.store(!g_Visible.load());
+	const bool visible = g_Visible.load();
+	return { visible, visible };
+}
+
+void OnOverlayContextCreated(ImGuiIO&)
+{
+}
+
+void OnOverlayShutdown()
+{
+	g_Visible.store(true);
+}
 
 /**
  * @brief Renders the ImGui overlay/demo UI containing plots and widgets.

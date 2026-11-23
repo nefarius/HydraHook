@@ -26,6 +26,12 @@
     <ClInclude Include="..\HydraHook-ImGui\dllmain.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\HydraHook-ImGui\KeyToggle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FpsConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="FrameRate.h">
       <Filter>Header Files</Filter>
     </ClInclude>

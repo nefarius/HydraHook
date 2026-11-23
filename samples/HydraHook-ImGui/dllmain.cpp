@@ -49,8 +49,8 @@ SOFTWARE.
 #endif
 #include <imgui_impl_win32.h>
 
-// Overlay visibility (F12). The window-proc hook reads this and only feeds ImGui while it is set.
-static std::atomic<bool> g_ShowOverlay{ true };
+// Set from the scene's OverlayFrameState::acceptInput. The window-proc hook only feeds ImGui while it is set.
+static std::atomic<bool> g_AcceptInput{ false };
 static std::atomic<HWND> g_InputWindow{ nullptr };
 // Buttons this hook forwarded to ImGui, and whether that caused the Win32 backend to take capture.
 static std::atomic<uint32_t> g_ForwardedButtons{ 0 };
@@ -163,33 +163,15 @@ static void DeliverPendingRelease()
 		HydraHookEngineLogError("Couldn't post overlay input release (error %lu)", ::GetLastError());
 }
 
-static void PollOverlayToggle()
-{
-	static std::mutex mutex;
-	static bool pressed = false;
-
-	std::lock_guard<std::mutex> lock(mutex);
-	const bool down = (::GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-	if (!down)
-	{
-		pressed = false;
-		return;
-	}
-	if (pressed)
-		return;
-
-	pressed = true;
-	const bool show = !g_ShowOverlay.load();
-	g_ShowOverlay.store(show);
-	if (!show)
-		RequestOverlayRelease();
-}
-
+// Asks the scene what to do this frame. Losing input acceptance queues the same release as hiding.
+// Returns whether the scene should render.
 static bool BeginOverlayFrame()
 {
-	PollOverlayToggle();
+	const OverlayFrameState state = UpdateOverlayState();
+	if (g_AcceptInput.exchange(state.acceptInput) && !state.acceptInput)
+		RequestOverlayRelease();
 	DeliverPendingRelease();
-	return g_ShowOverlay.load();
+	return state.render;
 }
 
 static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
@@ -313,12 +295,9 @@ void EvtHydraHookGameHooked(
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
-	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // Enable Keyboard Controls
-	//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;   // Enable Gamepad Controls
-
 	// Setup Dear ImGui style
 	ImGui::StyleColorsDark();
-	//ImGui::StyleColorsClassic();
+	OnOverlayContextCreated(io);
 
 	HYDRAHOOK_D3D9_EVENT_CALLBACKS d3d9;
 	HYDRAHOOK_D3D9_EVENT_CALLBACKS_INIT(&d3d9);
@@ -445,7 +424,8 @@ void EvtHydraHookGameUnhooked(
 	g_d3d12InitGuard.Reset();
 #endif
 
-	g_ShowOverlay.store(true);
+	g_AcceptInput.store(false);
+	OnOverlayShutdown();
 	g_GameVersion = HydraHookDirect3DVersionUnknown;
 }
 
@@ -1245,11 +1225,11 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	}
 
 	// Hidden, waiting for a queued release, or tearing down: do not hand new input to ImGui.
-	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load())
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_AcceptInput.load())
 		return 0;
 
 	ImGuiScope scope;
-	if (g_HoldInput.load() || g_InputClosed.load() || !g_ShowOverlay.load()
+	if (g_HoldInput.load() || g_InputClosed.load() || !g_AcceptInput.load()
 		|| !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 		return 0;
 

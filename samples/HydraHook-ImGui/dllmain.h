@@ -38,6 +38,19 @@ SOFTWARE.
 
 void HookWindowProc(HWND hWnd);
 bool UnhookWindowProc();
+// Scene contract implemented by each sample that links the shared host (dllmain.cpp).
+struct OverlayFrameState
+{
+	bool render;      // Call RenderScene() this frame.
+	bool acceptInput; // Forward mouse and keyboard messages to ImGui.
+};
+
+// Called once per Present, before ImGui::NewFrame(). Not under the ImGui lock; may run on any render thread.
+OverlayFrameState UpdateOverlayState();
+// Called right after ImGui::CreateContext() and the default style are set up.
+void OnOverlayContextCreated(ImGuiIO& io);
+// Called after the backends are shut down and just before the host forgets the renderer (unhook).
+void OnOverlayShutdown();
 void RenderScene();
 
 IMGUI_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
