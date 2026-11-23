@@ -185,6 +185,7 @@ static ResettableInitGuard g_d3d12InitGuard;
 #endif
 
 #ifdef _WIN64
+static void D3D12_CleanupOverlayResources();
 static void D3D12_CleanupInitResources();
 static void D3D12_WaitForGpu();
 #endif
@@ -268,6 +269,7 @@ HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D12 = sizeof(void*) == 8;
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
 	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGameUnhooked;
+	cfg.EvtHydraHookGamePreExit = EvtHydraHookGamePreExit;
 	cfg.CrashHandler.IsEnabled = TRUE;
 )
 
@@ -364,10 +366,17 @@ void EvtHydraHookGameUnhooked(
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
 	// Restore window procedures and wait for in-flight handlers before ImGui is torn down.
-	// A handler that called unhook itself cannot be waited on; destroying the context under it is a use-after-free.
+	// A handler that called unhook itself or stalled past the timeout cannot be waited on;
+	// destroying the context under it is a use-after-free, so only drop our own render targets.
 	if (!UnhookWindowProc())
 	{
-		HydraHookEngineLogError("WNDPROC unhook ran inside a message handler; leaving the ImGui context alive");
+		HydraHookEngineLogError("WNDPROC unhook did not drain in-flight message handlers; leaving the ImGui context alive");
+		g_d3d10Target.Reset();
+		g_d3d11Target.Reset();
+#ifdef _WIN64
+		D3D12_WaitForGpu();
+		D3D12_CleanupOverlayResources();
+#endif
 		return;
 	}
 
@@ -879,8 +888,8 @@ static void D3D12_WaitForGpu()
 	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
 	if (g_d3d12_pFence->GetCompletedValue() >= fence)
 		return;
-	g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent);
-	WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
+	if (SUCCEEDED(g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent)))
+		WaitForSingleObject(g_d3d12_hFenceEvent, INFINITE);
 }
 
 /**
@@ -1301,38 +1310,77 @@ void HookWindowProc(HWND hWnd)
 		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
 }
 
+void EvtHydraHookGamePreExit(
+	PHYDRAHOOK_ENGINE EngineHandle)
+{
+	(void)EngineHandle;
+
+	// Runs on the thread initiating shutdown (for PostQuitMessage, usually the window thread)
+	// before PerformShutdownCleanup blocks waiting on the worker thread. Close overlay input and
+	// release any capture here so UnhookWindowProc does not need a cross-thread SendMessage.
+	g_ReleasePending.store(false);
+	g_HoldInput.store(true);
+	bool needsWindowRelease = false;
+	{
+		ImGuiScope scope;
+		g_InputClosed.store(true);
+		needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
+	}
+	if (!needsWindowRelease)
+	{
+		g_HoldInput.store(false);
+		return;
+	}
+
+	const HWND window = g_InputWindow.load();
+	if (window != nullptr && ::IsWindow(window)
+		&& ::GetWindowThreadProcessId(window, nullptr) == ::GetCurrentThreadId())
+	{
+		ReleaseOverlayInput(window, 0, true);
+	}
+}
+
 /**
  * @brief Restores hooked window procedures and waits for in-flight handlers to finish.
  *
- * @return false when called from inside a hooked message. The caller must not destroy ImGui
- *         until that handler has returned.
+ * @return false when called from inside a hooked message handler or when draining timed out.
+ *         The caller must not destroy ImGui while a handler may still be running.
  */
 bool UnhookWindowProc()
 {
 	g_ReleasePending.store(false);
 	g_HoldInput.store(true);
+	bool needsWindowRelease = false;
 	{
-		// Block new button-downs before the release runs. Drop the lock before SendMessage
-		// so the window thread can enter the handler.
+		// Block new button-downs before checking whether the window thread still needs to release
+		// capture or held buttons. Drop the lock before messaging so the window thread can enter.
 		ImGuiScope scope;
 		g_InputClosed.store(true);
+		needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
 	}
 	const HWND window = g_InputWindow.exchange(nullptr);
 	const UINT releaseMessage = OverlayReleaseMessage();
-	if (window != nullptr && releaseMessage != 0 && ::IsWindow(window))
+	if (needsWindowRelease && window != nullptr && releaseMessage != 0 && ::IsWindow(window))
 	{
 		const DWORD owner = ::GetWindowThreadProcessId(window, nullptr);
 		if (owner == ::GetCurrentThreadId())
+		{
 			ReleaseOverlayInput(window, 0, true);
+		}
 		else
-			::SendMessageW(window, releaseMessage, 0, 0);
+		{
+			DWORD_PTR sendResult = 0;
+			if (!::SendMessageTimeoutW(window, releaseMessage, 0, 0,
+				SMTO_ABORTIFHUNG | SMTO_NORMAL, 250, &sendResult))
+			{
+				HydraHookEngineLogWarning("Timed out releasing overlay input on window thread (error %lu)", ::GetLastError());
+			}
+		}
 	}
-	else
-	{
-		g_ForwardedButtons.store(0);
-		g_OverlayOwnsCapture.store(false);
-		g_HoldInput.store(false);
-	}
+
+	g_ForwardedButtons.store(0);
+	g_OverlayOwnsCapture.store(false);
+	g_HoldInput.store(false);
 
 	const bool drained = WindowProcHook::Instance().UnhookAll();
 	if (drained)

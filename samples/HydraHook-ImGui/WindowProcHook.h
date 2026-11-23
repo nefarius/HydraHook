@@ -189,10 +189,12 @@ public:
 		return restored;
 	}
 
-	// Disables handlers, restores every window we are still on top of, and waits until dispatches
-	// that have entered DispatchProc have finished. The wait is skipped when the caller is itself
-	// inside a dispatch (it would wait for itself). Returns false when that wait was skipped.
-	bool UnhookAll()
+	// Disables handlers, restores every window we are still on top of, and waits up to
+	// drainTimeoutMs until in-flight message handlers have finished. Original window procedures
+	// are not waited on: a host WNDPROC may trigger unhook (for example via PostQuitMessage) and
+	// wait for this call to return. The wait is skipped when the caller is itself inside a message
+	// handler (it would wait for itself). Returns false when the wait was skipped or timed out.
+	bool UnhookAll(DWORD drainTimeoutMs = 1000)
 	{
 		std::string error;
 		{
@@ -219,11 +221,19 @@ public:
 			}
 		}
 
-		const bool drained = Depth() == 0;
-		if (drained)
+		bool drained = HandlerDepth() == 0;
+		if (drained && inHandler_.load() != 0)
 		{
-			while (entered_.load() != 0)
+			const ULONGLONG deadline = ::GetTickCount64() + drainTimeoutMs;
+			while (inHandler_.load() != 0)
+			{
+				if (::GetTickCount64() >= deadline)
+				{
+					drained = false;
+					break;
+				}
 				::Sleep(1);
+			}
 		}
 
 		{
@@ -274,27 +284,59 @@ private:
 
 	WindowProcHook() = default;
 
-	static uint32_t& Depth()
+	static uint32_t& HandlerDepth()
 	{
 		static thread_local uint32_t depth = 0;
 		return depth;
 	}
 
-	struct DispatchScope
+	// Tracks an in-flight MessageHandler invocation across normal return and exceptions.
+	// Released before forwarding to the original WNDPROC so a host procedure can unhook safely.
+	struct HandlerGuard
 	{
-		explicit DispatchScope(std::atomic<uint32_t>& entered) : entered_(entered)
+		explicit HandlerGuard(std::atomic<uint32_t>& counter) : counter_(counter) {}
+
+		void arm()
 		{
-			++entered_;
-			++Depth();
+			++counter_;
+			armed_ = true;
 		}
-		~DispatchScope()
+
+		void enterDepth()
 		{
-			--Depth();
+			++HandlerDepth();
+			depthEntered_ = true;
 		}
-		std::atomic<uint32_t>& entered_;
+
+		void leave()
+		{
+			if (depthEntered_)
+			{
+				--HandlerDepth();
+				depthEntered_ = false;
+			}
+			if (armed_)
+			{
+				--counter_;
+				armed_ = false;
+			}
+		}
+
+		~HandlerGuard()
+		{
+			leave();
+		}
+
+		HandlerGuard(const HandlerGuard&) = delete;
+		HandlerGuard& operator=(const HandlerGuard&) = delete;
+
+	private:
+		std::atomic<uint32_t>& counter_;
+		bool armed_ = false;
+		bool depthEntered_ = false;
 	};
 
-	// Decrements the dispatch counters on every exit, including when logging throws.
+	// Decrements the per-window in-flight counter on every exit, including when logging throws.
 	struct DispatchExit
 	{
 		WindowProcHook& self;
@@ -303,15 +345,12 @@ private:
 
 		~DispatchExit()
 		{
+			if (!inFlight)
+				return;
 			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
-			if (inFlight)
-			{
-				const auto it = self.windows_.find(hwnd);
-				if (it != self.windows_.end() && it->second.inFlight > 0)
-					--it->second.inFlight;
-			}
-			if (self.entered_.load() > 0)
-				--self.entered_;
+			const auto it = self.windows_.find(hwnd);
+			if (it != self.windows_.end() && it->second.inFlight > 0)
+				--it->second.inFlight;
 		}
 	};
 
@@ -394,8 +433,8 @@ private:
 		WindowProcHook& self = Instance();
 		if (const BeforeDispatch gate = self.beforeDispatch_.load(std::memory_order_acquire))
 			gate(msg);
-		DispatchScope scope(self.entered_);
 		DispatchExit exit{ self, hWnd };
+		HandlerGuard handlerGuard(self.inHandler_);
 
 		WNDPROC original = nullptr;
 		MessageHandler handler = nullptr;
@@ -412,7 +451,11 @@ private:
 				exit.inFlight = true;
 				const bool destroy = msg == WM_DESTROY || msg == WM_NCDESTROY;
 				if (!destroy && self.dispatchEnabled_ && !it->second.passthrough && !it->second.retired)
+				{
 					handler = self.messageHandler_;
+					if (handler)
+						handlerGuard.arm();
+				}
 				if (destroy)
 				{
 					DWORD winError = 0;
@@ -454,7 +497,9 @@ private:
 			result = ::DefWindowProcW(hWnd, msg, wParam, lParam);
 		else if (handler)
 		{
+			handlerGuard.enterDepth();
 			const LRESULT handled = handler(hWnd, msg, wParam, lParam);
+			handlerGuard.leave();
 			result = handled != 0
 				? handled
 				: (original ? ::CallWindowProcW(original, hWnd, msg, wParam, lParam)
@@ -476,6 +521,6 @@ private:
 	bool dispatchEnabled_ = false;
 	bool removing_ = false;
 	bool pinned_ = false;
-	std::atomic<uint32_t> entered_{ 0 };
+	std::atomic<uint32_t> inHandler_{ 0 };
 	std::atomic<BeforeDispatch> beforeDispatch_{ nullptr };
 };

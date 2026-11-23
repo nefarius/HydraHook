@@ -590,6 +590,10 @@ namespace
     std::atomic<int> g_errorCalls{0};
     std::atomic<LRESULT> g_reentrantResult{-1};
     std::atomic<int> g_beforeDispatchPhase{0};
+    std::atomic<int> g_origUnhookDrained{-1};
+    std::atomic<int> g_handlerUnhookDrained{-1};
+    HANDLE g_stalledHandlerEntered = nullptr;
+    HANDLE g_stalledHandlerRelease = nullptr;
 
     void TestBeforeDispatch(UINT msg)
     {
@@ -607,6 +611,17 @@ namespace
         {
         case WM_APP + 1:
             return 0x1234;
+        case WM_APP + 4:
+        {
+            // Simulate a host WNDPROC calling PostQuitMessage / ExitProcess and blocking
+            // while the engine worker thread calls UnhookAll().
+            std::thread worker([]()
+            {
+                g_origUnhookDrained.store(WindowProcHook::Instance().UnhookAll(500) ? 1 : 0);
+            });
+            worker.join();
+            return 0x44;
+        }
         case WM_APP + 9:
             DestroyWindow(hWnd);
             PostQuitMessage(0);
@@ -638,6 +653,19 @@ namespace
             return 0x77;
         if (msg == WM_APP + 3)
             g_reentrantResult = SendMessageW(hWnd, WM_APP + 1, 0, 0);
+        if (msg == WM_APP + 5)
+        {
+            g_handlerUnhookDrained.store(WindowProcHook::Instance().UnhookAll(500) ? 1 : 0);
+            return 0x55;
+        }
+        if (msg == WM_APP + 6)
+        {
+            if (g_stalledHandlerEntered)
+                SetEvent(g_stalledHandlerEntered);
+            if (g_stalledHandlerRelease)
+                WaitForSingleObject(g_stalledHandlerRelease, 5000);
+            return 0x66;
+        }
         return 0;
     }
 
@@ -881,6 +909,93 @@ namespace
         SendMessageW(shw, WM_APP + 9, 0, 0);
         owner.join();
         Check(hook.HookedCount() == 0, "no active hooks remain", __FILE__, __LINE__);
+        }
+
+        // Cross-thread UnhookAll while the host original WNDPROC is blocked waiting for it
+        // (reproduces PostQuitMessage/ExitProcess called from inside a host WNDPROC).
+        {
+            HWND w5 = MakeTestWindow();
+            Check(w5 != nullptr, "orig-unhook window created", __FILE__, __LINE__);
+            Check(hook.Hook(w5), "hook before orig-triggered UnhookAll", __FILE__, __LINE__);
+            g_origUnhookDrained.store(-1);
+            Check(SendMessageW(w5, WM_APP + 4, 0, 0) == 0x44,
+                  "orig-triggered cross-thread UnhookAll does not deadlock", __FILE__, __LINE__);
+            Check(g_origUnhookDrained.load() == 1,
+                  "UnhookAll drains without waiting on original WNDPROC", __FILE__, __LINE__);
+            Check(GetWindowLongPtrW(w5, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+                  "original restored during orig-triggered UnhookAll", __FILE__, __LINE__);
+            Check(hook.HookedCount() == 0, "no active hooks after orig-triggered UnhookAll", __FILE__, __LINE__);
+            DestroyWindow(w5);
+        }
+
+        // Same-thread UnhookAll from inside MessageHandler skips the drain wait and returns false.
+        {
+            HWND w6 = MakeTestWindow();
+            Check(w6 != nullptr, "reentrant-unhook window created", __FILE__, __LINE__);
+            Check(hook.Hook(w6), "hook before handler-triggered UnhookAll", __FILE__, __LINE__);
+            g_handlerUnhookDrained.store(-1);
+            Check(SendMessageW(w6, WM_APP + 5, 0, 0) == 0x55, "handler-triggered UnhookAll returns", __FILE__, __LINE__);
+            Check(g_handlerUnhookDrained.load() == 0,
+                  "re-entrant UnhookAll from handler reports not drained", __FILE__, __LINE__);
+            Check(GetWindowLongPtrW(w6, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
+                  "original restored during handler-triggered UnhookAll", __FILE__, __LINE__);
+            DestroyWindow(w6);
+        }
+
+        // Bounded drain timeout when another thread is stuck inside MessageHandler.
+        {
+            g_stalledHandlerEntered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            g_stalledHandlerRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            std::atomic<HWND> stalledHwnd{nullptr};
+            std::atomic<int> stalledReady{0};
+            std::thread stalledOwner([&]()
+            {
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    stalledReady.store(-1);
+                    return;
+                }
+                stalledHwnd.store(hw);
+                stalledReady.store(1);
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+            while (stalledReady.load() == 0)
+                SwitchToThread();
+            if (stalledReady.load() < 0)
+            {
+                stalledOwner.join();
+                Check(false, "stalled-handler owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = stalledHwnd.load();
+                Check(hook.Hook(hw), "hook before stalled-handler UnhookAll", __FILE__, __LINE__);
+                std::thread sender([hw]() { SendMessageW(hw, WM_APP + 6, 0, 0); });
+                Check(WaitForSingleObject(g_stalledHandlerEntered, 2000) == WAIT_OBJECT_0,
+                      "stalled handler entered", __FILE__, __LINE__);
+                Check(!hook.UnhookAll(50), "UnhookAll times out cleanly when handler is stalled", __FILE__, __LINE__);
+                SetEvent(g_stalledHandlerRelease);
+                sender.join();
+                Check(hook.UnhookAll(200), "UnhookAll drains once stalled handler returns", __FILE__, __LINE__);
+                SendMessageW(hw, WM_APP + 9, 0, 0);
+                stalledOwner.join();
+            }
+            if (g_stalledHandlerEntered)
+            {
+                CloseHandle(g_stalledHandlerEntered);
+                g_stalledHandlerEntered = nullptr;
+            }
+            if (g_stalledHandlerRelease)
+            {
+                CloseHandle(g_stalledHandlerRelease);
+                g_stalledHandlerRelease = nullptr;
+            }
         }
 
         hook.SetMessageHandler(nullptr);

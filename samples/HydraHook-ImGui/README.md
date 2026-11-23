@@ -23,7 +23,7 @@ Replace `hl2.exe` with your target process name.
 - ImGui sees every message first. If it returns non-zero, the host window does not receive that message. The sample does not consult `WantCaptureMouse` / `WantCaptureKeyboard`.
 - ImGui calls from the window thread and from Present share one lock.
 - `WM_DESTROY` and `WM_NCDESTROY` always reach the host procedure.
-- On unhook the original procedure is restored. The first successful hook pins this DLL for the rest of the process (`GET_MODULE_HANDLE_EX_FLAG_PIN`), so a later `FreeLibrary` does not unmap a thread still inside the dispatcher. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through.
+- On unhook the original procedure is restored and in-flight message handlers are drained with a bounded wait (original host procedures are not waited on, so a host `WNDPROC` can trigger shutdown without deadlocking). During process shutdown, `EvtHydraHookGamePreExit` releases any overlay capture on the initiating window thread before the shutdown hook waits on the worker thread; cross-thread unhook skips messaging the window thread when no capture or button state is held and uses `SendMessageTimeoutW` otherwise. The first successful hook pins this DLL for the rest of the process (`GET_MODULE_HANDLE_EX_FLAG_PIN`), so a later `FreeLibrary` does not unmap a thread still inside the dispatcher. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through.
 
 ## Shared host
 
