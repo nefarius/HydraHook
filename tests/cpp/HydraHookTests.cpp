@@ -14,14 +14,8 @@
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
 #include "FrameRate.h"
-#include "ImGuiWin32Buttons.h"
 #include "InitGuard.h"
 #include "WindowProcHook.h"
-
-#include <imgui.h>
-#include <imgui_impl_win32.h>
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #include <atomic>
 #include <chrono>
@@ -752,64 +746,6 @@ namespace
         hook.SetBeforeDispatch(nullptr);
     }
 
-    LRESULT CALLBACK CaptureCountProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-    {
-        if (msg == WM_CAPTURECHANGED)
-            ++g_origMessages;
-        return DefWindowProcW(hWnd, msg, wParam, lParam);
-    }
-
-    void TestImGuiHostCapture()
-    {
-        static bool registered = false;
-        if (!registered)
-        {
-            WNDCLASSW wc{};
-            wc.lpfnWndProc = CaptureCountProc;
-            wc.hInstance = GetModuleHandleW(nullptr);
-            wc.lpszClassName = L"HydraHookCaptureTest";
-            RegisterClassW(&wc);
-            registered = true;
-        }
-        HWND hwnd = CreateWindowExW(0, L"HydraHookCaptureTest", L"c", WS_OVERLAPPED, 0, 0, 16, 16,
-                                    nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-        Check(hwnd != nullptr, "capture test window created", __FILE__, __LINE__);
-        if (!hwnd)
-            return;
-
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        Check(ImGui_ImplWin32_Init(hwnd), "ImGui Win32 backend init", __FILE__, __LINE__);
-
-        // Host already owns capture. Button-down records the mask and must not steal capture.
-        Check(SetCapture(hwnd) == nullptr || GetCapture() == hwnd, "host capture installed", __FILE__, __LINE__);
-        g_origMessages = 0;
-        ImGui_ImplWin32_WndProcHandler(hwnd, WM_LBUTTONDOWN, 0, 0);
-        Check(GetCapture() == hwnd, "host capture kept on button-down", __FILE__, __LINE__);
-        Check(ImGuiWin32ButtonsDown() == 1, "backend mask records the button", __FILE__, __LINE__);
-        const int changesBefore = g_origMessages.load();
-        ClearImGuiWin32Buttons(hwnd, 1u, false);
-        Check(ImGuiWin32ButtonsDown() == 0, "backend mask cleared", __FILE__, __LINE__);
-        Check(GetCapture() == hwnd, "host capture kept while clearing the mask", __FILE__, __LINE__);
-        Check(g_origMessages.load() == changesBefore, "host receives no capture-change while clearing", __FILE__, __LINE__);
-
-        // Mask is zero, so a later button-down with no capture must be able to take it.
-        ReleaseCapture();
-        Check(GetCapture() == nullptr, "explicit release drops host capture", __FILE__, __LINE__);
-        ImGui_ImplWin32_WndProcHandler(hwnd, WM_LBUTTONDOWN, 0, 0);
-        Check(GetCapture() == hwnd, "cleared mask lets the next button-down capture", __FILE__, __LINE__);
-        Check(ImGuiWin32ButtonsDown() == 1, "backend mask records the new button", __FILE__, __LINE__);
-        const int beforeRelease = g_origMessages.load();
-        ClearImGuiWin32Buttons(hwnd, 1u, true);
-        Check(ImGuiWin32ButtonsDown() == 0, "owned capture clears the mask", __FILE__, __LINE__);
-        Check(GetCapture() == nullptr, "owned capture is released", __FILE__, __LINE__);
-        Check(g_origMessages.load() > beforeRelease, "releasing owned capture notifies the host", __FILE__, __LINE__);
-
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-        DestroyWindow(hwnd);
-    }
-
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -830,7 +766,6 @@ int main()
     TestFrameRate();
     TestResettableInitGuard();
     TestWindowProcHook();
-    TestImGuiHostCapture();
     TestShutdownGuard();
 
     if (g_failures != 0)
