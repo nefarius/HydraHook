@@ -263,6 +263,9 @@ def check_site(html_dir: Path) -> None:
         fail("landing page should load the local Mermaid module and no CDN")
     if not (html_dir / "mermaid-offline.js").is_file():
         fail("missing mermaid-offline.js")
+    license_file = html_dir / "LICENSE"
+    if not license_file.is_file() or "Permission is hereby granted" not in license_file.read_text(encoding="utf-8"):
+        fail("generated HTML is missing the theme MIT license")
     for page in html_dir.rglob("*.html"):
         if "cdn.jsdelivr.net" in page.read_text(encoding="utf-8"):
             fail(f"{page.name} loads a remote script")

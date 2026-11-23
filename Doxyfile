@@ -60,7 +60,8 @@ HTML_OUTPUT            = html
 HTML_COLORSTYLE        = LIGHT
 HTML_EXTRA_STYLESHEET  = docs/doxygen-awesome/doxygen-awesome.css \
                          docs/doxygen-awesome/doxygen-awesome-sidebar-only.css
-HTML_EXTRA_FILES       = docs/doxygen-awesome/mermaid-offline.js
+HTML_EXTRA_FILES       = docs/doxygen-awesome/mermaid-offline.js \
+                         docs/doxygen-awesome/LICENSE
 # The architecture page includes a Mermaid diagram. Render it from a local
 # module so the HTML tree does not depend on a CDN.
 MERMAID_RENDER_MODE    = CLIENT_SIDE
