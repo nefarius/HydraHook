@@ -48,9 +48,9 @@ void Overlay_HookWindowProc(HWND hWnd)
 	hook.Hook(hWnd);
 }
 
-void Overlay_UnhookWindowProc(void)
+bool Overlay_UnhookWindowProc(void)
 {
-	WindowProcHook::Instance().UnhookAll();
+	return WindowProcHook::Instance().UnhookAll();
 }
 
 void Overlay_ToggleState(int key, bool& toggle)

@@ -65,16 +65,29 @@ struct CrashRegistration
 };
 
 static std::vector<CrashRegistration> s_registrations;
+static std::vector<CrashConfigSnapshot*> s_deferredSnapshots;
+
+static void ReapDeferredSnapshots()
+{
+	if (s_dumpInFlight.load(std::memory_order_seq_cst) != 0)
+		return;
+
+	for (auto* snap : s_deferredSnapshots)
+		delete snap;
+	s_deferredSnapshots.clear();
+}
 
 static void RetireSnapshot(CrashConfigSnapshot* retired)
 {
 	if (!retired)
 		return;
 
-	while (s_dumpInFlight.load(std::memory_order_acquire) != 0)
-		SwitchToThread();
-
-	delete retired;
+	// Never wait here. Uninstall runs on the DllMain detach path, and a dump
+	// writer can be inside GetModuleFileNameA, which needs the loader lock.
+	if (s_dumpInFlight.load(std::memory_order_seq_cst) == 0)
+		delete retired;
+	else
+		s_deferredSnapshots.push_back(retired);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,14 +233,14 @@ static std::string GetProcessBaseName()
 // ---------------------------------------------------------------------------
 static void WriteCrashDump(EXCEPTION_POINTERS* exInfo, const char* trigger)
 {
-	s_dumpInFlight.fetch_add(1, std::memory_order_acq_rel);
+	s_dumpInFlight.fetch_add(1, std::memory_order_seq_cst);
 	struct InFlightGuard
 	{
-		~InFlightGuard() { s_dumpInFlight.fetch_sub(1, std::memory_order_acq_rel); }
+		~InFlightGuard() { s_dumpInFlight.fetch_sub(1, std::memory_order_seq_cst); }
 	} inFlightGuard;
 
 	// Atomic snapshot load -- no lock, safe even if crash fires during install/uninstall
-	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
+	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_seq_cst);
 
 	auto logger = spdlog::get("HYDRAHOOK");
 	std::shared_ptr<spdlog::logger> crashLog = logger ? logger->clone("crash") : nullptr;
@@ -474,6 +487,7 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 		return;
 
 	std::lock_guard<std::mutex> lock(s_installMutex);
+	ReapDeferredSnapshots();
 
 	auto* newSnap = MakeSnapshot(engine);
 	if (!newSnap)
@@ -483,7 +497,7 @@ void HydraHookCrashHandlerInstall(PHYDRAHOOK_ENGINE engine)
 
 	if (s_refCount.fetch_add(1) == 0)
 	{
-		auto* old = s_snapshot.exchange(newSnap, std::memory_order_release);
+		auto* old = s_snapshot.exchange(newSnap, std::memory_order_seq_cst);
 		RetireSnapshot(old);
 
 		s_prevUnhandledFilter = SetUnhandledExceptionFilter(HydraHookUnhandledExceptionFilter);
@@ -503,6 +517,7 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 	CrashConfigSnapshot* retired = nullptr;
 	{
 	std::lock_guard<std::mutex> lock(s_installMutex);
+	ReapDeferredSnapshots();
 
 	int expected = s_refCount.load(std::memory_order_relaxed);
 	do {
@@ -528,7 +543,7 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 	if (removed && active == removed)
 	{
 		CrashConfigSnapshot* next = s_registrations.empty() ? nullptr : s_registrations.front().Snapshot;
-		s_snapshot.store(next, std::memory_order_release);
+		s_snapshot.store(next, std::memory_order_seq_cst);
 		retired = removed;
 	}
 	else
@@ -553,8 +568,9 @@ void HydraHookCrashHandlerUninstall(PHYDRAHOOK_ENGINE engine)
 		if (logger)
 			logger->clone("crash")->info("Crash handler uninstalled");
 	}
-	}
+
 	RetireSnapshot(retired);
+	}
 }
 
 void HydraHookCrashHandlerInstallThreadSEH()
@@ -565,6 +581,24 @@ void HydraHookCrashHandlerInstallThreadSEH()
 PHYDRAHOOK_ENGINE HydraHookCrashHandlerActiveOwnerForTest()
 {
 	std::lock_guard<std::mutex> lock(s_installMutex);
-	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_acquire);
+	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_seq_cst);
 	return snap ? snap->OwnerEngine : nullptr;
+}
+
+bool HydraHookCrashHandlerReferencesEngine(PHYDRAHOOK_ENGINE engine)
+{
+	if (!engine)
+		return false;
+
+	std::lock_guard<std::mutex> lock(s_installMutex);
+	ReapDeferredSnapshots();
+	const CrashConfigSnapshot* snap = s_snapshot.load(std::memory_order_seq_cst);
+	if (snap && snap->OwnerEngine == engine)
+		return true;
+	for (const auto* deferred : s_deferredSnapshots)
+	{
+		if (deferred && deferred->OwnerEngine == engine)
+			return true;
+	}
+	return false;
 }

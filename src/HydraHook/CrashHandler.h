@@ -47,3 +47,9 @@ void HydraHookCrashHandlerInstallThreadSEH();
 
 /** @brief Test accessor. Returns the engine that owns the published crash snapshot. */
 PHYDRAHOOK_ENGINE HydraHookCrashHandlerActiveOwnerForTest();
+
+/**
+ * @brief True when a published or deferred snapshot still names this engine.
+ * Destroy must not free the engine while this is true.
+ */
+bool HydraHookCrashHandlerReferencesEngine(PHYDRAHOOK_ENGINE engine);

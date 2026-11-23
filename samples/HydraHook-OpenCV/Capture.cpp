@@ -56,6 +56,20 @@ static std::mutex g_resultsMutex;
 static PerceptionResults g_results;
 static std::atomic<bool> g_workerRunning{ true };
 static std::atomic<bool> g_captureShutdownDone{ false };
+static std::mutex g_renderMutex;
+static bool g_d3d12SkipResizeRebuild = false;
+
+struct RenderGate
+{
+	std::unique_lock<std::mutex> lock;
+	bool allow;
+
+	RenderGate()
+		: lock(g_renderMutex)
+		, allow(!g_captureShutdownDone.load(std::memory_order_relaxed))
+	{
+	}
+};
 static std::thread* g_workerThread = nullptr;
 static std::atomic<bool> g_showOverlay{ true };
 
@@ -111,6 +125,7 @@ static bool D3D11_CreateCaptureResources(ID3D11Device* pDevice, UINT width, UINT
 static void D3D11_ReleaseCaptureResources();
 static void D3D12_CleanupOverlayResources();
 static void D3D12_CleanupInitResources();
+static bool D3D12_WaitForGpu(DWORD timeoutMs);
 static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain);
 static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format);
 static void D3D12_ReleaseCaptureResources();
@@ -260,25 +275,48 @@ void Capture_Shutdown()
 {
 	if (g_captureShutdownDone.exchange(true))
 		return;
-	Overlay_UnhookWindowProc();
-	if (g_d3d11_imguiInitialized)
+	const bool windowDrained = Overlay_UnhookWindowProc();
+	bool gpuIdle = false;
 	{
-		ImGui_ImplDX11_Shutdown();
-		g_d3d11_imguiInitialized = false;
-	}
+		// In-flight Present callbacks hold g_renderMutex across ImGui use.
+		std::lock_guard<std::mutex> lock(g_renderMutex);
+		gpuIdle = D3D12_WaitForGpu(2000);
+		if (!windowDrained || !gpuIdle)
+		{
+			HydraHookEngineLogError(
+				"HydraHook-OpenCV: leaving ImGui and GPU resources allocated (window drain %d, gpu idle %d)",
+				windowDrained ? 1 : 0,
+				gpuIdle ? 1 : 0);
+		}
+		else
+		{
+			if (g_d3d11_imguiInitialized)
+			{
+				ImGui_ImplDX11_Shutdown();
+				g_d3d11_imguiInitialized = false;
+			}
 #ifdef _WIN64
-	if (g_d3d12_imguiInitialized)
-	{
-		ImGui_ImplDX12_Shutdown();
-		g_d3d12_imguiInitialized = false;
-	}
+			if (g_d3d12_imguiInitialized)
+			{
+				ImGui_ImplDX12_Shutdown();
+				g_d3d12_imguiInitialized = false;
+			}
 #endif
-	if (ImGui::GetCurrentContext())
-	{
-		ImGui_ImplWin32_Shutdown();
-		ImGui::DestroyContext();
+			if (ImGui::GetCurrentContext())
+			{
+				ImGui_ImplWin32_Shutdown();
+				ImGui::DestroyContext();
+			}
+			g_d3d12Initialized = false;
+			if (g_d3d11_mainRTV)
+			{
+				g_d3d11_mainRTV->Release();
+				g_d3d11_mainRTV = nullptr;
+			}
+			D3D11_ReleaseCaptureResources();
+			D3D12_CleanupInitResources();
+		}
 	}
-	g_d3d12Initialized = false;
 	g_workerRunning = false;
 	{
 		std::lock_guard<std::mutex> lock(g_workerMutex);
@@ -294,13 +332,6 @@ void Capture_Shutdown()
 		delete g_workerThread;
 		g_workerThread = nullptr;
 	}
-	if (g_d3d11_mainRTV)
-	{
-		g_d3d11_mainRTV->Release();
-		g_d3d11_mainRTV = nullptr;
-	}
-	D3D11_ReleaseCaptureResources();
-	D3D12_CleanupInitResources();
 }
 
 void Capture_GetResults(PerceptionResults& out)
@@ -386,6 +417,10 @@ static void EvtHydraHookD3D11PrePresent(
 	(void)SyncInterval;
 	(void)Flags;
 	(void)Extension;
+
+	RenderGate gate;
+	if (!gate.allow)
+		return;
 
 	ID3D11Device* pDevice = nullptr;
 	ID3D11DeviceContext* pContext = nullptr;
@@ -531,6 +566,10 @@ static void EvtHydraHookD3D11PreResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
+	RenderGate gate;
+	if (!gate.allow)
+		return;
+
 	if (g_d3d11_mainRTV)
 	{
 		g_d3d11_mainRTV->Release();
@@ -653,12 +692,31 @@ static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT fo
 	return true;
 }
 
+static bool D3D12_WaitForGpu(DWORD timeoutMs)
+{
+	if (!g_d3d12_pFence || !g_d3d12_hFenceEvent || g_d3d12_fenceLastSignaledValue == 0)
+		return true;
+
+	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
+	const UINT64 completed = g_d3d12_pFence->GetCompletedValue();
+	if (completed == UINT64_MAX)
+		return false;
+	if (completed >= fence)
+		return true;
+	if (FAILED(g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent)))
+		return g_d3d12_pFence->GetCompletedValue() >= fence;
+
+	const DWORD wait = WaitForSingleObject(g_d3d12_hFenceEvent, timeoutMs);
+	const UINT64 after = g_d3d12_pFence->GetCompletedValue();
+	return wait == WAIT_OBJECT_0 && after != UINT64_MAX && after >= fence;
+}
+
 static void D3D12_CleanupInitResources()
 {
-	if (g_d3d12_pFence && g_d3d12_hFenceEvent && g_d3d12_fenceLastSignaledValue != 0)
+	if (!D3D12_WaitForGpu(2000))
 	{
-		g_d3d12_pFence->SetEventOnCompletion(g_d3d12_fenceLastSignaledValue, g_d3d12_hFenceEvent);
-		WaitForSingleObject(g_d3d12_hFenceEvent, 2000);
+		HydraHookEngineLogError("HydraHook-OpenCV: GPU wait timed out; D3D12 resources left allocated");
+		return;
 	}
 	D3D12_CleanupOverlayResources();
 	D3D12_ReleaseCaptureResources();
@@ -762,6 +820,10 @@ static void EvtHydraHookD3D12PrePresent(
 	(void)SyncInterval;
 	(void)Flags;
 	(void)Extension;
+
+	RenderGate gate;
+	if (!gate.allow)
+		return;
 
 	if (!g_d3d12Initialized)
 	{
@@ -997,11 +1059,17 @@ static void EvtHydraHookD3D12PreResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	if (g_d3d12_pFence && g_d3d12_hFenceEvent)
+	RenderGate gate;
+	if (!gate.allow)
+		return;
+
+	if (!D3D12_WaitForGpu(2000))
 	{
-		g_d3d12_pFence->SetEventOnCompletion(g_d3d12_fenceLastSignaledValue, g_d3d12_hFenceEvent);
-		WaitForSingleObject(g_d3d12_hFenceEvent, 2000);
+		g_d3d12SkipResizeRebuild = true;
+		HydraHookEngineLogError("HydraHook-OpenCV: resize GPU wait failed; overlay resources left allocated");
+		return;
 	}
+	g_d3d12SkipResizeRebuild = false;
 #ifdef _WIN64
 	if (g_d3d12_imguiInitialized)
 	{
@@ -1030,6 +1098,10 @@ static void EvtHydraHookD3D12PostResizeBuffers(
 	(void)NewFormat;
 	(void)SwapChainFlags;
 	(void)Extension;
+
+	RenderGate gate;
+	if (!gate.allow || g_d3d12SkipResizeRebuild)
+		return;
 
 	if (!D3D12_CreateOverlayResources(pSwapChain))
 		HydraHookEngineLogError("HydraHook-OpenCV: D3D12_CreateOverlayResources failed after resize");

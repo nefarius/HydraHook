@@ -170,9 +170,13 @@ int main()
         {
             DXGI_PRESENT_PARAMETERS presentParameters{};
             const LONG hookedBeforePresent1 = state->hooked;
+            const LONG presentPreBeforePresent1 = state->presentPre;
+            const LONG presentPostBeforePresent1 = state->presentPost;
             const HRESULT present1 = swapChain1->Present1(0, 0, &presentParameters);
             Check(SUCCEEDED(present1), "Present1");
             Check(state->hooked == hookedBeforePresent1, "Present1 does not announce a second hook");
+            Check(state->presentPre > presentPreBeforePresent1, "Present1 increments pre-Present");
+            Check(state->presentPost > presentPostBeforePresent1, "Present1 increments post-Present");
             swapChain1->Release();
         }
     }

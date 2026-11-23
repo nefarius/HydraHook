@@ -67,6 +67,7 @@ SOFTWARE.
 //
 // STL
 // 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <new>
@@ -82,6 +83,7 @@ namespace
 {
 	std::mutex g_hostLoggerMutex;
 	std::shared_ptr<spdlog::logger> g_hostLogger;
+	std::atomic<bool> g_ownsDefaultLogger{false};
 
 	void ResetHostLogger()
 	{
@@ -223,9 +225,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	if (EngineConfig->Logging.IsEnabled)
 	{
 		spdlog::set_default_logger(logger);
+		g_ownsDefaultLogger.store(true);
 	}
 
-	logger = spdlog::get("HYDRAHOOK")->clone("api");
+	logger = logger->clone("api");
 
 	//
 	// Install crash handler if enabled
@@ -254,7 +257,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			HydraHookCrashHandlerUninstall(engine);
 			engine->CrashHandlerInstalled = FALSE;
 		}
-		delete engine;
+		if (!HydraHookCrashHandlerReferencesEngine(engine))
+			delete engine;
 		return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED;
 	}
 
@@ -263,12 +267,14 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	//
 	// Kickstart hooking the rendering pipeline
 	// 
+	// Suspended until the host is reserved, so the worker cannot run against an engine
+	// that a losing create is about to delete.
 	engine->EngineThread = CreateThread(
 		nullptr,
 		0,
 		reinterpret_cast<LPTHREAD_START_ROUTINE>(HydraHookMainThread),
 		engine,
-		0,
+		CREATE_SUSPENDED,
 		nullptr
 	);
 
@@ -281,8 +287,42 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			engine->CrashHandlerInstalled = FALSE;
 		}
 		CloseHandle(engine->EngineCancellationEvent);
-		delete engine;
+		if (!HydraHookCrashHandlerReferencesEngine(engine))
+			delete engine;
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		if (g_EngineHostInstances.count(HostInstance))
+		{
+			// The thread has not executed. Terminating it cannot race the worker.
+			TerminateThread(engine->EngineThread, 0);
+			if (engine->CrashHandlerInstalled)
+			{
+				HydraHookCrashHandlerUninstall(engine);
+			}
+			CloseHandle(engine->EngineCancellationEvent);
+			CloseHandle(engine->EngineThread);
+			if (!HydraHookCrashHandlerReferencesEngine(engine))
+				delete engine;
+			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
+		}
+		g_EngineHostInstances[HostInstance] = engine;
+		if (ResumeThread(engine->EngineThread) == static_cast<DWORD>(-1))
+		{
+			g_EngineHostInstances.erase(HostInstance);
+			TerminateThread(engine->EngineThread, 0);
+			if (engine->CrashHandlerInstalled)
+			{
+				HydraHookCrashHandlerUninstall(engine);
+			}
+			CloseHandle(engine->EngineCancellationEvent);
+			CloseHandle(engine->EngineThread);
+			if (!HydraHookCrashHandlerReferencesEngine(engine))
+				delete engine;
+			return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
+		}
 	}
 
 	logger->info("Main thread created successfully");
@@ -290,24 +330,6 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	if (Engine)
 	{
 		*Engine = engine;
-	}
-
-	{
-		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
-		if (g_EngineHostInstances.count(HostInstance))
-		{
-			SetEvent(engine->EngineCancellationEvent);
-			WaitForSingleObject(engine->EngineThread, 6500);
-			if (engine->CrashHandlerInstalled)
-			{
-				HydraHookCrashHandlerUninstall(engine);
-			}
-			CloseHandle(engine->EngineCancellationEvent);
-			CloseHandle(engine->EngineThread);
-			delete engine;
-			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
-		}
-		g_EngineHostInstances[HostInstance] = engine;
 	}
 
 	return HYDRAHOOK_ERROR_NONE;
@@ -371,11 +393,25 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		logger->flush();
 	}
 
-	delete engine;
+	if (HydraHookCrashHandlerReferencesEngine(engine))
+	{
+		// A dump writer may still read this engine. Deleting it here would race that
+		// writer, and waiting would deadlock DllMain against the loader lock.
+	}
+	else
+	{
+		delete engine;
+	}
 
 	if (lastEngine)
 	{
 		ResetHostLogger();
+		if (g_ownsDefaultLogger.exchange(false))
+		{
+			spdlog::set_default_logger(std::make_shared<spdlog::logger>(
+				"hydrahook-default",
+				std::make_shared<spdlog::sinks::null_sink_mt>()));
+		}
 		spdlog::drop("HYDRAHOOK");
 	}
 

@@ -135,15 +135,8 @@ jobs:
             'HydraHookEngineLogError'
           )
           foreach ($name in $required) {
-            $found = $false
-            foreach ($exportName in $exported) {
-              # Public entry points are C exports. The name column must match exactly.
-              if ($exportName -eq $name) {
-                $found = $true
-                break
-              }
-            }
-            if (-not $found) {
+            # Ordinal comparer: PowerShell -eq would accept a differently cased name.
+            if (-not $exported.Contains($name)) {
               throw "$dll is missing export $name"
             }
           }
