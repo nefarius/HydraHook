@@ -14,8 +14,14 @@
 #include "Utils/Global.h"
 #include "Utils/Hook.h"
 #include "FrameRate.h"
+#include "ImGuiWin32Buttons.h"
 #include "InitGuard.h"
 #include "WindowProcHook.h"
+
+#include <imgui.h>
+#include <imgui_impl_win32.h>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 #include <atomic>
 #include <chrono>
@@ -456,6 +462,16 @@ namespace
     std::atomic<int> g_handlerCalls{0};
     std::atomic<int> g_errorCalls{0};
     std::atomic<LRESULT> g_reentrantResult{-1};
+    std::atomic<int> g_beforeDispatchPhase{0};
+
+    void TestBeforeDispatch(UINT msg)
+    {
+        if (msg != WM_APP + 1 || g_beforeDispatchPhase.load() != 1)
+            return;
+        g_beforeDispatchPhase.store(2);
+        while (g_beforeDispatchPhase.load() == 2)
+            SwitchToThread();
+    }
 
     LRESULT CALLBACK TestOrigProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
@@ -572,14 +588,14 @@ namespace
         g_origNcDestroy = 0;
         DestroyWindow(w2);
         Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "destroy messages forwarded", __FILE__, __LINE__);
-        Check(hook.HookedCount() == 0, "destroyed window removed from map", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "no active hook after destroy", __FILE__, __LINE__);
         DestroyWindow(w1);
 
         // Re-hook after UnhookAll
         HWND w3 = MakeTestWindow();
         Check(hook.Hook(w3), "hook before UnhookAll", __FILE__, __LINE__);
         hook.UnhookAll();
-        Check(hook.HookedCount() == 0, "UnhookAll clears map", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "UnhookAll leaves no active hook", __FILE__, __LINE__);
         Check(GetWindowLongPtrW(w3, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
               "UnhookAll restores", __FILE__, __LINE__);
         Check(hook.Hook(w3), "re-hook after UnhookAll", __FILE__, __LINE__);
@@ -604,7 +620,62 @@ namespace
         g_origNcDestroy = 0;
         DestroyWindow(w4);
         Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "chained destroy forwarded", __FILE__, __LINE__);
-        Check(hook.HookedCount() == 0, "chained window removed on destroy", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "no active hook after chained destroy", __FILE__, __LINE__);
+
+        // Unhook while DispatchProc is entered but has not incremented its in-flight count.
+        // The original procedure must still be invoked. DefWindowProcW returns 0 for WM_APP.
+        {
+            std::atomic<HWND> shared{nullptr};
+            std::atomic<int> ownerReady{0};
+            std::thread owner([&]()
+            {
+                HWND hw = MakeTestWindow();
+                if (!hw)
+                {
+                    ownerReady.store(-1);
+                    return;
+                }
+                shared.store(hw);
+                ownerReady.store(1);
+                MSG m;
+                while (GetMessageW(&m, nullptr, 0, 0) > 0)
+                {
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
+                }
+            });
+            while (ownerReady.load() == 0)
+                SwitchToThread();
+            if (ownerReady.load() < 0)
+            {
+                owner.join();
+                Check(false, "preamble owner window created", __FILE__, __LINE__);
+            }
+            else
+            {
+                HWND hw = shared.load();
+                Check(hook.Hook(hw), "hook before preamble unhook", __FILE__, __LINE__);
+                hook.SetBeforeDispatch(TestBeforeDispatch);
+                g_beforeDispatchPhase.store(0);
+                g_origMessages = 0;
+                std::atomic<LRESULT> delivered{-1};
+                std::thread sender([&]()
+                {
+                    g_beforeDispatchPhase.store(1);
+                    delivered.store(SendMessageW(hw, WM_APP + 1, 0, 0));
+                });
+                while (g_beforeDispatchPhase.load() != 2)
+                    SwitchToThread();
+                Check(hook.Unhook(hw), "unhook during dispatch preamble", __FILE__, __LINE__);
+                g_beforeDispatchPhase.store(3);
+                sender.join();
+                hook.SetBeforeDispatch(nullptr);
+                Check(delivered.load() == 0x1234, "preamble dispatch still reaches the original", __FILE__, __LINE__);
+                Check(g_origMessages.load() >= 1, "original procedure ran after preamble unhook", __FILE__, __LINE__);
+                SendMessageW(hw, WM_APP + 9, 0, 0);
+                owner.join();
+            }
+        }
 
         // Cross-thread: the owner thread pumps while this thread hooks, sends, and unhooks.
         // Readiness is separate from the HWND so a failed CreateWindow cannot spin forever.
@@ -673,12 +744,72 @@ namespace
               "original restored after churn", __FILE__, __LINE__);
         SendMessageW(shw, WM_APP + 9, 0, 0);
         owner.join();
-        Check(hook.HookedCount() == 0, "no tracked windows remain", __FILE__, __LINE__);
+        Check(hook.HookedCount() == 0, "no active hooks remain", __FILE__, __LINE__);
         }
 
         hook.SetMessageHandler(nullptr);
         hook.SetErrorLogger(nullptr);
+        hook.SetBeforeDispatch(nullptr);
     }
+
+    LRESULT CALLBACK CaptureCountProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        if (msg == WM_CAPTURECHANGED)
+            ++g_origMessages;
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+
+    void TestImGuiHostCapture()
+    {
+        static bool registered = false;
+        if (!registered)
+        {
+            WNDCLASSW wc{};
+            wc.lpfnWndProc = CaptureCountProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = L"HydraHookCaptureTest";
+            RegisterClassW(&wc);
+            registered = true;
+        }
+        HWND hwnd = CreateWindowExW(0, L"HydraHookCaptureTest", L"c", WS_OVERLAPPED, 0, 0, 16, 16,
+                                    nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        Check(hwnd != nullptr, "capture test window created", __FILE__, __LINE__);
+        if (!hwnd)
+            return;
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        Check(ImGui_ImplWin32_Init(hwnd), "ImGui Win32 backend init", __FILE__, __LINE__);
+
+        // Host already owns capture. Button-down records the mask and must not steal capture.
+        Check(SetCapture(hwnd) == nullptr || GetCapture() == hwnd, "host capture installed", __FILE__, __LINE__);
+        g_origMessages = 0;
+        ImGui_ImplWin32_WndProcHandler(hwnd, WM_LBUTTONDOWN, 0, 0);
+        Check(GetCapture() == hwnd, "host capture kept on button-down", __FILE__, __LINE__);
+        Check(ImGuiWin32ButtonsDown() == 1, "backend mask records the button", __FILE__, __LINE__);
+        const int changesBefore = g_origMessages.load();
+        ClearImGuiWin32Buttons(hwnd, 1u, false);
+        Check(ImGuiWin32ButtonsDown() == 0, "backend mask cleared", __FILE__, __LINE__);
+        Check(GetCapture() == hwnd, "host capture kept while clearing the mask", __FILE__, __LINE__);
+        Check(g_origMessages.load() == changesBefore, "host receives no capture-change while clearing", __FILE__, __LINE__);
+
+        // Mask is zero, so a later button-down with no capture must be able to take it.
+        ReleaseCapture();
+        Check(GetCapture() == nullptr, "explicit release drops host capture", __FILE__, __LINE__);
+        ImGui_ImplWin32_WndProcHandler(hwnd, WM_LBUTTONDOWN, 0, 0);
+        Check(GetCapture() == hwnd, "cleared mask lets the next button-down capture", __FILE__, __LINE__);
+        Check(ImGuiWin32ButtonsDown() == 1, "backend mask records the new button", __FILE__, __LINE__);
+        const int beforeRelease = g_origMessages.load();
+        ClearImGuiWin32Buttons(hwnd, 1u, true);
+        Check(ImGuiWin32ButtonsDown() == 0, "owned capture clears the mask", __FILE__, __LINE__);
+        Check(GetCapture() == nullptr, "owned capture is released", __FILE__, __LINE__);
+        Check(g_origMessages.load() > beforeRelease, "releasing owned capture notifies the host", __FILE__, __LINE__);
+
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        DestroyWindow(hwnd);
+    }
+
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -699,6 +830,7 @@ int main()
     TestFrameRate();
     TestResettableInitGuard();
     TestWindowProcHook();
+    TestImGuiHostCapture();
     TestShutdownGuard();
 
     if (g_failures != 0)

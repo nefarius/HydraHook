@@ -17,13 +17,14 @@
 // WNDPROC is kept per window and called with CallWindowProcW.
 //
 // The mutex is never held while a message handler or the original WNDPROC runs, so a handler
-// can re-enter Hook/Unhook/UnhookAll. The original procedure stays in the map until every
-// dispatch that may need it has copied it. WM_DESTROY and WM_NCDESTROY always reach it.
+// can re-enter Hook/Unhook/UnhookAll. Retired entries stay in the map. A dispatch that user32
+// has already called can still be before its in-flight increment, and erasing there would
+// forward through DefWindowProcW. WM_DESTROY and WM_NCDESTROY always reach the original.
 //
-// If another party subclasses the window after us, the dispatcher stays in the chain as a
-// pass-through (restoring would drop their hook) and the module that contains DispatchProc is
-// pinned for the rest of the process. Freeing it while their saved pointer remains would jump
-// to unmapped code after the host DLL is unloaded.
+// The module that contains DispatchProc is pinned with GET_MODULE_HANDLE_EX_FLAG_PIN before
+// that procedure is installed. A later FreeLibrary does not unmap it. If another party
+// subclasses the window after us, the dispatcher stays in the chain as a pass-through
+// (restoring would drop their hook).
 class WindowProcHook
 {
 public:
@@ -46,6 +47,13 @@ public:
 	{
 		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		errorLogger_ = logger;
+	}
+
+	// Test hook. Runs at the start of DispatchProc, before the in-flight count is incremented.
+	using BeforeDispatch = void (*)(UINT msg);
+	void SetBeforeDispatch(BeforeDispatch gate)
+	{
+		beforeDispatch_.store(gate, std::memory_order_release);
 	}
 
 	// Returns true when the window is hooked after the call (idempotent).
@@ -76,52 +84,81 @@ public:
 			else
 			{
 				const auto it = windows_.find(hWnd);
+				Entry* existing = nullptr;
 				if (it != windows_.end())
 				{
 					if (!it->second.retired && !it->second.passthrough)
 						return true;
-					error = "WindowProcHook: hook rejected while a previous hook is still winding down";
+					if (it->second.passthrough || it->second.inFlight != 0)
+						error = "WindowProcHook: hook rejected while a previous hook is still winding down";
+					else
+						existing = &it->second;
 				}
-				else
+				if (error.empty())
 				{
-					::SetLastError(0);
-					const LONG_PTR current = ::GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
-					if (current == 0 && ::GetLastError() != 0)
+					// Pin before the dispatcher is reachable. A failed pin leaves the window unchanged.
+					if (!PinLocked())
 					{
-						char buf[96];
-						std::snprintf(buf, sizeof(buf), "WindowProcHook: GetWindowLongPtrW failed (error %lu)", ::GetLastError());
-						error = buf;
-					}
-					else if (current == reinterpret_cast<LONG_PTR>(&DispatchProc))
-					{
-						error = "WindowProcHook: window already carries the dispatcher without a tracked original";
+						error = "WindowProcHook: failed to pin the module; hook was not installed";
 					}
 					else
 					{
-						// Publish the original before swapping, so a dispatch that arrives as part of
-						// SetWindowLongPtrW can still forward. The map insert happens first: if it throws,
-						// the window procedure has not changed.
-						Entry entry;
-						entry.original = reinterpret_cast<WNDPROC>(current);
-						windows_.emplace(hWnd, entry);
-
 						::SetLastError(0);
-						const LONG_PTR prev = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&DispatchProc));
-						if (prev == 0 && ::GetLastError() != 0)
+						const LONG_PTR current = ::GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
+						if (current == 0 && ::GetLastError() != 0)
 						{
-							windows_.erase(hWnd);
 							char buf[96];
-							std::snprintf(buf, sizeof(buf), "WindowProcHook: SetWindowLongPtrW failed (error %lu)", ::GetLastError());
+							std::snprintf(buf, sizeof(buf), "WindowProcHook: GetWindowLongPtrW failed (error %lu)", ::GetLastError());
 							error = buf;
+						}
+						else if (current == reinterpret_cast<LONG_PTR>(&DispatchProc))
+						{
+							error = "WindowProcHook: window already carries the dispatcher without a tracked original";
 						}
 						else
 						{
-							windows_[hWnd].original = reinterpret_cast<WNDPROC>(prev);
-							dispatchEnabled_ = true;
-							// A thread can be preempted after leaving this function but before its ret.
-							// Pinning keeps that ret inside a mapped module when the host unloads the DLL.
-							PinLocked();
-							return true;
+							const bool inserted = existing == nullptr;
+							const WNDPROC previousOriginal = existing != nullptr ? existing->original : nullptr;
+							// Publish the original before swapping, so a dispatch that arrives as part of
+							// SetWindowLongPtrW can still forward. A new map insert happens first: if it throws,
+							// the window procedure has not changed.
+							if (inserted)
+							{
+								Entry entry;
+								entry.original = reinterpret_cast<WNDPROC>(current);
+								windows_.emplace(hWnd, entry);
+							}
+							else
+							{
+								existing->original = reinterpret_cast<WNDPROC>(current);
+								existing->passthrough = false;
+								existing->retired = false;
+							}
+
+							::SetLastError(0);
+							const LONG_PTR prev = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&DispatchProc));
+							auto placed = windows_.find(hWnd);
+							if (prev == 0 && ::GetLastError() != 0)
+							{
+								if (inserted && placed != windows_.end() && placed->second.inFlight == 0)
+									windows_.erase(placed);
+								else if (placed != windows_.end())
+								{
+									placed->second.original = previousOriginal;
+									placed->second.retired = true;
+								}
+								char buf[96];
+								std::snprintf(buf, sizeof(buf), "WindowProcHook: SetWindowLongPtrW failed (error %lu)", ::GetLastError());
+								error = buf;
+							}
+							else if (placed != windows_.end())
+							{
+								placed->second.original = reinterpret_cast<WNDPROC>(prev);
+								placed->second.retired = false;
+								placed->second.passthrough = false;
+								dispatchEnabled_ = true;
+								return true;
+							}
 						}
 					}
 				}
@@ -145,8 +182,6 @@ public:
 				return false;
 
 			restored = RetireLocked(hWnd, it->second, &error);
-			if (entered_.load() == 0)
-				EraseRetiredLocked();
 		}
 
 		if (!error.empty())
@@ -193,8 +228,6 @@ public:
 
 		{
 			std::lock_guard<std::recursive_mutex> lock(mutex_);
-			if (entered_.load() == 0)
-				EraseRetiredLocked();
 			removing_ = false;
 		}
 
@@ -210,10 +243,17 @@ public:
 		return it != windows_.end() && !it->second.passthrough && !it->second.retired;
 	}
 
+	// Live and pass-through windows. Retired entries stay in the map and are not counted.
 	size_t HookedCount()
 	{
 		std::lock_guard<std::recursive_mutex> lock(mutex_);
-		return windows_.size();
+		size_t count = 0;
+		for (const auto& kv : windows_)
+		{
+			if (!kv.second.retired)
+				++count;
+		}
+		return count;
 	}
 
 private:
@@ -286,7 +326,11 @@ private:
 		// The dispatcher is still reachable. Stop calling the handler, keep the original
 		// procedure for forwarding, and keep this module mapped.
 		entry.passthrough = true;
-		PinLocked();
+		if (!PinLocked() && error != nullptr)
+		{
+			*error = "WindowProcHook: dispatcher remains installed and pinning the module failed";
+			return false;
+		}
 		if (error != nullptr)
 		{
 			*error = result == RestoreResult::BlockedBySubclass
@@ -296,25 +340,19 @@ private:
 		return false;
 	}
 
-	void PinLocked()
+	// Caller holds mutex_. GET_MODULE_HANDLE_EX_FLAG_PIN keeps DispatchProc mapped for the
+	// process lifetime, including after a later FreeLibrary of the extra reference.
+	bool PinLocked()
 	{
 		if (pinned_)
-			return;
+			return true;
 		HMODULE module = nullptr;
-		if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+		if (!::GetModuleHandleExW(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
 			reinterpret_cast<LPCWSTR>(&DispatchProc), &module))
-			pinned_ = true;
-	}
-
-	void EraseRetiredLocked()
-	{
-		for (auto it = windows_.begin(); it != windows_.end();)
-		{
-			if (it->second.retired && it->second.inFlight == 0)
-				it = windows_.erase(it);
-			else
-				++it;
-		}
+			return false;
+		pinned_ = true;
+		return true;
 	}
 
 	void LogError(const char* message)
@@ -333,6 +371,8 @@ private:
 	static LRESULT CALLBACK DispatchProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		WindowProcHook& self = Instance();
+		if (const BeforeDispatch gate = self.beforeDispatch_.load(std::memory_order_acquire))
+			gate(msg);
 		DispatchScope scope(self.entered_);
 
 		WNDPROC original = nullptr;
@@ -359,7 +399,10 @@ private:
 					else
 					{
 						it->second.passthrough = true;
-						self.PinLocked();
+						if (!self.PinLocked())
+						{
+							destroyError = "WindowProcHook: dispatcher remains installed during destruction and pinning the module failed";
+						}
 					}
 					if (result == RestoreResult::Failed)
 					{
@@ -396,12 +439,11 @@ private:
 			const auto it = self.windows_.find(hWnd);
 			if (it != self.windows_.end() && it->second.inFlight > 0)
 				--it->second.inFlight;
-			// Drop this dispatch's count under the same lock as the erase decision.
-			// The constructor increment happened before the lock, so a dispatch still waiting is visible.
+			// Drop this dispatch's count under the lock. The constructor increment happened
+			// before the lock, so a dispatch still waiting is visible to UnhookAll.
+			// The map entry stays: a caller paused before that increment may still need it.
 			if (self.entered_.load() > 0)
 				--self.entered_;
-			if (self.entered_.load() == 0)
-				self.EraseRetiredLocked();
 		}
 		return result;
 	}
@@ -414,4 +456,5 @@ private:
 	bool removing_ = false;
 	bool pinned_ = false;
 	std::atomic<uint32_t> entered_{ 0 };
+	std::atomic<BeforeDispatch> beforeDispatch_{ nullptr };
 };

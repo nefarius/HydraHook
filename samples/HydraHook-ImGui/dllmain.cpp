@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "dllmain.h"
+#include "ImGuiWin32Buttons.h"
 #include "InitGuard.h"
 #include "WindowProcHook.h"
 
@@ -1173,20 +1174,9 @@ static void ReleaseOverlayInput(HWND hWnd)
 	}
 	const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
 	const uint32_t buttons = g_ForwardedButtons.exchange(0);
-	const HWND capturedBefore = ::GetCapture();
-	static const UINT ups[5] = { WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP, WM_XBUTTONUP };
-	static const WORD extra[5] = { 0, 0, 0, XBUTTON1, XBUTTON2 };
-	for (int i = 0; i < 5; ++i)
-	{
-		if ((buttons & (1u << i)) == 0)
-			continue;
-		const WPARAM wp = i >= 3 ? MAKEWPARAM(0, extra[i]) : 0;
-		// Button-up clears the backend mask. It also releases capture when the mask hits zero,
-		// so a host capture on this window is taken back afterwards.
-		ImGui_ImplWin32_WndProcHandler(hWnd, ups[i], wp, 0);
-	}
-	if (!ownedCapture && capturedBefore == hWnd && ::GetCapture() == nullptr)
-		::SetCapture(hWnd);
+	// Button-up would ReleaseCapture when the mask hits zero. Clear the private mask
+	// directly so a host-owned capture is left in place and the host sees no WM_CAPTURECHANGED.
+	ClearImGuiWin32Buttons(hWnd, buttons, ownedCapture);
 
 	ImGuiIO& io = ImGui::GetIO();
 	io.ClearEventsQueue();
@@ -1230,7 +1220,14 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	const int button = OverlayButton(msg, wParam, &down);
 	const HWND capturedBefore = button >= 0 ? ::GetCapture() : nullptr;
 	const bool ownedCapture = g_OverlayOwnsCapture.load();
-	const LRESULT handled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	// A host-owned capture must not go through the backend's button-up path: that path
+	// calls ReleaseCapture when the mask hits zero and the host observes WM_CAPTURECHANGED.
+	const bool keepHostCapture = button >= 0 && !down && !ownedCapture && capturedBefore == hWnd;
+	const LRESULT handled = keepHostCapture
+		? 0
+		: ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	if (keepHostCapture)
+		ClearImGuiWin32Buttons(hWnd, 1u << button, false);
 
 	if (button >= 0)
 	{
@@ -1245,9 +1242,6 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 			const uint32_t left = g_ForwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
 			if (left == 0)
 				g_OverlayOwnsCapture.store(false);
-			// The backend releases capture when its button mask hits zero, including capture the host took first.
-			if (!ownedCapture && capturedBefore == hWnd && ::GetCapture() == nullptr)
-				::SetCapture(hWnd);
 		}
 	}
 
