@@ -5,6 +5,10 @@
  * Defines event callbacks for Present, ResizeTarget, and ResizeBuffers with
  * HYDRAHOOK_EVT_PRE_EXTENSION / HYDRAHOOK_EVT_POST_EXTENSION for engine access.
  *
+ * D3D10, D3D11, and D3D12 share unified DXGI swap-chain hooks (`Present`/`Present1`,
+ * `ResizeTarget`, `ResizeBuffers`/`ResizeBuffers1`) that dispatch per call to the
+ * callback table matching the swap chain's enabled device runtime.
+ *
  * @copyright MIT License (c) 2018-2026 Benjamin Höglinger-Stelzer
  */
 

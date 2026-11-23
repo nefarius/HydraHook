@@ -106,8 +106,8 @@ flowchart TB
 - **`HydraHookMainThread`**: Entry point for the worker thread. Receives `PHYDRAHOOK_ENGINE` as `LPVOID`.
 - **Flow**: Install ExitProcess/PostQuitMessage/FreeLibrary hooks -> Install D3D/Audio hooks (based on config) -> `WaitForSingleObject(EngineCancellationEvent)` -> Remove hooks -> `FreeLibraryAndExitThread` (unless shutdown was initiated by FreeLibrary hook).
 - **DXGI (D3D10/11/12)**: D3D10, D3D11, and D3D12 share the same `dxgi.dll` `IDXGISwapChain` implementation. The worker probes D3D12 -> D3D11 -> D3D10 until the shared vtable addresses are resolved, installs one Detours hook per vtable slot (`Present`, `ResizeTarget`, `ResizeBuffers`, plus `IDXGISwapChain1::Present1` and `IDXGISwapChain3::ResizeBuffers1` when exposed), and dispatches per call via `chain->GetDevice(...)`. Hooks are detached in reverse (LIFO) installation order on shutdown.
-- **D3D12**: Two capture paths for `ID3D12CommandQueue` (installed after temporary vtable probes finish):
-  - **Early injection**: Hook `IDXGIFactory::CreateSwapChain` and `CreateSwapChainForHwnd`; `pDevice` is the command queue.
+- **D3D12**: Two capture paths for `ID3D12CommandQueue`:
+  - **Early injection**: Hook `IDXGIFactory::CreateSwapChain` and `CreateSwapChainForHwnd` before the D3D12 probe (suppressing capture on the worker thread during its own temporary probes so concurrent game swap chains are still captured); `pDevice` is the command queue.
   - **Mid-process injection**: Hook `ID3D12CommandQueue::ExecuteCommandLists`; capture `D3D12_COMMAND_LIST_TYPE_DIRECT` device->queue mapping at runtime.
 
 ### Hook Template
@@ -124,7 +124,7 @@ flowchart TB
 **Directory:** [Game/Hook/](Game/Hook/)
 
 - **D3D9Ex**: Creates a temporary hidden window via `Window`, loads `d3d9.dll`, calls `Direct3DCreate9Ex` -> `CreateDeviceEx` -> extracts vtable from the device. Used for both D3D9 and D3D9Ex hooks.
-- **D3D10/11/12**: Load DXGI/D3D DLLs, create factory/device/swap chain, extract vtable from the swap chain. The D3D11 and D3D12 probers try a hardware device and fall back to WARP when the machine has no usable adapter. `IDXGISwapChain::Present` is in `dxgi.dll`, so a hook installed from either driver covers the other.
+- **D3D10/11/12**: Check for already-loaded DXGI/D3D runtime DLLs via `GetModuleHandle` (they do not call `LoadLibrary`), then create a temporary factory/device/swap chain to extract the swap-chain vtable. If a runtime DLL such as `d3d12.dll` is not loaded in the process, its prober exits before any device creation attempt. Once the runtime DLL is available, the D3D11 and D3D12 probers try a hardware device and fall back to WARP when no usable hardware adapter exists. `IDXGISwapChain::Present` lives in `dxgi.dll`, so one hook per vtable slot covers D3D10, D3D11, and D3D12.
 - **DXGI**: [DXGI.h](Game/Hook/DXGI.h) defines vtable indices (e.g. `Present = 8`, `ResizeBuffers = 13`, `ResizeTarget = 14`, `IDXGISwapChain1::Present1 = 22`, `IDXGISwapChain3::ResizeBuffers1 = 37`).
 - **AudioRenderClient**: Uses MMDevice API (`IMMDeviceEnumerator` -> `IMMDevice` -> `IAudioClient` -> `IAudioRenderClient`) to obtain the vtable.
 - **DirectInput8** (optional, `HOOK_DINPUT8`): Creates DirectInput8 device via `DirectInput8Create`, enumerates joysticks, extracts vtable from `IDirectInputDevice8`. Hooks Acquire, GetDeviceData, GetDeviceState, GetDeviceInfo, GetObjectInfo. Experimental; not enabled by default.

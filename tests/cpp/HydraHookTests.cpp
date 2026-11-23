@@ -1094,6 +1094,24 @@ namespace
             Check(hook.remove_nothrow(), "remove_nothrow on each cycle", __FILE__, __LINE__);
             Check(StdTarget(4) == original, "target restored on each cycle", __FILE__, __LINE__);
         }
+
+        // A failed apply() must abort its Detours transaction so subsequent apply() calls succeed.
+        Hook<CallConvention::stdcall_t, int, int> failedHook;
+        bool threw = false;
+        try
+        {
+            failedHook.apply(static_cast<size_t>(0), &StdDetour);
+        }
+        catch (const HydraHook::Core::Exceptions::DetourException&)
+        {
+            threw = true;
+        }
+        Check(threw, "apply(0) throws DetourException", __FILE__, __LINE__);
+        Check(!failedHook.is_applied(), "failed apply leaves hook unapplied", __FILE__, __LINE__);
+
+        hook.apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+        Check(StdTarget(4) == original + 10, "apply succeeds after a failed apply aborted its transaction", __FILE__, __LINE__);
+        Check(hook.remove_nothrow(), "remove_nothrow after recovery apply", __FILE__, __LINE__);
         g_stdHook = nullptr;
     }
 

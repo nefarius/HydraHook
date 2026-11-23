@@ -102,9 +102,19 @@ class Hook
         has_open_transaction_ = true;
     }
 
+    void abort_transaction_nothrow() noexcept
+    {
+        if (!has_open_transaction_)
+            return;
+
+        DetourTransactionAbort();
+        has_open_transaction_ = false;
+    }
+
     void transaction_commit()
     {
         const auto result = DetourTransactionCommit();
+        has_open_transaction_ = false;
 
         if (result != NO_ERROR)
         {
@@ -141,8 +151,6 @@ class Hook
                 );
             }
         }
-
-        has_open_transaction_ = false;
     }
 
     static void update_thread(HANDLE hThread)
@@ -203,39 +211,47 @@ public:
         orig_ = static_cast<size_t>(pFunc);
 
         transaction_begin();
-        update_thread(GetCurrentThread());
-        const auto result = DetourAttach(reinterpret_cast<void **>(&orig_), reinterpret_cast<void *>(detour_));
-
-        if (result != NO_ERROR)
+        try
         {
-            switch (result)
+            update_thread(GetCurrentThread());
+            const auto result = DetourAttach(reinterpret_cast<void **>(&orig_), reinterpret_cast<void *>(detour_));
+
+            if (result != NO_ERROR)
             {
-            case ERROR_INVALID_BLOCK:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "The function referenced is too small to be detoured"
-                );
+                switch (result)
+                {
+                case ERROR_INVALID_BLOCK:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "The function referenced is too small to be detoured"
+                    );
 
-            case ERROR_INVALID_HANDLE:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "The ppPointer parameter is null or points to a null pointer"
-                );
+                case ERROR_INVALID_HANDLE:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "The ppPointer parameter is null or points to a null pointer"
+                    );
 
-            case ERROR_INVALID_OPERATION:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "No pending transaction exists"
-                );
+                case ERROR_INVALID_OPERATION:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "No pending transaction exists"
+                    );
 
-            case ERROR_NOT_ENOUGH_MEMORY:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "Not enough memory exists to complete the operation"
-                );
+                case ERROR_NOT_ENOUGH_MEMORY:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "Not enough memory exists to complete the operation"
+                    );
 
-            default:
-                throw HydraHook::Core::Exceptions::DetourException("Unknown error");
+                default:
+                    throw HydraHook::Core::Exceptions::DetourException("Unknown error");
+                }
             }
-        }
 
-        transaction_commit();
+            transaction_commit();
+        }
+        catch (...)
+        {
+            abort_transaction_nothrow();
+            throw;
+        }
 
         is_applied_ = true;
     }
@@ -249,41 +265,49 @@ public:
         is_applied_ = false;
 
         transaction_begin();
-        update_thread(GetCurrentThread());
-        const auto result = DetourDetach(reinterpret_cast<void **>(&orig_), reinterpret_cast<void *>(detour_));
-
-        if (result != NO_ERROR)
+        try
         {
-            switch (result)
+            update_thread(GetCurrentThread());
+            const auto result = DetourDetach(reinterpret_cast<void **>(&orig_), reinterpret_cast<void *>(detour_));
+
+            if (result != NO_ERROR)
             {
-            case ERROR_INVALID_BLOCK:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "The function to be detached was too small to be detoured"
-                );
+                switch (result)
+                {
+                case ERROR_INVALID_BLOCK:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "The function to be detached was too small to be detoured"
+                    );
 
-            case ERROR_INVALID_HANDLE:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "The ppPointer parameter is null or points to a null pointer"
-                );
+                case ERROR_INVALID_HANDLE:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "The ppPointer parameter is null or points to a null pointer"
+                    );
 
-            case ERROR_INVALID_OPERATION:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "No pending transaction exists"
-                );
+                case ERROR_INVALID_OPERATION:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "No pending transaction exists"
+                    );
 
-            case ERROR_NOT_ENOUGH_MEMORY:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "Not enough memory exists to complete the operation"
-                );
+                case ERROR_NOT_ENOUGH_MEMORY:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "Not enough memory exists to complete the operation"
+                    );
 
-            default:
-                throw HydraHook::Core::Exceptions::DetourException(
-                    "Unknown error"
-                );
+                default:
+                    throw HydraHook::Core::Exceptions::DetourException(
+                        "Unknown error"
+                    );
+                }
             }
-        }
 
-        transaction_commit();
+            transaction_commit();
+        }
+        catch (...)
+        {
+            abort_transaction_nothrow();
+            throw;
+        }
     }
 
     /**
