@@ -335,6 +335,23 @@ namespace
             g_stdHook = nullptr;
         }
         Check(StdTarget(4) == stdOriginal, "RAII teardown restored stdcall target", __FILE__, __LINE__);
+
+        {
+            using StdHook = Hook<CallConvention::stdcall_t, int, int>;
+            alignas(StdHook) unsigned char storage[sizeof(StdHook)];
+            auto* hook = new (storage) StdHook();
+            g_stdHook = hook;
+            hook->apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+            g_hookDestructorDetachSuppressed = true;
+            hook->~StdHook();
+            Check(StdTarget(4) == stdOriginal + 10, "suppressed destructor leaves the detour", __FILE__, __LINE__);
+            g_hookDestructorDetachSuppressed = false;
+            hook->remove();
+            Check(StdTarget(4) == stdOriginal, "explicit remove clears a suppressed detour", __FILE__, __LINE__);
+            new (storage) StdHook();
+            hook->~StdHook();
+            g_stdHook = nullptr;
+        }
     }
 
     void TestActivityTracker()

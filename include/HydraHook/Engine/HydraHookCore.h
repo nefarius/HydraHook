@@ -333,8 +333,8 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
      * at DLL_PROCESS_DETACH. This function does not wait, including on the lifecycle
      * lock. It frees the engine, its cancellation event, and its thread handle only
      * after the worker has exited and a current callback drain succeeds. Otherwise the
-     * engine stays allocated and the module that contains the worker is pinned for
-     * the rest of the process.
+     * engine stays allocated, the module that contains the worker is pinned for the
+     * rest of the process, and static Hook destructors do not detach.
      *
      * @param[in] HostInstance HMODULE passed to HydraHookEngineCreate.
      * @retval HYDRAHOOK_ERROR_NONE Success.

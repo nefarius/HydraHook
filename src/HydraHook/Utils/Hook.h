@@ -43,6 +43,15 @@ SOFTWARE.
 #include <detours/detours.h>
 #include "Exceptions.hpp"
 
+/**
+ * @brief When set, ~Hook() does not detach.
+ *
+ * DLL_PROCESS_DETACH runs static destructors after a retained Destroy returns.
+ * Those destructors must not call DetourDetach while the worker or a callback
+ * is still inside a hook. A later successful Destroy clears this.
+ */
+inline bool g_hookDestructorDetachSuppressed = false;
+
 /** @brief Supported calling conventions for hook targets. */
 enum class CallConvention
 {
@@ -182,6 +191,9 @@ public:
     /** @brief Destroys hook; removes if applied. Never throws. */
     ~Hook() noexcept
     {
+        if (g_hookDestructorDetachSuppressed)
+            return;
+
         abort_transaction_nothrow();
         remove_nothrow();
     }

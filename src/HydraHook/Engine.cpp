@@ -55,6 +55,7 @@ SOFTWARE.
 #include "Game/Game.h"
 #include "Game/Shutdown.h"
 #include "Utils/Global.h"
+#include "Utils/Hook.h"
 
 //
 // Logging
@@ -146,6 +147,15 @@ namespace
 			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
 			reinterpret_cast<LPCWSTR>(&PinWorkerModule),
 			&module);
+	}
+
+	HYDRAHOOK_ERROR RetainEngine(const std::shared_ptr<spdlog::logger>& logger, const char* reason)
+	{
+		g_hookDestructorDetachSuppressed = true;
+		PinWorkerModule();
+		if (logger)
+			logger->warn("{}", reason);
+		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
 	}
 }
 
@@ -384,7 +394,11 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 {
 	PHYDRAHOOK_ENGINE engine = nullptr;
 	{
-		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+		std::unique_lock<std::mutex> lock(g_EngineHostInstancesMutex, std::try_to_lock);
+		if (!lock.owns_lock())
+		{
+			return RetainEngine(nullptr, "Engine kept alive; host map lock is busy");
+		}
 		const auto it = g_EngineHostInstances.find(HostInstance);
 		if (it == g_EngineHostInstances.end())
 		{
@@ -401,12 +415,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		// under the loader lock, so a busy lock keeps the engine allocated.
 		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
 		if (!lifecycle)
-		{
-			PinWorkerModule();
-			if (logger)
-				logger->warn("Engine kept alive; lifecycle lock is busy");
-			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
-		}
+			return RetainEngine(logger, "Engine kept alive; lifecycle lock is busy");
 		PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
 	}
 
@@ -419,23 +428,28 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
 
 	if (!workerExited)
-	{
-		PinWorkerModule();
-		if (logger)
-			logger->warn("Engine kept alive; worker is still running");
-		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
-	}
+		return RetainEngine(logger, "Engine kept alive; worker is still running");
 
 	// TerminateThread can signal the worker before it closes the tracker.
 	// A false DrainIncomplete flag is not a drain. Shut the tracker first so a
 	// callback cannot pass the check and then enter.
 	HookActivityTracker::shutdown();
 	if (!HookActivityTracker::drain(0))
+		return RetainEngine(logger, "Engine kept alive; hook callbacks are still running");
+
+	g_hookDestructorDetachSuppressed = false;
+
+	bool lastEngine = false;
 	{
-		PinWorkerModule();
-		if (logger)
-			logger->warn("Engine kept alive; hook callbacks are still running");
-		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		std::unique_lock<std::mutex> lock(g_EngineHostInstancesMutex, std::try_to_lock);
+		if (!lock.owns_lock())
+		{
+			if (logger)
+				logger->warn("Engine kept alive; host map lock is busy");
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
+		g_EngineHostInstances.erase(HostInstance);
+		lastEngine = g_EngineHostInstances.empty();
 	}
 
 	if (logger)
@@ -460,13 +474,6 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (engine->EngineThread)
 	{
 		CloseHandle(engine->EngineThread);
-	}
-
-	bool lastEngine = false;
-	{
-		std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
-		g_EngineHostInstances.erase(HostInstance);
-		lastEngine = g_EngineHostInstances.empty();
 	}
 
 	if (logger)
