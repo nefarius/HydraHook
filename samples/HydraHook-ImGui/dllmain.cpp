@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include "dllmain.h"
 #include "ImGuiWin32Buttons.h"
+#include "OverlayRelease.h"
 #include "InitGuard.h"
 #include "WindowProcHook.h"
 
@@ -58,6 +59,7 @@ static std::atomic<bool> g_ReleasePending{ false };
 static std::atomic<int> g_ReleaseAttempts{ 0 };
 // Hide generation. A queued release carries the value from the hide that posted it.
 static std::atomic<uint32_t> g_ReleaseGeneration{ 0 };
+static std::atomic<uint32_t> g_ReleaseApplied{ 0 };
 // New input stays out until the release for the current generation has run.
 static std::atomic<bool> g_HoldInput{ false };
 // Set before the final unhook release so a button-down cannot land after cleanup.
@@ -1183,7 +1185,8 @@ static void ReleaseOverlayInput(HWND hWnd, uint32_t generation, bool force)
 		return;
 
 	ImGuiScope scope;
-	if (!force && generation != g_ReleaseGeneration.load())
+	// A duplicate post of this hide must not clear input admitted after the first release.
+	if (!ClaimOverlayRelease(g_ReleaseGeneration, g_ReleaseApplied, generation, force))
 		return;
 
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)

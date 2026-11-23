@@ -29,6 +29,9 @@
     <ClInclude Include="InitGuard.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="OverlayRelease.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ImGuiWin32Buttons.h">
       <Filter>Header Files</Filter>
     </ClInclude>

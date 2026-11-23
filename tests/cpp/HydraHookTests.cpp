@@ -15,6 +15,7 @@
 #include "Utils/Hook.h"
 #include "FrameRate.h"
 #include "InitGuard.h"
+#include "OverlayRelease.h"
 #include "WindowProcHook.h"
 
 #include <atomic>
@@ -755,6 +756,24 @@ namespace
         hook.SetBeforeDispatch(nullptr);
     }
 
+    void TestOverlayReleaseClaim()
+    {
+        std::atomic<uint32_t> current{1};
+        std::atomic<uint32_t> applied{0};
+
+        Check(ClaimOverlayRelease(current, applied, 1, false), "first release claims the hide", __FILE__, __LINE__);
+        // Reopening does not change the generation. A delayed duplicate must not claim again.
+        Check(!ClaimOverlayRelease(current, applied, 1, false), "duplicate release after reopen is ignored", __FILE__, __LINE__);
+
+        current.store(2);
+        Check(!ClaimOverlayRelease(current, applied, 1, false), "stale hide is ignored", __FILE__, __LINE__);
+        Check(ClaimOverlayRelease(current, applied, 2, false), "newer hide claims", __FILE__, __LINE__);
+        Check(!ClaimOverlayRelease(current, applied, 2, false), "newer hide is also idempotent", __FILE__, __LINE__);
+
+        Check(ClaimOverlayRelease(current, applied, 0, true), "unhook force still runs", __FILE__, __LINE__);
+        Check(!ClaimOverlayRelease(current, applied, 2, false), "force consumes the current generation", __FILE__, __LINE__);
+    }
+
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
@@ -775,6 +794,7 @@ int main()
     TestFrameRate();
     TestResettableInitGuard();
     TestWindowProcHook();
+    TestOverlayReleaseClaim();
     TestShutdownGuard();
 
     if (g_failures != 0)
