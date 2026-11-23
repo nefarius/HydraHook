@@ -24,17 +24,17 @@ SOFTWARE.
 
 #include "Direct3D10.h"
 #include <vector>
+#include <wrl/client.h>
 #include <dxgi1_4.h>
 #include "DXGI.h"
 #include "Exceptions.hpp"
 
 using namespace HydraHook::Core::Exceptions;
+using Microsoft::WRL::ComPtr;
 
 Direct3D10Hooking::Direct3D10::Direct3D10() :
 	pDevice(nullptr), pSwapChain(nullptr)
 {
-	temp_window = std::make_unique<Window>("TempDirect3D10OverlayWindow");
-
 	const auto hModDXGI = GetModuleHandle("DXGI.dll");
 	const auto hModD3D10 = GetModuleHandle("D3D10.dll");
 
@@ -54,12 +54,12 @@ Direct3D10Hooking::Direct3D10::Direct3D10() :
 		throw ProcAddressNotFoundException("Could not get handle to CreateDXGIFactory");
 	}
 
-	IDXGIFactory* pFactory;
+	ComPtr<IDXGIFactory> pFactory;
 	const auto hr = static_cast<HRESULT(WINAPI *)(
 		REFIID,
 		void** ppFactory)>(hCreateDXGIFactory)(
 		__uuidof(IDXGIFactory),
-		reinterpret_cast<void**>(&pFactory));
+		reinterpret_cast<void**>(pFactory.GetAddressOf()));
 
 	if (FAILED(hr))
 	{
@@ -75,9 +75,9 @@ Direct3D10Hooking::Direct3D10::Direct3D10() :
 	}
 
 	UINT i = 0;
-	IDXGIAdapter* pAdapter;
-	std::vector<IDXGIAdapter*> vAdapters;
-	while (pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND)
+	ComPtr<IDXGIAdapter> pAdapter;
+	std::vector<ComPtr<IDXGIAdapter>> vAdapters;
+	while (pFactory->EnumAdapters(i, pAdapter.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND)
 	{
 		vAdapters.push_back(pAdapter);
 		++i;
@@ -87,6 +87,8 @@ Direct3D10Hooking::Direct3D10::Direct3D10() :
 	{
 		throw RuntimeException("No adapters found");
 	}
+
+	temp_window = std::make_unique<Window>("TempDirect3D10OverlayWindow");
 
 	DXGI_RATIONAL rational = {};
 	rational.Numerator = 60;
@@ -121,7 +123,7 @@ Direct3D10Hooking::Direct3D10::Direct3D10() :
 		DXGI_SWAP_CHAIN_DESC*,
 		IDXGISwapChain**,
 		ID3D10Device**)>(hD3D10CreateDeviceAndSwapChain)(
-		vAdapters[0],
+		vAdapters[0].Get(),
 		D3D10_DRIVER_TYPE_HARDWARE,
 		nullptr,
 		0,

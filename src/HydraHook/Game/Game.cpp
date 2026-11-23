@@ -113,7 +113,6 @@ static Hook<CallConvention::stdcall_t, BOOL, HMODULE> g_freeLibraryHook;
 // worker run (initial hook or rehook) starts from a clean slate.
 //
 static PHYDRAHOOK_ENGINE engine = nullptr;
-static HYDRAHOOK_D3D_VERSION deviceVersion = HydraHookDirect3DVersionUnknown;
 
 /// Once-per-hook announcements; re-armed at the start of every worker run.
 static struct HookAnnouncements
@@ -271,7 +270,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 {
 	auto logger = spdlog::get("HYDRAHOOK")->clone("game");
 	engine = reinterpret_cast<PHYDRAHOOK_ENGINE>(Params);
-	deviceVersion = HydraHookDirect3DVersionUnknown;
 	g_announce.reset_all();
 	const auto& config = engine->EngineConfig;
 
@@ -305,40 +303,27 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	logger->info("Direct3D 9 hooking disabled at compile time");
 #endif
 
-	// 
-	// D3D10 Hooks
-	// 
-#ifndef HYDRAHOOK_NO_D3D10
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT> swapChainPresent10Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, const DXGI_MODE_DESC*> swapChainResizeTarget10Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT>
-		swapChainResizeBuffers10Hook;
-#else
-	logger->info("Direct3D 10 hooking disabled at compile time");
-#endif
-
-	// 
-	// D3D11 Hooks
-	// 
-#ifndef HYDRAHOOK_NO_D3D11
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT> swapChainPresent11Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, const DXGI_MODE_DESC*> swapChainResizeTarget11Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT>
-		swapChainResizeBuffers11Hook;
-#else
-	logger->info("Direct3D 11 hooking disabled at compile time");
-#endif
-
 	//
-	// DXGI1+ Hooks (shared across D3D10/11/12)
+	// DXGI Hooks (shared across D3D10/11/12; one Detours hook per vtable slot)
 	//
+	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT> swapChainPresentHook;
+	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, const DXGI_MODE_DESC*> swapChainResizeTargetHook;
+	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT>
+		swapChainResizeBuffersHook;
 	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*>
 		swapChainPresent1Hook;
 	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*,
 	            IUnknown* const*> swapChainResizeBuffers1Hook;
 
+#ifdef HYDRAHOOK_NO_D3D10
+	logger->info("Direct3D 10 hooking disabled at compile time");
+#endif
+#ifdef HYDRAHOOK_NO_D3D11
+	logger->info("Direct3D 11 hooking disabled at compile time");
+#endif
+
 	// 
-	// D3D12 Hooks
+	// D3D12 Queue Capture Hooks
 	// 
 #ifndef HYDRAHOOK_NO_D3D12
 	static Hook<CallConvention::stdcall_t, HRESULT, IUnknown*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**>
@@ -347,10 +332,6 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	            DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**> createSwapChainForHwnd12Hook;
 	static Hook<CallConvention::stdcall_t, void, ID3D12CommandQueue*, UINT, ID3D12CommandList* const*>
 		executeCommandLists12Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT> swapChainPresent12Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, const DXGI_MODE_DESC*> swapChainResizeTarget12Hook;
-	static Hook<CallConvention::stdcall_t, HRESULT, IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT>
-		swapChainResizeBuffers12Hook;
 #else
 	logger->info("Direct3D 12 hooking disabled at compile time");
 #endif
@@ -721,258 +702,45 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 #pragma endregion
 
-#pragma region D3D10
+#pragma region DXGI / D3D10 / D3D11 / D3D12
 
 	size_t dxgiPresentAddress = 0;
+	size_t dxgiResizeTargetAddress = 0;
+	size_t dxgiResizeBuffersAddress = 0;
 	size_t dxgiPresent1Address = 0;
 	size_t dxgiResizeBuffers1Address = 0;
 
-#ifndef HYDRAHOOK_NO_D3D10
+	const auto captureDxgiVtable = [&](const std::vector<size_t>& vtable)
+	{
+		if (dxgiPresentAddress == 0 && vtable.size() > static_cast<size_t>(DXGIHooking::Present))
+			dxgiPresentAddress = vtable[DXGIHooking::Present];
+		if (dxgiResizeTargetAddress == 0 && vtable.size() > static_cast<size_t>(DXGIHooking::ResizeTarget))
+			dxgiResizeTargetAddress = vtable[DXGIHooking::ResizeTarget];
+		if (dxgiResizeBuffersAddress == 0 && vtable.size() > static_cast<size_t>(DXGIHooking::ResizeBuffers))
+			dxgiResizeBuffersAddress = vtable[DXGIHooking::ResizeBuffers];
+		if (dxgiPresent1Address == 0 && vtable.size() > static_cast<size_t>(
+			DXGIHooking::DXGI1::DXGISwapChain1VTbl::Present1))
+			dxgiPresent1Address = vtable[DXGIHooking::DXGI1::Present1];
+		if (dxgiResizeBuffers1Address == 0 && vtable.size() > static_cast<size_t>(
+			DXGIHooking::DXGI3::ResizeBuffers1))
+			dxgiResizeBuffers1Address = vtable[DXGIHooking::DXGI3::ResizeBuffers1];
+	};
 
-	if (config.Direct3D.HookDirect3D10)
+#ifndef HYDRAHOOK_NO_D3D12
+	size_t d3d12ExecuteCommandListsAddress = 0;
+
+	if (config.Direct3D.HookDirect3D12)
 	{
 		try
 		{
-			const std::unique_ptr<Direct3D10Hooking::Direct3D10> d3d10(new Direct3D10Hooking::Direct3D10);
-			auto vtable = d3d10->vtable();
+			const std::unique_ptr<Direct3D12Hooking::Direct3D12> d3d12(new Direct3D12Hooking::Direct3D12);
+			captureDxgiVtable(d3d12->vtable());
 
-			logger->info("Hooking IDXGISwapChain::Present");
-
-			swapChainPresent10Hook.apply(vtable[DXGIHooking::Present], [](
-			                             IDXGISwapChain* chain,
-			                             UINT SyncInterval,
-			                             UINT Flags
-		                             ) -> HRESULT
-			                             {
-				                             HookActivityTracker::Guard guard;
-
-				                             if (guard.invoke)
-				                             {
-					                             g_announce.present10.call([&pChain = chain]()
-					                             {
-						                             auto l = spdlog::get("HYDRAHOOK")->clone("d3d10");
-						                             l->info("++ IDXGISwapChain::Present called");
-
-						                             ID3D10Device* pp10Device = nullptr;
-						                             ID3D11Device* pp11Device = nullptr;
-
-						                             auto ret = pChain->GetDevice(
-							                             __uuidof(ID3D10Device), reinterpret_cast<PVOID*>(&pp10Device));
-
-						                             if (SUCCEEDED(ret))
-						                             {
-							                             l->debug("ID3D10Device object acquired");
-							                             deviceVersion = HydraHookDirect3DVersion10;
-							                             INVOKE_HYDRAHOOK_GAME_HOOKED(engine, deviceVersion);
-							                             return;
-						                             }
-
-						                             ret = pChain->GetDevice(
-							                             __uuidof(ID3D11Device), reinterpret_cast<PVOID*>(&pp11Device));
-
-						                             if (SUCCEEDED(ret))
-						                             {
-							                             l->debug("ID3D11Device object acquired");
-							                             deviceVersion = HydraHookDirect3DVersion11;
-							                             INVOKE_HYDRAHOOK_GAME_HOOKED(engine, deviceVersion);
-							                             return;
-						                             }
-
-						                             l->error("Could not fetch device pointer");
-					                             });
-
-					                             HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                             HYDRAHOOK_EVT_PRE_EXTENSION_INIT(&pre, engine, engine->CustomContext);
-					                             HYDRAHOOK_EVT_POST_EXTENSION post;
-					                             HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                             &post, engine, engine->CustomContext);
-
-					                             if (deviceVersion == HydraHookDirect3DVersion10)
-					                             {
-						                             INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PrePresent, chain,
-						                                                   SyncInterval, Flags);
-					                             }
-
-					                             if (deviceVersion == HydraHookDirect3DVersion11)
-					                             {
-						                             INVOKE_D3D11_CALLBACK(engine, EvtHydraHookD3D11PrePresent, chain,
-						                                                   SyncInterval, Flags, &pre);
-					                             }
-				                             }
-
-				                             const auto ret = swapChainPresent10Hook.call_orig(
-					                             chain, SyncInterval, Flags);
-
-				                             if (guard.invoke)
-				                             {
-					                             HYDRAHOOK_EVT_POST_EXTENSION post;
-					                             HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                             &post, engine, engine->CustomContext);
-
-					                             if (deviceVersion == HydraHookDirect3DVersion10)
-					                             {
-						                             INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PostPresent, chain,
-						                                                   SyncInterval, Flags);
-					                             }
-
-					                             if (deviceVersion == HydraHookDirect3DVersion11)
-					                             {
-						                             INVOKE_D3D11_CALLBACK(engine, EvtHydraHookD3D11PostPresent, chain,
-						                                                   SyncInterval, Flags, &post);
-					                             }
-				                             }
-
-				                             return ret;
-			                             });
-			dxgiPresentAddress = vtable[DXGIHooking::Present];
-			if (vtable.size() > static_cast<size_t>(DXGIHooking::DXGI1::DXGISwapChain1VTbl::Present1))
-				dxgiPresent1Address = vtable[DXGIHooking::DXGI1::Present1];
-			if (vtable.size() > static_cast<size_t>(DXGIHooking::DXGI3::ResizeBuffers1))
-				dxgiResizeBuffers1Address = vtable[DXGIHooking::DXGI3::ResizeBuffers1];
-
-			logger->info("Hooking IDXGISwapChain::ResizeTarget");
-
-			swapChainResizeTarget10Hook.apply(vtable[DXGIHooking::ResizeTarget], [](
-			                                  IDXGISwapChain* chain,
-			                                  const DXGI_MODE_DESC* pNewTargetParameters
-		                                  ) -> HRESULT
-			                                  {
-				                                  HookActivityTracker::Guard guard;
-
-				                                  if (guard.invoke)
-				                                  {
-					                                  g_announce.resizeTarget10.call([]()
-					                                  {
-						                                  spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
-							                                  "++ IDXGISwapChain::ResizeTarget called");
-					                                  });
-
-					                                  HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                                  HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-						                                  &pre, engine, engine->CustomContext);
-
-					                                  if (deviceVersion == HydraHookDirect3DVersion10)
-					                                  {
-						                                  INVOKE_D3D10_CALLBACK(
-							                                  engine, EvtHydraHookD3D10PreResizeTarget, chain,
-							                                  pNewTargetParameters);
-					                                  }
-
-					                                  if (deviceVersion == HydraHookDirect3DVersion11)
-					                                  {
-						                                  INVOKE_D3D11_CALLBACK(
-							                                  engine,
-							                                  EvtHydraHookD3D11PreResizeTarget,
-							                                  chain,
-							                                  pNewTargetParameters,
-							                                  &pre
-						                                  );
-					                                  }
-				                                  }
-
-				                                  const auto ret = swapChainResizeTarget10Hook.call_orig(
-					                                  chain, pNewTargetParameters);
-
-				                                  if (guard.invoke)
-				                                  {
-					                                  HYDRAHOOK_EVT_POST_EXTENSION post;
-					                                  HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                                  &post, engine, engine->CustomContext);
-
-					                                  if (deviceVersion == HydraHookDirect3DVersion10)
-					                                  {
-						                                  INVOKE_D3D10_CALLBACK(
-							                                  engine, EvtHydraHookD3D10PostResizeTarget, chain,
-							                                  pNewTargetParameters);
-					                                  }
-
-					                                  if (deviceVersion == HydraHookDirect3DVersion11)
-					                                  {
-						                                  INVOKE_D3D11_CALLBACK(
-							                                  engine,
-							                                  EvtHydraHookD3D11PostResizeTarget,
-							                                  chain,
-							                                  pNewTargetParameters,
-							                                  &post
-						                                  );
-					                                  }
-				                                  }
-
-				                                  return ret;
-			                                  });
-
-			logger->info("Hooking IDXGISwapChain::ResizeBuffers");
-
-			swapChainResizeBuffers10Hook.apply(vtable[DXGIHooking::ResizeBuffers], [](
-			                                   IDXGISwapChain* chain,
-			                                   UINT BufferCount,
-			                                   UINT Width,
-			                                   UINT Height,
-			                                   DXGI_FORMAT NewFormat,
-			                                   UINT SwapChainFlags
-		                                   ) -> HRESULT
-			                                   {
-				                                   HookActivityTracker::Guard guard;
-
-				                                   if (guard.invoke)
-				                                   {
-					                                   g_announce.resizeBuffers10.call([]()
-					                                   {
-						                                   spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
-							                                   "++ IDXGISwapChain::ResizeBuffers called");
-					                                   });
-
-					                                   HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                                   HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-						                                   &pre, engine, engine->CustomContext);
-
-					                                   if (deviceVersion == HydraHookDirect3DVersion10)
-					                                   {
-						                                   INVOKE_D3D10_CALLBACK(
-							                                   engine, EvtHydraHookD3D10PreResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-					                                   }
-
-					                                   if (deviceVersion == HydraHookDirect3DVersion11)
-					                                   {
-						                                   INVOKE_D3D11_CALLBACK(
-							                                   engine, EvtHydraHookD3D11PreResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                   &pre);
-					                                   }
-				                                   }
-
-				                                   const auto ret = swapChainResizeBuffers10Hook.call_orig(chain,
-					                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-
-				                                   if (guard.invoke)
-				                                   {
-					                                   HYDRAHOOK_EVT_POST_EXTENSION post;
-					                                   HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                                   &post, engine, engine->CustomContext);
-
-					                                   if (deviceVersion == HydraHookDirect3DVersion10)
-					                                   {
-						                                   INVOKE_D3D10_CALLBACK(
-							                                   engine, EvtHydraHookD3D10PostResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-					                                   }
-
-					                                   if (deviceVersion == HydraHookDirect3DVersion11)
-					                                   {
-						                                   INVOKE_D3D11_CALLBACK(
-							                                   engine, EvtHydraHookD3D11PostResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                   &post);
-					                                   }
-				                                   }
-
-				                                   return ret;
-			                                   });
-		}
-		catch (DetourException& ex)
-		{
-			logger->error("Hooking D3D10 failed: {}", ex.what());
+			if (void** pQueueVtbl = d3d12->commandQueueVtable())
+			{
+				constexpr int ExecuteCommandListsIndex = 10;
+				d3d12ExecuteCommandListsAddress = reinterpret_cast<size_t>(pQueueVtbl[ExecuteCommandListsIndex]);
+			}
 		}
 		catch (ModuleNotFoundException& ex)
 		{
@@ -980,249 +748,18 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 		}
 		catch (RuntimeException& ex)
 		{
-			logger->error("D3D10 runtime error: {}", ex.what());
+			logger->error("D3D12 runtime error: {}", ex.what());
 		}
 	}
-
 #endif
 
-#pragma endregion
-
-#pragma region D3D11
-
 #ifndef HYDRAHOOK_NO_D3D11
-
-	if (config.Direct3D.HookDirect3D11)
+	if (config.Direct3D.HookDirect3D11 && dxgiPresentAddress == 0)
 	{
 		try
 		{
 			const std::unique_ptr<Direct3D11Hooking::Direct3D11> d3d11(new Direct3D11Hooking::Direct3D11);
-			auto vtable = d3d11->vtable();
-			const size_t d3d11PresentAddress = vtable[DXGIHooking::Present];
-
-			if (dxgiPresent1Address == 0 && vtable.size() > static_cast<size_t>(
-				DXGIHooking::DXGI1::DXGISwapChain1VTbl::Present1))
-				dxgiPresent1Address = vtable[DXGIHooking::DXGI1::Present1];
-			if (dxgiResizeBuffers1Address == 0 && vtable.size() > static_cast<size_t>(
-				DXGIHooking::DXGI3::ResizeBuffers1))
-				dxgiResizeBuffers1Address = vtable[DXGIHooking::DXGI3::ResizeBuffers1];
-
-			// D3D10 and D3D11 share the same DXGI swap chain implementation. Applying both would
-			// create a duplicate hook chain; the D3D10 hook already handles both via device detection.
-			if (dxgiPresentAddress != 0 && d3d11PresentAddress == dxgiPresentAddress)
-			{
-				logger->info("Skipping D3D11 DXGI hooks (same vtable as D3D10; D3D10 hook handles both)");
-			}
-			else
-			{
-				logger->info("Hooking IDXGISwapChain::Present");
-
-				swapChainPresent11Hook.apply(vtable[DXGIHooking::Present], [](
-				                             IDXGISwapChain* chain,
-				                             UINT SyncInterval,
-				                             UINT Flags
-			                             ) -> HRESULT
-				                             {
-					                             HookActivityTracker::Guard guard;
-
-					                             ID3D11Device* pD11Device = nullptr;
-					                             if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
-					                             {
-						                             if (pD11Device)
-						                             {
-							                             pD11Device->Release();
-						                             }
-						                             return swapChainPresent11Hook.
-							                             call_orig(chain, SyncInterval, Flags);
-					                             }
-					                             if (pD11Device)
-					                             {
-						                             pD11Device->Release();
-					                             }
-
-					                             if (guard.invoke)
-					                             {
-						                             g_announce.present11.call([&pChain = chain]()
-						                             {
-							                             spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
-								                             "++ IDXGISwapChain::Present called");
-
-							                             engine->RenderPipeline.pSwapChain = pChain;
-
-							                             INVOKE_HYDRAHOOK_GAME_HOOKED(
-								                             engine, HydraHookDirect3DVersion11);
-						                             });
-
-						                             HYDRAHOOK_EVT_PRE_EXTENSION pre;
-						                             HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-							                             &pre, engine, engine->CustomContext);
-
-						                             INVOKE_D3D11_CALLBACK(
-							                             engine,
-							                             EvtHydraHookD3D11PrePresent,
-							                             chain,
-							                             SyncInterval,
-							                             Flags,
-							                             &pre
-						                             );
-					                             }
-
-					                             const auto ret = swapChainPresent11Hook.call_orig(
-						                             chain, SyncInterval, Flags);
-
-					                             if (guard.invoke)
-					                             {
-						                             HYDRAHOOK_EVT_POST_EXTENSION post;
-						                             HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-							                             &post, engine, engine->CustomContext);
-
-						                             INVOKE_D3D11_CALLBACK(
-							                             engine,
-							                             EvtHydraHookD3D11PostPresent,
-							                             chain,
-							                             SyncInterval,
-							                             Flags,
-							                             &post
-						                             );
-					                             }
-
-					                             return ret;
-				                             });
-
-				logger->info("Hooking IDXGISwapChain::ResizeTarget");
-
-				swapChainResizeTarget11Hook.apply(vtable[DXGIHooking::ResizeTarget], [](
-				                                  IDXGISwapChain* chain,
-				                                  const DXGI_MODE_DESC* pNewTargetParameters
-			                                  ) -> HRESULT
-				                                  {
-					                                  HookActivityTracker::Guard guard;
-
-					                                  ID3D11Device* pD11Device = nullptr;
-					                                  if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
-					                                  {
-						                                  if (pD11Device)
-						                                  {
-							                                  pD11Device->Release();
-						                                  }
-						                                  return swapChainResizeTarget11Hook.call_orig(
-							                                  chain, pNewTargetParameters);
-					                                  }
-					                                  if (pD11Device)
-					                                  {
-						                                  pD11Device->Release();
-					                                  }
-
-					                                  if (guard.invoke)
-					                                  {
-						                                  g_announce.resizeTarget11.call([]()
-						                                  {
-							                                  spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
-								                                  "++ IDXGISwapChain::ResizeTarget called");
-						                                  });
-
-						                                  HYDRAHOOK_EVT_PRE_EXTENSION pre;
-						                                  HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-							                                  &pre, engine, engine->CustomContext);
-
-						                                  INVOKE_D3D11_CALLBACK(
-							                                  engine,
-							                                  EvtHydraHookD3D11PreResizeTarget,
-							                                  chain,
-							                                  pNewTargetParameters,
-							                                  &pre
-						                                  );
-					                                  }
-
-					                                  const auto ret = swapChainResizeTarget11Hook.call_orig(
-						                                  chain, pNewTargetParameters);
-
-					                                  if (guard.invoke)
-					                                  {
-						                                  HYDRAHOOK_EVT_POST_EXTENSION post;
-						                                  HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-							                                  &post, engine, engine->CustomContext);
-
-						                                  INVOKE_D3D11_CALLBACK(
-							                                  engine,
-							                                  EvtHydraHookD3D11PostResizeTarget,
-							                                  chain,
-							                                  pNewTargetParameters,
-							                                  &post
-						                                  );
-					                                  }
-
-					                                  return ret;
-				                                  });
-
-				logger->info("Hooking IDXGISwapChain::ResizeBuffers");
-
-				swapChainResizeBuffers11Hook.apply(vtable[DXGIHooking::ResizeBuffers], [](
-				                                   IDXGISwapChain* chain,
-				                                   UINT BufferCount,
-				                                   UINT Width,
-				                                   UINT Height,
-				                                   DXGI_FORMAT NewFormat,
-				                                   UINT SwapChainFlags
-			                                   ) -> HRESULT
-				                                   {
-					                                   HookActivityTracker::Guard guard;
-
-					                                   ID3D11Device* pD11Device = nullptr;
-					                                   if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))))
-					                                   {
-						                                   if (pD11Device)
-						                                   {
-							                                   pD11Device->Release();
-						                                   }
-						                                   return swapChainResizeBuffers11Hook.call_orig(chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-					                                   }
-					                                   if (pD11Device)
-					                                   {
-						                                   pD11Device->Release();
-					                                   }
-
-					                                   if (guard.invoke)
-					                                   {
-						                                   g_announce.resizeBuffers11.call([]()
-						                                   {
-							                                   spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
-								                                   "++ IDXGISwapChain::ResizeBuffers called");
-						                                   });
-
-						                                   HYDRAHOOK_EVT_PRE_EXTENSION pre;
-						                                   HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-							                                   &pre, engine, engine->CustomContext);
-
-						                                   INVOKE_D3D11_CALLBACK(
-							                                   engine, EvtHydraHookD3D11PreResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                   &pre);
-					                                   }
-
-					                                   const auto ret = swapChainResizeBuffers11Hook.call_orig(chain,
-						                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-
-					                                   if (guard.invoke)
-					                                   {
-						                                   HYDRAHOOK_EVT_POST_EXTENSION post;
-						                                   HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-							                                   &post, engine, engine->CustomContext);
-
-						                                   INVOKE_D3D11_CALLBACK(
-							                                   engine, EvtHydraHookD3D11PostResizeBuffers, chain,
-							                                   BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                   &post);
-					                                   }
-
-					                                   return ret;
-				                                   });
-			}
-		}
-		catch (DetourException& ex)
-		{
-			logger->error("Hooking D3D11 failed: {}", ex.what());
+			captureDxgiVtable(d3d11->vtable());
 		}
 		catch (ModuleNotFoundException& ex)
 		{
@@ -1233,21 +770,36 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			logger->error("D3D11 runtime error: {}", ex.what());
 		}
 	}
-
 #endif
 
-#pragma endregion
-
-#pragma region D3D12
+#ifndef HYDRAHOOK_NO_D3D10
+	if (config.Direct3D.HookDirect3D10 && dxgiPresentAddress == 0)
+	{
+		try
+		{
+			const std::unique_ptr<Direct3D10Hooking::Direct3D10> d3d10(new Direct3D10Hooking::Direct3D10);
+			captureDxgiVtable(d3d10->vtable());
+		}
+		catch (ModuleNotFoundException& ex)
+		{
+			logger->warn("Module not found: {}", ex.what());
+		}
+		catch (RuntimeException& ex)
+		{
+			logger->error("D3D10 runtime error: {}", ex.what());
+		}
+	}
+#endif
 
 #ifndef HYDRAHOOK_NO_D3D12
-
 	if (config.Direct3D.HookDirect3D12)
 	{
 		try
 		{
+			// Installed after all temporary probe swap chains above have been destroyed
+			// so our own dummy swap chain is never captured into g_d3d12SwapChainToQueue.
 			IDXGIFactory2* pFactory = nullptr;
-			HMODULE hModDXGI = LoadLibraryW(L"dxgi.dll");
+			HMODULE hModDXGI = GetModuleHandleW(L"dxgi.dll");
 			HRESULT hrFactory = E_FAIL;
 			if (hModDXGI)
 			{
@@ -1261,8 +813,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 				void** pFactoryVtbl = *reinterpret_cast<void***>(pFactory);
 				constexpr int CreateSwapChainIndex = 10;
 				constexpr int CreateSwapChainForHwndIndex = 14;
+				const auto createSwapChainAddr = reinterpret_cast<size_t>(pFactoryVtbl[CreateSwapChainIndex]);
+				const auto createSwapChainForHwndAddr = reinterpret_cast<size_t>(
+					pFactoryVtbl[CreateSwapChainForHwndIndex]);
+				pFactory->Release();
+				pFactory = nullptr;
 
-				createSwapChain12Hook.apply(reinterpret_cast<size_t>(pFactoryVtbl[CreateSwapChainIndex]), [](
+				if (!createSwapChain12Hook.is_applied())
+				createSwapChain12Hook.apply(createSwapChainAddr, [](
 				                            IUnknown* pFactoryThis,
 				                            IUnknown* pDevice,
 				                            DXGI_SWAP_CHAIN_DESC* pDesc,
@@ -1280,13 +838,17 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                            if (SUCCEEDED(pDevice->QueryInterface(IID_PPV_ARGS(&pQueue))))
 						                            {
 							                            std::lock_guard<std::mutex> lock(g_d3d12QueueMapMutex);
+							                            auto it = g_d3d12SwapChainToQueue.find(*ppSwapChain);
+							                            if (it != g_d3d12SwapChainToQueue.end() && it->second)
+								                            it->second->Release();
 							                            g_d3d12SwapChainToQueue[*ppSwapChain] = pQueue;
 						                            }
 					                            }
 					                            return ret;
 				                            });
 
-				createSwapChainForHwnd12Hook.apply(reinterpret_cast<size_t>(pFactoryVtbl[CreateSwapChainForHwndIndex]),
+				if (!createSwapChainForHwnd12Hook.is_applied())
+				createSwapChainForHwnd12Hook.apply(createSwapChainForHwndAddr,
 				                                   [](
 				                                   IUnknown* pFactoryThis,
 				                                   IUnknown* pDevice,
@@ -1310,6 +872,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                                   pDevice->QueryInterface(IID_PPV_ARGS(&pQueue))))
 						                                   {
 							                                   std::lock_guard<std::mutex> lock(g_d3d12QueueMapMutex);
+							                                   auto it = g_d3d12SwapChainToQueue.find(*ppSwapChain);
+							                                   if (it != g_d3d12SwapChainToQueue.end() && it->second)
+								                                   it->second->Release();
 							                                   g_d3d12SwapChainToQueue[*ppSwapChain] = pQueue;
 						                                   }
 					                                   }
@@ -1317,18 +882,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 				                                   });
 
 				logger->info("Hooking IDXGIFactory::CreateSwapChain/CreateSwapChainForHwnd for D3D12 queue capture");
-				pFactory->Release();
 			}
 
-			const std::unique_ptr<Direct3D12Hooking::Direct3D12> d3d12(new Direct3D12Hooking::Direct3D12);
-			auto vtable = d3d12->vtable();
-
-			// Hook ExecuteCommandLists to capture the game's queue at runtime (supports mid-process injection)
-			void** pQueueVtbl = d3d12->commandQueueVtable();
-			if (pQueueVtbl)
+			if (d3d12ExecuteCommandListsAddress != 0 && !executeCommandLists12Hook.is_applied())
 			{
-				constexpr int ExecuteCommandListsIndex = 10;
-				executeCommandLists12Hook.apply(reinterpret_cast<size_t>(pQueueVtbl[ExecuteCommandListsIndex]), [](
+				executeCommandLists12Hook.apply(d3d12ExecuteCommandListsAddress, [](
 				                                ID3D12CommandQueue* pQueue,
 				                                UINT NumCommandLists,
 				                                ID3D12CommandList* const* ppCommandLists
@@ -1336,7 +894,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 				                                {
 					                                HookActivityTracker::Guard guard;
 
-					                                if (guard.invoke && pQueue)
+					                                if (guard.invoke && pQueue
+						                                && pQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT)
 					                                {
 						                                ID3D12Device* pDevice = nullptr;
 						                                if (SUCCEEDED(pQueue->GetDevice(IID_PPV_ARGS(&pDevice))) &&
@@ -1344,10 +903,13 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 						                                {
 							                                std::lock_guard<std::mutex> lock(g_d3d12QueueMapMutex);
 							                                auto it = g_d3d12DeviceToQueue.find(pDevice);
-							                                if (it != g_d3d12DeviceToQueue.end() && it->second)
-								                                it->second->Release();
-							                                pQueue->AddRef();
-							                                g_d3d12DeviceToQueue[pDevice] = pQueue;
+							                                if (it == g_d3d12DeviceToQueue.end() || it->second != pQueue)
+							                                {
+								                                if (it != g_d3d12DeviceToQueue.end() && it->second)
+									                                it->second->Release();
+								                                pQueue->AddRef();
+								                                g_d3d12DeviceToQueue[pDevice] = pQueue;
+							                                }
 							                                pDevice->Release();
 						                                }
 					                                }
@@ -1356,212 +918,438 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 				                                });
 				logger->info("Hooking ID3D12CommandQueue::ExecuteCommandLists for runtime queue capture");
 			}
-
-			logger->info("Hooking IDXGISwapChain::Present");
-
-			swapChainPresent12Hook.apply(vtable[DXGIHooking::Present], [](
-			                             IDXGISwapChain* chain,
-			                             UINT SyncInterval,
-			                             UINT Flags
-		                             ) -> HRESULT
-			                             {
-				                             HookActivityTracker::Guard guard;
-
-				                             ID3D12Device* pD12Device = nullptr;
-				                             if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
-				                             {
-					                             if (pD12Device)
-					                             {
-						                             pD12Device->Release();
-					                             }
-					                             return swapChainPresent12Hook.call_orig(chain, SyncInterval, Flags);
-				                             }
-				                             if (pD12Device)
-				                             {
-					                             pD12Device->Release();
-				                             }
-
-				                             if (guard.invoke)
-				                             {
-					                             g_announce.present12.call([&pChain = chain]()
-					                             {
-						                             spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
-							                             "++ IDXGISwapChain::Present called");
-
-						                             engine->RenderPipeline.pSwapChain = pChain;
-
-						                             INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion12);
-					                             });
-
-					                             HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                             HYDRAHOOK_EVT_PRE_EXTENSION_INIT(&pre, engine, engine->CustomContext);
-
-					                             INVOKE_D3D12_CALLBACK(engine, EvtHydraHookD3D12PrePresent, chain,
-					                                                   SyncInterval, Flags, &pre);
-				                             }
-
-				                             const auto ret = swapChainPresent12Hook.call_orig(
-					                             chain, SyncInterval, Flags);
-
-				                             if (guard.invoke)
-				                             {
-					                             HYDRAHOOK_EVT_POST_EXTENSION post;
-					                             HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                             &post, engine, engine->CustomContext);
-
-					                             INVOKE_D3D12_CALLBACK(engine, EvtHydraHookD3D12PostPresent, chain,
-					                                                   SyncInterval, Flags, &post);
-				                             }
-
-				                             return ret;
-			                             });
-
-			if (vtable.size() > static_cast<size_t>(DXGIHooking::DXGI1::DXGISwapChain1VTbl::Present1))
-				dxgiPresent1Address = vtable[DXGIHooking::DXGI1::Present1];
-			if (vtable.size() > static_cast<size_t>(DXGIHooking::DXGI3::ResizeBuffers1))
-				dxgiResizeBuffers1Address = vtable[DXGIHooking::DXGI3::ResizeBuffers1];
-
-			logger->info("Hooking IDXGISwapChain::ResizeTarget");
-
-			swapChainResizeTarget12Hook.apply(vtable[DXGIHooking::ResizeTarget], [](
-			                                  IDXGISwapChain* chain,
-			                                  const DXGI_MODE_DESC* pNewTargetParameters
-		                                  ) -> HRESULT
-			                                  {
-				                                  HookActivityTracker::Guard guard;
-
-				                                  ID3D12Device* pD12Device = nullptr;
-				                                  if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
-				                                  {
-					                                  if (pD12Device)
-					                                  {
-						                                  pD12Device->Release();
-					                                  }
-					                                  return swapChainResizeTarget12Hook.call_orig(
-						                                  chain, pNewTargetParameters);
-				                                  }
-				                                  if (pD12Device)
-				                                  {
-					                                  pD12Device->Release();
-				                                  }
-
-				                                  if (guard.invoke)
-				                                  {
-					                                  g_announce.resizeTarget12.call([]()
-					                                  {
-						                                  spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
-							                                  "++ IDXGISwapChain::ResizeTarget called");
-					                                  });
-
-					                                  HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                                  HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-						                                  &pre, engine, engine->CustomContext);
-
-					                                  INVOKE_D3D12_CALLBACK(
-						                                  engine, EvtHydraHookD3D12PreResizeTarget, chain,
-						                                  pNewTargetParameters, &pre);
-				                                  }
-
-				                                  const auto ret = swapChainResizeTarget12Hook.call_orig(
-					                                  chain, pNewTargetParameters);
-
-				                                  if (guard.invoke)
-				                                  {
-					                                  HYDRAHOOK_EVT_POST_EXTENSION post;
-					                                  HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                                  &post, engine, engine->CustomContext);
-
-					                                  INVOKE_D3D12_CALLBACK(engine, EvtHydraHookD3D12PostResizeTarget,
-					                                                        chain, pNewTargetParameters, &post);
-				                                  }
-
-				                                  return ret;
-			                                  });
-
-			logger->info("Hooking IDXGISwapChain::ResizeBuffers");
-
-			swapChainResizeBuffers12Hook.apply(vtable[DXGIHooking::ResizeBuffers], [](
-			                                   IDXGISwapChain* chain,
-			                                   UINT BufferCount,
-			                                   UINT Width,
-			                                   UINT Height,
-			                                   DXGI_FORMAT NewFormat,
-			                                   UINT SwapChainFlags
-		                                   ) -> HRESULT
-			                                   {
-				                                   HookActivityTracker::Guard guard;
-
-				                                   ID3D12Device* pD12Device = nullptr;
-				                                   if (FAILED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))))
-				                                   {
-					                                   if (pD12Device)
-					                                   {
-						                                   pD12Device->Release();
-					                                   }
-					                                   return swapChainResizeBuffers12Hook.call_orig(chain,
-						                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-				                                   }
-				                                   if (pD12Device)
-				                                   {
-					                                   pD12Device->Release();
-				                                   }
-
-				                                   if (guard.invoke)
-				                                   {
-					                                   g_announce.resizeBuffers12.call([]()
-					                                   {
-						                                   spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
-							                                   "++ IDXGISwapChain::ResizeBuffers called");
-					                                   });
-
-					                                   HYDRAHOOK_EVT_PRE_EXTENSION pre;
-					                                   HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
-						                                   &pre, engine, engine->CustomContext);
-
-					                                   INVOKE_D3D12_CALLBACK(
-						                                   engine, EvtHydraHookD3D12PreResizeBuffers, chain,
-						                                   BufferCount, Width, Height, NewFormat, SwapChainFlags, &pre);
-				                                   }
-
-				                                   const auto ret = swapChainResizeBuffers12Hook.call_orig(chain,
-					                                   BufferCount, Width, Height, NewFormat, SwapChainFlags);
-
-				                                   if (guard.invoke)
-				                                   {
-					                                   HYDRAHOOK_EVT_POST_EXTENSION post;
-					                                   HYDRAHOOK_EVT_POST_EXTENSION_INIT(
-						                                   &post, engine, engine->CustomContext);
-
-					                                   INVOKE_D3D12_CALLBACK(
-						                                   engine, EvtHydraHookD3D12PostResizeBuffers, chain,
-						                                   BufferCount, Width, Height, NewFormat, SwapChainFlags, &post);
-				                                   }
-
-				                                   return ret;
-			                                   });
 		}
 		catch (DetourException& ex)
 		{
-			logger->error("Hooking D3D12 failed: {}", ex.what());
-		}
-		catch (ModuleNotFoundException& ex)
-		{
-			logger->warn("Module not found: {}", ex.what());
-		}
-		catch (RuntimeException& ex)
-		{
-			logger->error("D3D12 runtime error: {}", ex.what());
+			logger->error("Hooking D3D12 queue capture failed: {}", ex.what());
 		}
 	}
-
 #endif
 
-#pragma endregion
-
-#pragma region DXGI1+ (Present1 / ResizeBuffers1)
-
+	// D3D10, D3D11, and D3D12 share the same DXGI CDXGISwapChain implementation.
+	// Install at most one Detours hook per vtable slot and dispatch by swap chain device;
+	// stacking multiple Detours hooks on the same target corrupts the prologue if detached out of order.
 	try
 	{
+		if (dxgiPresentAddress != 0 && !swapChainPresentHook.is_applied())
+		{
+			logger->info("Hooking IDXGISwapChain::Present");
+
+			swapChainPresentHook.apply(dxgiPresentAddress, [](
+			                           IDXGISwapChain* chain,
+			                           UINT SyncInterval,
+			                           UINT Flags
+		                           ) -> HRESULT
+			                           {
+				                           HookActivityTracker::Guard guard;
+
+				                           if (!guard.invoke)
+					                           return swapChainPresentHook.call_orig(chain, SyncInterval, Flags);
+
+#ifndef HYDRAHOOK_NO_D3D12
+				                           if (engine->EngineConfig.Direct3D.HookDirect3D12)
+				                           {
+					                           ID3D12Device* pD12Device = nullptr;
+					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) && pD12Device)
+					                           {
+						                           pD12Device->Release();
+
+						                           g_announce.present12.call([&pChain = chain]()
+						                           {
+							                           spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
+								                           "++ IDXGISwapChain::Present called");
+
+							                           engine->RenderPipeline.pSwapChain = pChain;
+
+							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion12);
+						                           });
+
+						                           HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                           HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                           &pre, engine, engine->CustomContext);
+
+						                           INVOKE_D3D12_CALLBACK(engine, EvtHydraHookD3D12PrePresent, chain,
+						                                                 SyncInterval, Flags, &pre);
+
+						                           const auto ret = swapChainPresentHook.call_orig(
+							                           chain, SyncInterval, Flags);
+
+						                           HYDRAHOOK_EVT_POST_EXTENSION post;
+						                           HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                           &post, engine, engine->CustomContext);
+
+						                           INVOKE_D3D12_CALLBACK(engine, EvtHydraHookD3D12PostPresent, chain,
+						                                                 SyncInterval, Flags, &post);
+
+						                           return ret;
+					                           }
+				                           }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D11
+				                           if (engine->EngineConfig.Direct3D.HookDirect3D11)
+				                           {
+					                           ID3D11Device* pD11Device = nullptr;
+					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) && pD11Device)
+					                           {
+						                           pD11Device->Release();
+
+						                           g_announce.present11.call([&pChain = chain]()
+						                           {
+							                           spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
+								                           "++ IDXGISwapChain::Present called");
+
+							                           engine->RenderPipeline.pSwapChain = pChain;
+
+							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion11);
+						                           });
+
+						                           HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                           HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                           &pre, engine, engine->CustomContext);
+
+						                           INVOKE_D3D11_CALLBACK(
+							                           engine,
+							                           EvtHydraHookD3D11PrePresent,
+							                           chain,
+							                           SyncInterval,
+							                           Flags,
+							                           &pre
+						                           );
+
+						                           const auto ret = swapChainPresentHook.call_orig(
+							                           chain, SyncInterval, Flags);
+
+						                           HYDRAHOOK_EVT_POST_EXTENSION post;
+						                           HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                           &post, engine, engine->CustomContext);
+
+						                           INVOKE_D3D11_CALLBACK(
+							                           engine,
+							                           EvtHydraHookD3D11PostPresent,
+							                           chain,
+							                           SyncInterval,
+							                           Flags,
+							                           &post
+						                           );
+
+						                           return ret;
+					                           }
+				                           }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D10
+				                           if (engine->EngineConfig.Direct3D.HookDirect3D10)
+				                           {
+					                           ID3D10Device* pD10Device = nullptr;
+					                           if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) && pD10Device)
+					                           {
+						                           pD10Device->Release();
+
+						                           g_announce.present10.call([&pChain = chain]()
+						                           {
+							                           spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
+								                           "++ IDXGISwapChain::Present called");
+
+							                           engine->RenderPipeline.pSwapChain = pChain;
+
+							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion10);
+						                           });
+
+						                           INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PrePresent, chain,
+						                                                 SyncInterval, Flags);
+
+						                           const auto ret = swapChainPresentHook.call_orig(
+							                           chain, SyncInterval, Flags);
+
+						                           INVOKE_D3D10_CALLBACK(engine, EvtHydraHookD3D10PostPresent, chain,
+						                                                 SyncInterval, Flags);
+
+						                           return ret;
+					                           }
+				                           }
+#endif
+
+				                           return swapChainPresentHook.call_orig(chain, SyncInterval, Flags);
+			                           });
+		}
+
+		if (dxgiResizeTargetAddress != 0 && !swapChainResizeTargetHook.is_applied())
+		{
+			logger->info("Hooking IDXGISwapChain::ResizeTarget");
+
+			swapChainResizeTargetHook.apply(dxgiResizeTargetAddress, [](
+			                                IDXGISwapChain* chain,
+			                                const DXGI_MODE_DESC* pNewTargetParameters
+		                                ) -> HRESULT
+			                                {
+				                                HookActivityTracker::Guard guard;
+
+				                                if (!guard.invoke)
+					                                return swapChainResizeTargetHook.call_orig(
+						                                chain, pNewTargetParameters);
+
+#ifndef HYDRAHOOK_NO_D3D12
+				                                if (engine->EngineConfig.Direct3D.HookDirect3D12)
+				                                {
+					                                ID3D12Device* pD12Device = nullptr;
+					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
+						                                pD12Device)
+					                                {
+						                                pD12Device->Release();
+
+						                                g_announce.resizeTarget12.call([]()
+						                                {
+							                                spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
+								                                "++ IDXGISwapChain::ResizeTarget called");
+						                                });
+
+						                                HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                                HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                                &pre, engine, engine->CustomContext);
+
+						                                INVOKE_D3D12_CALLBACK(
+							                                engine, EvtHydraHookD3D12PreResizeTarget, chain,
+							                                pNewTargetParameters, &pre);
+
+						                                const auto ret = swapChainResizeTargetHook.call_orig(
+							                                chain, pNewTargetParameters);
+
+						                                HYDRAHOOK_EVT_POST_EXTENSION post;
+						                                HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                                &post, engine, engine->CustomContext);
+
+						                                INVOKE_D3D12_CALLBACK(
+							                                engine, EvtHydraHookD3D12PostResizeTarget, chain,
+							                                pNewTargetParameters, &post);
+
+						                                return ret;
+					                                }
+				                                }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D11
+				                                if (engine->EngineConfig.Direct3D.HookDirect3D11)
+				                                {
+					                                ID3D11Device* pD11Device = nullptr;
+					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
+						                                pD11Device)
+					                                {
+						                                pD11Device->Release();
+
+						                                g_announce.resizeTarget11.call([]()
+						                                {
+							                                spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
+								                                "++ IDXGISwapChain::ResizeTarget called");
+						                                });
+
+						                                HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                                HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                                &pre, engine, engine->CustomContext);
+
+						                                INVOKE_D3D11_CALLBACK(
+							                                engine,
+							                                EvtHydraHookD3D11PreResizeTarget,
+							                                chain,
+							                                pNewTargetParameters,
+							                                &pre
+						                                );
+
+						                                const auto ret = swapChainResizeTargetHook.call_orig(
+							                                chain, pNewTargetParameters);
+
+						                                HYDRAHOOK_EVT_POST_EXTENSION post;
+						                                HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                                &post, engine, engine->CustomContext);
+
+						                                INVOKE_D3D11_CALLBACK(
+							                                engine,
+							                                EvtHydraHookD3D11PostResizeTarget,
+							                                chain,
+							                                pNewTargetParameters,
+							                                &post
+						                                );
+
+						                                return ret;
+					                                }
+				                                }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D10
+				                                if (engine->EngineConfig.Direct3D.HookDirect3D10)
+				                                {
+					                                ID3D10Device* pD10Device = nullptr;
+					                                if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
+						                                pD10Device)
+					                                {
+						                                pD10Device->Release();
+
+						                                g_announce.resizeTarget10.call([]()
+						                                {
+							                                spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
+								                                "++ IDXGISwapChain::ResizeTarget called");
+						                                });
+
+						                                INVOKE_D3D10_CALLBACK(
+							                                engine, EvtHydraHookD3D10PreResizeTarget, chain,
+							                                pNewTargetParameters);
+
+						                                const auto ret = swapChainResizeTargetHook.call_orig(
+							                                chain, pNewTargetParameters);
+
+						                                INVOKE_D3D10_CALLBACK(
+							                                engine, EvtHydraHookD3D10PostResizeTarget, chain,
+							                                pNewTargetParameters);
+
+						                                return ret;
+					                                }
+				                                }
+#endif
+
+				                                return swapChainResizeTargetHook.call_orig(chain, pNewTargetParameters);
+			                                });
+		}
+
+		if (dxgiResizeBuffersAddress != 0 && !swapChainResizeBuffersHook.is_applied())
+		{
+			logger->info("Hooking IDXGISwapChain::ResizeBuffers");
+
+			swapChainResizeBuffersHook.apply(dxgiResizeBuffersAddress, [](
+			                                 IDXGISwapChain* chain,
+			                                 UINT BufferCount,
+			                                 UINT Width,
+			                                 UINT Height,
+			                                 DXGI_FORMAT NewFormat,
+			                                 UINT SwapChainFlags
+		                                 ) -> HRESULT
+			                                 {
+				                                 HookActivityTracker::Guard guard;
+
+				                                 if (!guard.invoke)
+					                                 return swapChainResizeBuffersHook.call_orig(
+						                                 chain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+#ifndef HYDRAHOOK_NO_D3D12
+				                                 if (engine->EngineConfig.Direct3D.HookDirect3D12)
+				                                 {
+					                                 ID3D12Device* pD12Device = nullptr;
+					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
+						                                 pD12Device)
+					                                 {
+						                                 pD12Device->Release();
+
+						                                 g_announce.resizeBuffers12.call([]()
+						                                 {
+							                                 spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
+								                                 "++ IDXGISwapChain::ResizeBuffers called");
+						                                 });
+
+						                                 HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                                 HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                                 &pre, engine, engine->CustomContext);
+
+						                                 INVOKE_D3D12_CALLBACK(
+							                                 engine, EvtHydraHookD3D12PreResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags,
+							                                 &pre);
+
+						                                 const auto ret = swapChainResizeBuffersHook.call_orig(
+							                                 chain, BufferCount, Width, Height, NewFormat,
+							                                 SwapChainFlags);
+
+						                                 HYDRAHOOK_EVT_POST_EXTENSION post;
+						                                 HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                                 &post, engine, engine->CustomContext);
+
+						                                 INVOKE_D3D12_CALLBACK(
+							                                 engine, EvtHydraHookD3D12PostResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags,
+							                                 &post);
+
+						                                 return ret;
+					                                 }
+				                                 }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D11
+				                                 if (engine->EngineConfig.Direct3D.HookDirect3D11)
+				                                 {
+					                                 ID3D11Device* pD11Device = nullptr;
+					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
+						                                 pD11Device)
+					                                 {
+						                                 pD11Device->Release();
+
+						                                 g_announce.resizeBuffers11.call([]()
+						                                 {
+							                                 spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
+								                                 "++ IDXGISwapChain::ResizeBuffers called");
+						                                 });
+
+						                                 HYDRAHOOK_EVT_PRE_EXTENSION pre;
+						                                 HYDRAHOOK_EVT_PRE_EXTENSION_INIT(
+							                                 &pre, engine, engine->CustomContext);
+
+						                                 INVOKE_D3D11_CALLBACK(
+							                                 engine, EvtHydraHookD3D11PreResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags,
+							                                 &pre);
+
+						                                 const auto ret = swapChainResizeBuffersHook.call_orig(
+							                                 chain, BufferCount, Width, Height, NewFormat,
+							                                 SwapChainFlags);
+
+						                                 HYDRAHOOK_EVT_POST_EXTENSION post;
+						                                 HYDRAHOOK_EVT_POST_EXTENSION_INIT(
+							                                 &post, engine, engine->CustomContext);
+
+						                                 INVOKE_D3D11_CALLBACK(
+							                                 engine, EvtHydraHookD3D11PostResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags,
+							                                 &post);
+
+						                                 return ret;
+					                                 }
+				                                 }
+#endif
+
+#ifndef HYDRAHOOK_NO_D3D10
+				                                 if (engine->EngineConfig.Direct3D.HookDirect3D10)
+				                                 {
+					                                 ID3D10Device* pD10Device = nullptr;
+					                                 if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
+						                                 pD10Device)
+					                                 {
+						                                 pD10Device->Release();
+
+						                                 g_announce.resizeBuffers10.call([]()
+						                                 {
+							                                 spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
+								                                 "++ IDXGISwapChain::ResizeBuffers called");
+						                                 });
+
+						                                 INVOKE_D3D10_CALLBACK(
+							                                 engine, EvtHydraHookD3D10PreResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+						                                 const auto ret = swapChainResizeBuffersHook.call_orig(
+							                                 chain, BufferCount, Width, Height, NewFormat,
+							                                 SwapChainFlags);
+
+						                                 INVOKE_D3D10_CALLBACK(
+							                                 engine, EvtHydraHookD3D10PostResizeBuffers, chain,
+							                                 BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+						                                 return ret;
+					                                 }
+				                                 }
+#endif
+
+				                                 return swapChainResizeBuffersHook.call_orig(
+					                                 chain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+			                                 });
+		}
+
 		if (dxgiPresent1Address != 0 && !swapChainPresent1Hook.is_applied())
 		{
 			logger->info("Hooking IDXGISwapChain1::Present1");
@@ -1575,16 +1363,19 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			                            {
 				                            HookActivityTracker::Guard guard;
 
-				                            ID3D12Device* pD12Device = nullptr;
-				                            ID3D11Device* pD11Device = nullptr;
-				                            ID3D10Device* pD10Device = nullptr;
+				                            if (!guard.invoke)
+					                            return swapChainPresent1Hook.call_orig(
+						                            chain, SyncInterval, PresentFlags, pPresentParameters);
 
-				                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) && pD12Device)
+#ifndef HYDRAHOOK_NO_D3D12
+				                            if (engine->EngineConfig.Direct3D.HookDirect3D12)
 				                            {
-					                            pD12Device->Release();
-
-					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D12)
+					                            ID3D12Device* pD12Device = nullptr;
+					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
+						                            pD12Device)
 					                            {
+						                            pD12Device->Release();
+
 						                            g_announce.present1D3D12.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
@@ -1617,17 +1408,18 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                            return ret;
 					                            }
-
-					                            return swapChainPresent1Hook.call_orig(
-						                            chain, SyncInterval, PresentFlags, pPresentParameters);
 				                            }
+#endif
 
-				                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) && pD11Device)
+#ifndef HYDRAHOOK_NO_D3D11
+				                            if (engine->EngineConfig.Direct3D.HookDirect3D11)
 				                            {
-					                            pD11Device->Release();
-
-					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D11)
+					                            ID3D11Device* pD11Device = nullptr;
+					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
+						                            pD11Device)
 					                            {
+						                            pD11Device->Release();
+
 						                            g_announce.present1D3D11.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
@@ -1660,21 +1452,24 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                            return ret;
 					                            }
-
-					                            return swapChainPresent1Hook.call_orig(
-						                            chain, SyncInterval, PresentFlags, pPresentParameters);
 				                            }
+#endif
 
-				                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) && pD10Device)
+#ifndef HYDRAHOOK_NO_D3D10
+				                            if (engine->EngineConfig.Direct3D.HookDirect3D10)
 				                            {
-					                            pD10Device->Release();
-
-					                            if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D10)
+					                            ID3D10Device* pD10Device = nullptr;
+					                            if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
+						                            pD10Device)
 					                            {
-						                            g_announce.present1D3D10.call([]()
+						                            pD10Device->Release();
+
+						                            g_announce.present1D3D10.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D10)");
+
+							                            engine->RenderPipeline.pSwapChain = pChain;
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion10);
@@ -1693,10 +1488,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                            return ret;
 					                            }
-
-					                            return swapChainPresent1Hook.call_orig(
-						                            chain, SyncInterval, PresentFlags, pPresentParameters);
 				                            }
+#endif
 
 				                            return swapChainPresent1Hook.call_orig(
 					                            chain, SyncInterval, PresentFlags, pPresentParameters);
@@ -1720,17 +1513,20 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			                                  {
 				                                  HookActivityTracker::Guard guard;
 
-				                                  ID3D12Device* pD12Device = nullptr;
-				                                  ID3D11Device* pD11Device = nullptr;
-				                                  ID3D10Device* pD10Device = nullptr;
+				                                  if (!guard.invoke)
+					                                  return swapChainResizeBuffers1Hook.call_orig(
+						                                  chain, BufferCount, Width, Height, NewFormat, SwapChainFlags,
+						                                  pCreationNodeMask, ppPresentQueue);
 
-				                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
-					                                  pD12Device)
+#ifndef HYDRAHOOK_NO_D3D12
+				                                  if (engine->EngineConfig.Direct3D.HookDirect3D12)
 				                                  {
-					                                  pD12Device->Release();
-
-					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D12)
+					                                  ID3D12Device* pD12Device = nullptr;
+					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD12Device))) &&
+						                                  pD12Device)
 					                                  {
+						                                  pD12Device->Release();
+
 						                                  g_announce.resizeBuffers1D3D12.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
@@ -1746,9 +1542,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
 							                                  &pre);
 
-						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(chain,
-							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                  pCreationNodeMask, ppPresentQueue);
+						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(
+							                                  chain, BufferCount, Width, Height, NewFormat,
+							                                  SwapChainFlags, pCreationNodeMask, ppPresentQueue);
 
 						                                  HYDRAHOOK_EVT_POST_EXTENSION post;
 						                                  HYDRAHOOK_EVT_POST_EXTENSION_INIT(
@@ -1761,19 +1557,18 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                                  return ret;
 					                                  }
-
-					                                  return swapChainResizeBuffers1Hook.call_orig(chain,
-						                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-						                                  pCreationNodeMask, ppPresentQueue);
 				                                  }
+#endif
 
-				                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
-					                                  pD11Device)
+#ifndef HYDRAHOOK_NO_D3D11
+				                                  if (engine->EngineConfig.Direct3D.HookDirect3D11)
 				                                  {
-					                                  pD11Device->Release();
-
-					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D11)
+					                                  ID3D11Device* pD11Device = nullptr;
+					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD11Device))) &&
+						                                  pD11Device)
 					                                  {
+						                                  pD11Device->Release();
+
 						                                  g_announce.resizeBuffers1D3D11.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
@@ -1789,9 +1584,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
 							                                  &pre);
 
-						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(chain,
-							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                  pCreationNodeMask, ppPresentQueue);
+						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(
+							                                  chain, BufferCount, Width, Height, NewFormat,
+							                                  SwapChainFlags, pCreationNodeMask, ppPresentQueue);
 
 						                                  HYDRAHOOK_EVT_POST_EXTENSION post;
 						                                  HYDRAHOOK_EVT_POST_EXTENSION_INIT(
@@ -1804,19 +1599,18 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                                  return ret;
 					                                  }
-
-					                                  return swapChainResizeBuffers1Hook.call_orig(chain,
-						                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-						                                  pCreationNodeMask, ppPresentQueue);
 				                                  }
+#endif
 
-				                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
-					                                  pD10Device)
+#ifndef HYDRAHOOK_NO_D3D10
+				                                  if (engine->EngineConfig.Direct3D.HookDirect3D10)
 				                                  {
-					                                  pD10Device->Release();
-
-					                                  if (guard.invoke && engine->EngineConfig.Direct3D.HookDirect3D10)
+					                                  ID3D10Device* pD10Device = nullptr;
+					                                  if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&pD10Device))) &&
+						                                  pD10Device)
 					                                  {
+						                                  pD10Device->Release();
+
 						                                  g_announce.resizeBuffers1D3D10.call([]()
 						                                  {
 							                                  spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
@@ -1827,9 +1621,9 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                                  engine, EvtHydraHookD3D10PreResizeBuffers, chain,
 							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
-						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(chain,
-							                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-							                                  pCreationNodeMask, ppPresentQueue);
+						                                  const auto ret = swapChainResizeBuffers1Hook.call_orig(
+							                                  chain, BufferCount, Width, Height, NewFormat,
+							                                  SwapChainFlags, pCreationNodeMask, ppPresentQueue);
 
 						                                  INVOKE_D3D10_CALLBACK(
 							                                  engine, EvtHydraHookD3D10PostResizeBuffers, chain,
@@ -1837,21 +1631,18 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 						                                  return ret;
 					                                  }
-
-					                                  return swapChainResizeBuffers1Hook.call_orig(chain,
-						                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
-						                                  pCreationNodeMask, ppPresentQueue);
 				                                  }
+#endif
 
-				                                  return swapChainResizeBuffers1Hook.call_orig(chain,
-					                                  BufferCount, Width, Height, NewFormat, SwapChainFlags,
+				                                  return swapChainResizeBuffers1Hook.call_orig(
+					                                  chain, BufferCount, Width, Height, NewFormat, SwapChainFlags,
 					                                  pCreationNodeMask, ppPresentQueue);
 			                                  });
 		}
 	}
 	catch (DetourException& ex)
 	{
-		logger->error("Hooking DXGI1+ failed: {}", ex.what());
+		logger->error("Hooking DXGI failed: {}", ex.what());
 	}
 
 #pragma endregion
@@ -2046,44 +1837,33 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 			allRemoved = false;
 	};
 	{
-#ifndef HYDRAHOOK_NO_D3D9
-		rm(present9Hook);
-		rm(reset9Hook);
-		rm(endScene9Hook);
-		rm(present9ExHook);
-		rm(reset9ExHook);
+		// Detach in reverse (LIFO) installation order as defense-in-depth so any
+		// stacked Detours trampolines unwind cleanly.
+#ifndef HYDRAHOOK_NO_COREAUDIO
+		rm(arcReleaseBufferHook);
+		rm(arcGetBufferHook);
 #endif
 
-#ifndef HYDRAHOOK_NO_D3D10
-		rm(swapChainPresent10Hook);
-		rm(swapChainResizeTarget10Hook);
-		rm(swapChainResizeBuffers10Hook);
-#endif
-
-#ifndef HYDRAHOOK_NO_D3D11
-		rm(swapChainPresent11Hook);
-		rm(swapChainResizeTarget11Hook);
-		rm(swapChainResizeBuffers11Hook);
-#endif
-
-		rm(swapChainPresent1Hook);
 		rm(swapChainResizeBuffers1Hook);
+		rm(swapChainPresent1Hook);
+		rm(swapChainResizeBuffersHook);
+		rm(swapChainResizeTargetHook);
+		rm(swapChainPresentHook);
 
 #ifndef HYDRAHOOK_NO_D3D12
-		rm(createSwapChain12Hook);
-		rm(createSwapChainForHwnd12Hook);
 		rm(executeCommandLists12Hook);
-		rm(swapChainPresent12Hook);
-		rm(swapChainResizeTarget12Hook);
-		rm(swapChainResizeBuffers12Hook);
+		rm(createSwapChainForHwnd12Hook);
+		rm(createSwapChain12Hook);
 		D3D12_ReleaseQueueMaps();
 #endif
 
-#ifndef HYDRAHOOK_NO_COREAUDIO
-		rm(arcGetBufferHook);
-		rm(arcReleaseBufferHook);
+#ifndef HYDRAHOOK_NO_D3D9
+		rm(reset9ExHook);
+		rm(present9ExHook);
+		rm(endScene9Hook);
+		rm(reset9Hook);
+		rm(present9Hook);
 #endif
-
 	}
 
 	//

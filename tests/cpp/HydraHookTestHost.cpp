@@ -94,7 +94,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
             HYDRAHOOK_ENGINE_CONFIG_INIT(&config);
             config.Logging.IsEnabled = TRUE;
             config.CrashHandler.IsEnabled = FALSE;
+            config.Direct3D.HookDirect3D10 = TRUE;
             config.Direct3D.HookDirect3D11 = TRUE;
+            config.Direct3D.HookDirect3D12 = TRUE;
             config.EvtHydraHookGameHooked = EvtGameHooked;
             config.EvtHydraHookGamePreUnhook = EvtPreUnhook;
             config.EvtHydraHookGamePostUnhook = EvtPostUnhook;
