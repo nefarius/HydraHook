@@ -648,26 +648,35 @@ namespace
             else
             {
                 HWND hw = shared.load();
-                Check(hook.Hook(hw), "hook before preamble unhook", __FILE__, __LINE__);
-                hook.SetBeforeDispatch(TestBeforeDispatch);
-                g_beforeDispatchPhase.store(0);
-                g_origMessages = 0;
-                std::atomic<LRESULT> delivered{-1};
-                std::thread sender([&]()
+                const bool hooked = hook.Hook(hw);
+                Check(hooked, "hook before preamble unhook", __FILE__, __LINE__);
+                if (!hooked)
                 {
-                    g_beforeDispatchPhase.store(1);
-                    delivered.store(SendMessageW(hw, WM_APP + 1, 0, 0));
-                });
-                while (g_beforeDispatchPhase.load() != 2)
-                    SwitchToThread();
-                Check(hook.Unhook(hw), "unhook during dispatch preamble", __FILE__, __LINE__);
-                g_beforeDispatchPhase.store(3);
-                sender.join();
-                hook.SetBeforeDispatch(nullptr);
-                Check(delivered.load() == 0x1234, "preamble dispatch still reaches the original", __FILE__, __LINE__);
-                Check(g_origMessages.load() >= 1, "original procedure ran after preamble unhook", __FILE__, __LINE__);
-                SendMessageW(hw, WM_APP + 9, 0, 0);
-                owner.join();
+                    SendMessageW(hw, WM_APP + 9, 0, 0);
+                    owner.join();
+                }
+                else
+                {
+                    hook.SetBeforeDispatch(TestBeforeDispatch);
+                    g_beforeDispatchPhase.store(0);
+                    g_origMessages = 0;
+                    std::atomic<LRESULT> delivered{-1};
+                    std::thread sender([&]()
+                    {
+                        g_beforeDispatchPhase.store(1);
+                        delivered.store(SendMessageW(hw, WM_APP + 1, 0, 0));
+                    });
+                    while (g_beforeDispatchPhase.load() != 2)
+                        SwitchToThread();
+                    Check(hook.Unhook(hw), "unhook during dispatch preamble", __FILE__, __LINE__);
+                    g_beforeDispatchPhase.store(3);
+                    sender.join();
+                    hook.SetBeforeDispatch(nullptr);
+                    Check(delivered.load() == 0x1234, "preamble dispatch still reaches the original", __FILE__, __LINE__);
+                    Check(g_origMessages.load() >= 1, "original procedure ran after preamble unhook", __FILE__, __LINE__);
+                    SendMessageW(hw, WM_APP + 9, 0, 0);
+                    owner.join();
+                }
             }
         }
 
