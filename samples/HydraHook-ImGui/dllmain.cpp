@@ -753,6 +753,7 @@ static ID3D12GraphicsCommandList* g_d3d12_pCommandList = nullptr;
 static ID3D12Fence* g_d3d12_pFence = nullptr;
 static HANDLE g_d3d12_hFenceEvent = nullptr;
 static UINT64 g_d3d12_fenceLastSignaledValue = 0;
+static bool g_d3d12_fenceSignalFailed = false;
 static ID3D12DescriptorHeap* g_d3d12_pRtvDescHeap = nullptr;
 static ID3D12DescriptorHeap* g_d3d12_pSrvDescHeap = nullptr;
 static ID3D12Resource* g_d3d12_mainRenderTargetResource[D3D12_NUM_BACK_BUFFERS] = {};
@@ -907,6 +908,7 @@ static void D3D12_CleanupInitResources()
 
 	// Scalar state must not leak into the next init (new fence starts at 0, heap is recreated)
 	g_d3d12_fenceLastSignaledValue = 0;
+	g_d3d12_fenceSignalFailed = false;
 	g_d3d12_srvDescriptorCount = 0;
 	g_d3d12_rtvDescriptorSize = 0;
 	g_d3d12_srvDescriptorIncrement = 0;
@@ -925,7 +927,22 @@ static void D3D12_CleanupInitResources()
 static bool D3D12_WaitForGpu(DWORD timeoutMs)
 {
 	if (!g_d3d12_pFence || !g_d3d12_hFenceEvent)
-		return true;
+		return !g_d3d12_fenceSignalFailed;
+	if (g_d3d12_fenceSignalFailed)
+	{
+		if (!g_d3d12_pCommandQueue)
+			return false;
+		const UINT64 retryFence = g_d3d12_fenceLastSignaledValue + 1;
+		const HRESULT retryHr = g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, retryFence);
+		if (FAILED(retryHr))
+		{
+			HydraHookEngineLogError("Retry ID3D12CommandQueue::Signal failed (0x%08X); GPU completion remains unconfirmed",
+				static_cast<unsigned int>(retryHr));
+			return false;
+		}
+		g_d3d12_fenceLastSignaledValue = retryFence;
+		g_d3d12_fenceSignalFailed = false;
+	}
 	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
 	if (fence == 0)
 		return true;
@@ -1128,8 +1145,18 @@ void EvtHydraHookD3D12Present(
 
 	g_d3d12_pCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_d3d12_pCommandList);
 	const UINT64 nextFence = g_d3d12_fenceLastSignaledValue + 1;
-	if (SUCCEEDED(g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, nextFence)))
+	const HRESULT signalHr = g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, nextFence);
+	if (SUCCEEDED(signalHr))
+	{
 		g_d3d12_fenceLastSignaledValue = nextFence;
+		g_d3d12_fenceSignalFailed = false;
+	}
+	else
+	{
+		g_d3d12_fenceSignalFailed = true;
+		HydraHookEngineLogError("ID3D12CommandQueue::Signal failed (0x%08X); marking GPU completion unconfirmed",
+			static_cast<unsigned int>(signalHr));
+	}
 }
 
 /**
@@ -1302,6 +1329,15 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 		return 0;
 	}
 
+	// If unhook closed input while capture or forwarded buttons were still held (for example,
+	// SendMessageTimeoutW timed out and PostMessageW also failed), release directly on the
+	// window-owning thread as soon as any message is pumped, then forward the message normally.
+	if (g_InputClosed.load() && (g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0))
+	{
+		ReleaseOverlayInput(hWnd, 0, true);
+		return 0;
+	}
+
 	// Hidden, waiting for a queued release, or tearing down: do not hand new input to ImGui.
 	if (g_HoldInput.load() || g_InputClosed.load() || !g_AcceptInput.load())
 		return 0;
@@ -1454,8 +1490,12 @@ bool UnhookWindowProc()
 				releaseDelivered = false;
 				HydraHookEngineLogWarning("Timed out releasing overlay input on window thread (error %lu); deferring via PostMessageW", ::GetLastError());
 				// Retain the release obligation and keep the WNDPROC hook attached so the
-				// window-owning thread releases capture as soon as it pumps messages.
-				::PostMessageW(window, releaseMessage, 0, 0);
+				// window-owning thread releases capture on the posted message (or on the next
+				// pumped message if PostMessageW fails).
+				if (!::PostMessageW(window, releaseMessage, 0, 0))
+				{
+					HydraHookEngineLogWarning("PostMessageW for deferred overlay input release failed (error %lu); release will run on the next window message", ::GetLastError());
+				}
 			}
 		}
 	}
