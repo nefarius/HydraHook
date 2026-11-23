@@ -886,7 +886,8 @@ static void EvtHydraHookD3D12PrePresent(
 	UINT numRows = 0;
 	UINT64 rowSize = 0;
 	UINT64 totalBytes = 0;
-	g_d3d12_pDevice->GetCopyableFootprints(&pBackBufferRes->GetDesc(), 0, 1, 0, &footprint, &numRows, &rowSize, &totalBytes);
+	const D3D12_RESOURCE_DESC backBufferDesc = pBackBufferRes->GetDesc();
+	g_d3d12_pDevice->GetCopyableFootprints(&backBufferDesc, 0, 1, 0, &footprint, &numRows, &rowSize, &totalBytes);
 
 	D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
 	srcLoc.pResource = pBackBufferRes;

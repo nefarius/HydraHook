@@ -4,8 +4,8 @@ A small overlay shows average FPS and milliseconds per frame, with a settings me
 
 ## Build and use
 
-1. From a Visual Studio 2022 Developer Command Prompt in the repository root, run `prepare-deps.bat x64` or `prepare-deps.bat Win32` to match the application.
-2. Open `HydraHook.sln`, select `Release_LIB` and the matching platform, then build the **HydraHook-FPS** project. This configuration links HydraHook into the sample DLL.
+1. From a Visual Studio 2026 Developer Command Prompt in the repository root, run `prepare-deps.bat x64` or `prepare-deps.bat Win32` to match the application.
+2. Open `HydraHook.slnx`, select `Release_LIB` and the matching platform, then build the **HydraHook-FPS** project. This configuration links HydraHook into the sample DLL.
 3. Load `bin\x64\HydraHook-FPS.dll` or `bin\x86\HydraHook-FPS.dll` using the same workflow as the other samples.
 
 ## Keys

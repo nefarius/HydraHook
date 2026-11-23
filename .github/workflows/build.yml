@@ -28,7 +28,7 @@ permissions:
 jobs:
   core:
     name: Core & Tests (${{ matrix.artifact }})
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     permissions:
       contents: read
     env:
@@ -67,20 +67,20 @@ jobs:
             src\HydraHook\HydraHook.rc
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
       - name: Build static library and tests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook;tests\HydraHookTests;tests\HydraHookTestHost;tests\HydraHookWarpSmokeTests"
+          msbuild "HydraHook.slnx" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook;tests\HydraHookTests;tests\HydraHookTestHost;tests\HydraHookWarpSmokeTests"
           if ($LASTEXITCODE -ne 0) { throw "Core Release_LIB build failed ($LASTEXITCODE)" }
 
       - name: Build standalone HydraHook.dll
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook"
+          msbuild "HydraHook.slnx" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook"
           if ($LASTEXITCODE -ne 0) { throw "Core Release build failed ($LASTEXITCODE)" }
 
       - name: Run tests
@@ -170,7 +170,7 @@ jobs:
 
   samples:
     name: "Samples: ImGui, FPS, DirectXTK (${{ matrix.artifact }})"
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     permissions:
       contents: read
     env:
@@ -210,13 +210,13 @@ jobs:
             samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
       - name: Build ImGui, FPS, and DirectXTK samples
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-ImGui;samples\HydraHook-FPS;samples\HydraHook-DirectXTK"
+          msbuild "HydraHook.slnx" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-ImGui;samples\HydraHook-FPS;samples\HydraHook-DirectXTK"
           if ($LASTEXITCODE -ne 0) { throw "Samples build failed ($LASTEXITCODE)" }
 
       - name: Stage sample release files
@@ -248,7 +248,7 @@ jobs:
 
   deps-opencv:
     name: OpenCV Dependencies (${{ matrix.artifact }})
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     permissions:
       contents: read
     env:
@@ -279,7 +279,7 @@ jobs:
 
   sample-opencv:
     name: "Sample: OpenCV (${{ matrix.artifact }})"
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     needs: deps-opencv
     permissions:
       contents: read
@@ -319,13 +319,13 @@ jobs:
             samples\HydraHook-OpenCV\HydraHook-OpenCV.rc
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
       - name: Build OpenCV sample
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-OpenCV"
+          msbuild "HydraHook.slnx" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-OpenCV"
           if ($LASTEXITCODE -ne 0) { throw "OpenCV sample build failed ($LASTEXITCODE)" }
 
       - name: Stage OpenCV release file
@@ -348,7 +348,7 @@ jobs:
 
   sign:
     name: Sign release binaries
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     needs: [core, samples, sample-opencv]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
