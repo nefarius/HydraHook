@@ -1229,6 +1229,7 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	bool down = false;
 	const int button = OverlayButton(msg, wParam, &down);
 	const HWND capturedBefore = button >= 0 ? ::GetCapture() : nullptr;
+	const bool ownedCapture = g_OverlayOwnsCapture.load();
 	const LRESULT handled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
 
 	if (button >= 0)
@@ -1244,6 +1245,9 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 			const uint32_t left = g_ForwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
 			if (left == 0)
 				g_OverlayOwnsCapture.store(false);
+			// The backend releases capture when its button mask hits zero, including capture the host took first.
+			if (!ownedCapture && capturedBefore == hWnd && ::GetCapture() == nullptr)
+				::SetCapture(hWnd);
 		}
 	}
 
