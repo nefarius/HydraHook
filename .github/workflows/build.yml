@@ -26,22 +26,6 @@ permissions:
   contents: read
 
 jobs:
-  docs:
-    name: Doxygen
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      - name: Install Doxygen
-        run: sudo apt-get update && sudo apt-get install -y doxygen
-
-      - name: Lint API comments
-        run: |
-          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
-
   core:
     name: Core & Tests (${{ matrix.artifact }})
     runs-on: windows-2022

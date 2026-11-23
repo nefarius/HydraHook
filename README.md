@@ -3,6 +3,7 @@
 API-Hooking and rendering framework for DirectX-based games.
 
 [![Build status](https://github.com/nefarius/HydraHook/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/nefarius/HydraHook/actions/workflows/build.yml)
+[![Documentation](https://github.com/nefarius/HydraHook/actions/workflows/docs.yml/badge.svg?branch=master)](https://github.com/nefarius/HydraHook/actions/workflows/docs.yml)
 [![GitHub All Releases](https://img.shields.io/github/downloads/nefarius/HydraHook/total)](https://github.com/nefarius/HydraHook/releases)
 [![Discord](https://img.shields.io/discord/346756263763378176.svg)](https://discord.nefarius.at)
 [![Website](https://img.shields.io/website-up-down-green-red/https/docs.nefarius.at.svg?label=docs.nefarius.at)](https://docs.nefarius.at/)
@@ -69,6 +70,23 @@ Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared
 bin\x64\HydraHookTests.exe
 bin\x64\HydraHookWarpSmokeTests.exe
 ```
+
+### API reference
+
+The reference covers the public C API and the engine sources. It is not required to build the DLL.
+
+- [Doxygen](https://www.doxygen.nl/) 1.18.0
+- Theme: [Doxygen Awesome](https://github.com/jothepro/doxygen-awesome-css) 2.5.0 (MIT), vendored in `docs/doxygen-awesome/`
+
+```text
+doxygen Doxyfile
+```
+
+Open `docs/html/index.html`. Generated HTML is not committed.
+
+Published reference: <https://nefarius.github.io/HydraHook/>
+
+Pull requests upload that HTML as an artifact. A push to `master` publishes the same build to GitHub Pages.
 
 ### Releases
 
@@ -156,6 +174,7 @@ This project uses the following libraries (via [vcpkg](https://github.com/micros
 - [ion RE Library](https://github.com/scen/ionlib)
 - [C# – Screen capture and overlays for Direct3D 9, 10 and 11 using API hooks](https://web.archive.org/web/20240922031432/https://spazzarama.com/2011/03/14/c-screen-capture-and-overlays-for-direct3d-9-10-and-11-using-api-hooks/)
 - [HelloD3D12](https://github.com/GPUOpen-LibrariesAndSDKs/HelloD3D12)
+- [Doxygen Awesome](https://github.com/jothepro/doxygen-awesome-css) 2.5.0 — HTML theme (MIT). Stylesheets and license: `docs/doxygen-awesome/`
 
 ## License
 

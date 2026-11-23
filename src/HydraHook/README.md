@@ -2,6 +2,20 @@
 
 Developer-focused documentation for the HydraHook library. This document explains the architecture, components, and extension points for developers working on or integrating with HydraHook.
 
+## Reference build
+
+Doxygen 1.18.0 builds this document into the same HTML reference as the public headers and the C++ engine sources. The sidebar theme is Doxygen Awesome 2.5.0 (`docs/doxygen-awesome/`, MIT).
+
+```text
+doxygen Doxyfile
+```
+
+Open `docs/html/index.html`. Generated HTML is not committed. The class index is the C++ navigation, and source links are generated for the public headers and the engine. The architecture diagram stays in the page as Mermaid source so the HTML does not load a remote script.
+
+Published reference: <https://nefarius.github.io/HydraHook/>
+
+`.github/workflows/docs.yml` runs the `Doxygen` check on pull requests and on pushes to `master`, including Markdown-only changes. Pull requests upload `docs/html`. Pushes to `master` publish that same output to GitHub Pages.
+
 ## Overview and Purpose
 
 **HydraHook** is a Windows DLL that hooks Direct3D (9, 10, 11, 12) and Core Audio APIs in host processes. It is designed for injection into games and applications to intercept the render and audio pipelines.
