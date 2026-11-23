@@ -635,6 +635,20 @@ static void D3D12_ReleaseCaptureResources()
 	g_d3d12_captureHeight = 0;
 }
 
+static void D3D12_ReleaseDeferredResizeResources()
+{
+#ifdef _WIN64
+	if (g_d3d12_imguiInitialized)
+	{
+		ImGui_ImplDX12_InvalidateDeviceObjects();
+		g_d3d12_imguiInitialized = false;
+	}
+	g_d3d12_srvDescriptorCount = 0;
+#endif
+	D3D12_CleanupOverlayResources();
+	D3D12_ReleaseCaptureResources();
+}
+
 static bool D3D12_CreateCaptureResources(UINT width, UINT height, DXGI_FORMAT format)
 {
 	D3D12_ReleaseCaptureResources();
@@ -707,7 +721,10 @@ static bool D3D12_WaitForGpu(DWORD timeoutMs)
 	if (completed >= fence)
 		return true;
 	if (FAILED(g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent)))
-		return g_d3d12_pFence->GetCompletedValue() >= fence;
+	{
+		const UINT64 afterFail = g_d3d12_pFence->GetCompletedValue();
+		return afterFail != UINT64_MAX && afterFail >= fence;
+	}
 
 	const DWORD wait = WaitForSingleObject(g_d3d12_hFenceEvent, timeoutMs);
 	const UINT64 after = g_d3d12_pFence->GetCompletedValue();
@@ -908,6 +925,28 @@ static void EvtHydraHookD3D12PrePresent(
 	const UINT width = sd.BufferDesc.Width;
 	const UINT height = sd.BufferDesc.Height;
 
+	if (g_d3d12SkipResizeRebuild)
+	{
+		const UINT64 completed = g_d3d12_pFence ? g_d3d12_pFence->GetCompletedValue() : UINT64_MAX;
+		if (completed == UINT64_MAX || completed < g_d3d12_fenceLastSignaledValue)
+			return;
+
+		D3D12_ReleaseDeferredResizeResources();
+		if (!D3D12_CreateOverlayResources(pSwapChain))
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: D3D12_CreateOverlayResources failed after deferred resize");
+			return;
+		}
+#ifdef _WIN64
+		if (g_d3d12_pDevice && g_d3d12_pSrvDescHeap)
+		{
+			ImGui_ImplDX12_CreateDeviceObjects();
+			g_d3d12_imguiInitialized = true;
+		}
+#endif
+		g_d3d12SkipResizeRebuild = false;
+	}
+
 	if (g_d3d12_captureWidth != width || g_d3d12_captureHeight != height)
 	{
 		if (!D3D12_CreateCaptureResources(width, height, sd.BufferDesc.Format))
@@ -1073,16 +1112,7 @@ static void EvtHydraHookD3D12PreResizeBuffers(
 		return;
 	}
 	g_d3d12SkipResizeRebuild = false;
-#ifdef _WIN64
-	if (g_d3d12_imguiInitialized)
-	{
-		ImGui_ImplDX12_InvalidateDeviceObjects();
-		g_d3d12_imguiInitialized = false;
-	}
-	g_d3d12_srvDescriptorCount = 0;
-#endif
-	D3D12_CleanupOverlayResources();
-	D3D12_ReleaseCaptureResources();
+	D3D12_ReleaseDeferredResizeResources();
 }
 
 static void EvtHydraHookD3D12PostResizeBuffers(
