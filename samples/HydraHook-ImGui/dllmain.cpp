@@ -30,6 +30,7 @@ SOFTWARE.
 // STL
 // 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <wrl/client.h>
 
@@ -46,8 +47,78 @@ SOFTWARE.
 #endif
 #include <imgui_impl_win32.h>
 
-// Overlay visibility (F12). Shared with the window-proc hook so input is only fed to ImGui while visible.
+// Overlay visibility (F12). The window-proc hook reads this and only feeds ImGui while it is set.
 static std::atomic<bool> g_ShowOverlay{ true };
+static std::atomic<HWND> g_InputWindow{ nullptr };
+// Buttons this hook forwarded to ImGui, and whether that caused the Win32 backend to take capture.
+static std::atomic<uint32_t> g_ForwardedButtons{ 0 };
+static std::atomic<bool> g_OverlayOwnsCapture{ false };
+
+static constexpr UINT kReleaseOverlayInput = WM_APP + 0x51;
+
+// Serializes ImGui context use between the render thread and the window thread.
+// Re-entry on the thread that already holds it does not lock again: Present and a
+// SendMessage it triggers can share a thread, and Dear ImGui is already on that stack.
+static std::mutex g_ImGuiMutex;
+static std::atomic<DWORD> g_ImGuiOwner{ 0 };
+
+struct ImGuiScope
+{
+	ImGuiScope()
+	{
+		const DWORD self = ::GetCurrentThreadId();
+		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+			return;
+		g_ImGuiMutex.lock();
+		g_ImGuiOwner.store(self, std::memory_order_relaxed);
+		locked_ = true;
+	}
+
+	~ImGuiScope()
+	{
+		if (!locked_)
+			return;
+		g_ImGuiOwner.store(0, std::memory_order_relaxed);
+		g_ImGuiMutex.unlock();
+	}
+
+	ImGuiScope(const ImGuiScope&) = delete;
+	ImGuiScope& operator=(const ImGuiScope&) = delete;
+
+private:
+	bool locked_ = false;
+};
+
+static void PollOverlayToggle()
+{
+	static std::mutex mutex;
+	static bool pressed = false;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	const bool down = (::GetAsyncKeyState(VK_F12) & 0x8000) != 0;
+	if (!down)
+	{
+		pressed = false;
+		return;
+	}
+	if (pressed)
+		return;
+
+	pressed = true;
+	const bool show = !g_ShowOverlay.load();
+	g_ShowOverlay.store(show);
+	if (!show)
+	{
+		if (HWND window = g_InputWindow.load())
+			::PostMessageW(window, kReleaseOverlayInput, 0, 0);
+	}
+}
+
+static bool BeginOverlayFrame()
+{
+	PollOverlayToggle();
+	return g_ShowOverlay.load();
+}
 
 static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
 
@@ -241,8 +312,15 @@ void EvtHydraHookGameUnhooked(
 
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
-	// Restore window procedures and drain in-flight messages before ImGui is torn down
-	UnhookWindowProc();
+	// Restore window procedures and wait for in-flight handlers before ImGui is torn down.
+	// A handler that called unhook itself cannot be waited on; destroying the context under it is a use-after-free.
+	if (!UnhookWindowProc())
+	{
+		HydraHookEngineLogError("WNDPROC unhook ran inside a message handler; leaving the ImGui context alive");
+		return;
+	}
+
+	ImGuiScope imguiShutdown;
 
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
@@ -336,11 +414,10 @@ void EvtHydraHookD3D9Present(
 	if (!initialized)
 		return;
 
-	bool showOverlay = g_ShowOverlay.load();
-	TOGGLE_STATE(VK_F12, showOverlay);
-	g_ShowOverlay.store(showOverlay);
-	if (!showOverlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX9_NewFrame();
@@ -361,7 +438,8 @@ void EvtHydraHookD3D9PreReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
@@ -370,7 +448,8 @@ void EvtHydraHookD3D9PostReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
@@ -393,7 +472,8 @@ void EvtHydraHookD3D9PreResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
 
@@ -403,7 +483,8 @@ void EvtHydraHookD3D9PostResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	if (ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
 
@@ -451,11 +532,10 @@ void EvtHydraHookD3D10Present(
 	if (!initialized)
 		return;
 
-	bool showOverlay = g_ShowOverlay.load();
-	TOGGLE_STATE(VK_F12, showOverlay);
-	g_ShowOverlay.store(showOverlay);
-	if (!showOverlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 
 	// Start the Dear ImGui frame
@@ -526,11 +606,10 @@ void EvtHydraHookD3D11Present(
 	if (!initialized)
 		return;
 
-	bool showOverlay = g_ShowOverlay.load();
-	TOGGLE_STATE(VK_F12, showOverlay);
-	g_ShowOverlay.store(showOverlay);
-	if (!showOverlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX11_NewFrame();
@@ -875,11 +954,10 @@ void EvtHydraHookD3D12Present(
 	if (!initialized)
 		return;
 
-	bool showOverlay = g_ShowOverlay.load();
-	TOGGLE_STATE(VK_F12, showOverlay);
-	g_ShowOverlay.store(showOverlay);
-	if (!showOverlay)
+	if (!BeginOverlayFrame())
 		return;
+
+	ImGuiScope imguiFrame;
 
 	UINT backBufferIdx = 0;
 	IDXGISwapChain3* pSwapChain3 = nullptr;
@@ -958,7 +1036,8 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	if (!ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
 	D3D12_WaitForGpu();
@@ -992,7 +1071,8 @@ void EvtHydraHookD3D12PostResizeBuffers(
 	(void)SwapChainFlags;
 	(void)Extension;
 
-	if (!ImGui::GetIO().BackendRendererUserData)
+	ImGuiScope imguiDevice;
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
 	if (!D3D12_CreateOverlayResources(pSwapChain))
@@ -1009,16 +1089,95 @@ void EvtHydraHookD3D12PostResizeBuffers(
 
 #pragma region WNDPROC Hooking
 
+static int OverlayButton(UINT msg, WPARAM wParam, bool* down)
+{
+	*down = false;
+	switch (msg)
+	{
+	case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: *down = true; return 0;
+	case WM_LBUTTONUP: return 0;
+	case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK: *down = true; return 1;
+	case WM_RBUTTONUP: return 1;
+	case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: *down = true; return 2;
+	case WM_MBUTTONUP: return 2;
+	case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK:
+		*down = true;
+		return GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4;
+	case WM_XBUTTONUP:
+		return GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4;
+	default:
+		return -1;
+	}
+}
+
+static void ReleaseOverlayInput(HWND hWnd)
+{
+	ImGuiScope scope;
+	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
+		return;
+
+	const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
+	const uint32_t buttons = g_ForwardedButtons.exchange(0);
+	if (ownedCapture)
+	{
+		static const UINT ups[5] = { WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP, WM_XBUTTONUP };
+		static const WORD extra[5] = { 0, 0, 0, XBUTTON1, XBUTTON2 };
+		for (int i = 0; i < 5; ++i)
+		{
+			if ((buttons & (1u << i)) == 0)
+				continue;
+			const WPARAM wp = i >= 3 ? MAKEWPARAM(0, extra[i]) : 0;
+			ImGui_ImplWin32_WndProcHandler(hWnd, ups[i], wp, 0);
+		}
+	}
+
+	ImGuiIO& io = ImGui::GetIO();
+	io.ClearEventsQueue();
+	io.ClearInputMouse();
+	io.ClearInputKeys();
+}
+
 static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	static std::once_flag flag;
 	std::call_once(flag, []() { HydraHookEngineLogInfo("++ WndProc hook received first message"); });
 
-	// Only feed input to ImGui while the overlay is visible and a context exists
+	if (msg == kReleaseOverlayInput)
+	{
+		ReleaseOverlayInput(hWnd);
+		return 0;
+	}
+
+	// Hidden overlay: do not hand new input to ImGui. Held buttons and capture were released on hide.
+	if (!g_ShowOverlay.load())
+		return 0;
+
+	ImGuiScope scope;
 	if (!g_ShowOverlay.load() || !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 		return 0;
 
-	return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+	bool down = false;
+	const int button = OverlayButton(msg, wParam, &down);
+	const HWND capturedBefore = button >= 0 ? ::GetCapture() : nullptr;
+	const LRESULT handled = ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+
+	if (button >= 0)
+	{
+		if (down)
+		{
+			g_ForwardedButtons.fetch_or(1u << button);
+			if (capturedBefore == nullptr && ::GetCapture() == hWnd)
+				g_OverlayOwnsCapture.store(true);
+		}
+		else
+		{
+			const uint32_t left = g_ForwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
+			if (left == 0)
+				g_OverlayOwnsCapture.store(false);
+		}
+	}
+
+	return handled;
 }
 
 static void WindowProcHookLogError(const char* message)
@@ -1041,18 +1200,27 @@ void HookWindowProc(HWND hWnd)
 	hook.SetMessageHandler(ImGuiMessageHandler);
 
 	if (hook.Hook(hWnd))
+	{
+		g_InputWindow.store(hWnd);
 		HydraHookEngineLogInfo("WNDPROC hook installed");
+	}
 	else
 		HydraHookEngineLogError("Couldn't install WNDPROC hook, overlay will not receive input");
 }
 
 /**
- * @brief Restores all hooked window procedures and waits for in-flight messages to finish.
+ * @brief Restores hooked window procedures and waits for in-flight handlers to finish.
+ *
+ * @return false when called from inside a hooked message. The caller must not destroy ImGui
+ *         until that handler has returned.
  */
-void UnhookWindowProc()
+bool UnhookWindowProc()
 {
-	WindowProcHook::Instance().UnhookAll();
-	HydraHookEngineLogInfo("WNDPROC hooks removed");
+	g_InputWindow.store(nullptr);
+	const bool drained = WindowProcHook::Instance().UnhookAll();
+	if (drained)
+		HydraHookEngineLogInfo("WNDPROC hooks removed");
+	return drained;
 }
 
 #pragma endregion

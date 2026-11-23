@@ -7,19 +7,23 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 // Per-window WNDPROC hook manager (Win32 only, no ImGui dependency, C++14 compatible).
 //
-// Installs a dispatcher through SetWindowLongPtrW (not SetWindowSubclass, which must be
-// called on the window's owning thread; render callbacks usually run elsewhere), keeps the
-// previous WNDPROC per window and forwards with CallWindowProcW.
+// Installs a dispatcher through SetWindowLongPtrW. SetWindowSubclass is not used: it must
+// run on the window's owning thread, and render callbacks usually run elsewhere. The previous
+// WNDPROC is kept per window and called with CallWindowProcW.
 //
-// - Hook/Unhook/UnhookAll are serialized by a mutex. The mutex is never held while a
-//   message handler or the original WNDPROC runs, so re-entrant SendMessage cannot deadlock.
-// - WM_DESTROY / WM_NCDESTROY always reach the original procedure.
-// - If another party subclassed the window after us, our procedure stays in the chain as a
-//   pass-through (restoring would drop their hook) until the window is destroyed.
+// The mutex is never held while a message handler or the original WNDPROC runs, so a handler
+// can re-enter Hook/Unhook/UnhookAll. The original procedure stays in the map until every
+// dispatch that may need it has copied it. WM_DESTROY and WM_NCDESTROY always reach it.
+//
+// If another party subclasses the window after us, the dispatcher stays in the chain as a
+// pass-through (restoring would drop their hook) and the module that contains DispatchProc is
+// pinned for the rest of the process. Freeing it while their saved pointer remains would jump
+// to unmapped code after the host DLL is unloaded.
 class WindowProcHook
 {
 public:
@@ -34,17 +38,18 @@ public:
 
 	void SetMessageHandler(MessageHandler handler)
 	{
-		std::lock_guard<std::mutex> lock(mutex_);
+		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		messageHandler_ = handler;
 	}
 
 	void SetErrorLogger(ErrorLogger logger)
 	{
-		std::lock_guard<std::mutex> lock(mutex_);
+		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		errorLogger_ = logger;
 	}
 
 	// Returns true when the window is hooked after the call (idempotent).
+	// Returns false while UnhookAll is still removing hooks; the caller can retry.
 	bool Hook(HWND hWnd)
 	{
 		if (hWnd == nullptr || !::IsWindow(hWnd))
@@ -61,119 +66,167 @@ public:
 			return false;
 		}
 
-		std::lock_guard<std::mutex> lock(mutex_);
-
-		const auto it = windows_.find(hWnd);
-		if (it != windows_.end())
+		std::string error;
 		{
-			it->second.passthrough = false;
-			dispatchEnabled_.store(true);
-			return true;
-		}
-
-		::SetLastError(0);
-		const LONG_PTR prev = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&DispatchProc));
-		if (prev == 0)
-		{
-			char buf[96];
-			std::snprintf(buf, sizeof(buf), "WindowProcHook: SetWindowLongPtrW failed (error %lu)", ::GetLastError());
-			LogErrorLocked(buf);
-			return false;
-		}
-		if (prev == reinterpret_cast<LONG_PTR>(&DispatchProc))
-		{
-			// Already ours but untracked; cannot know the original, leave as is.
-			LogErrorLocked("WindowProcHook: window already carries the dispatcher without a tracked original");
-			return false;
-		}
-
-		Entry entry;
-		entry.original = reinterpret_cast<WNDPROC>(prev);
-		windows_[hWnd] = entry;
-		dispatchEnabled_.store(true);
-		return true;
-	}
-
-	// Restores the original procedure when we are still on top of the chain.
-	// Otherwise the dispatcher stays installed as pass-through. Returns true if restored.
-	bool Unhook(HWND hWnd)
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		const auto it = windows_.find(hWnd);
-		if (it == windows_.end())
-			return false;
-
-		if (RestoreLocked(hWnd, it->second))
-		{
-			windows_.erase(it);
-			return true;
-		}
-
-		it->second.passthrough = true;
-		LogErrorLocked("WindowProcHook: window was subclassed after us; leaving pass-through in place");
-		return false;
-	}
-
-	void UnhookAll()
-	{
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			dispatchEnabled_.store(false);
-			for (auto& kv : windows_)
+			std::lock_guard<std::recursive_mutex> lock(mutex_);
+			if (removing_)
 			{
-				if (!::IsWindow(kv.first))
+				error = "WindowProcHook: hook rejected while removal is in progress";
+			}
+			else
+			{
+				const auto it = windows_.find(hWnd);
+				if (it != windows_.end())
 				{
-					kv.second.restored = true; // gone; nothing to restore
-					continue;
+					if (!it->second.retired && !it->second.passthrough)
+						return true;
+					error = "WindowProcHook: hook rejected while a previous hook is still winding down";
 				}
-				if (RestoreLocked(kv.first, kv.second))
-					kv.second.restored = true;
 				else
 				{
-					kv.second.passthrough = true;
-					LogErrorLocked("WindowProcHook: window was subclassed after us; leaving pass-through in place");
+					::SetLastError(0);
+					const LONG_PTR current = ::GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
+					if (current == 0 && ::GetLastError() != 0)
+					{
+						char buf[96];
+						std::snprintf(buf, sizeof(buf), "WindowProcHook: GetWindowLongPtrW failed (error %lu)", ::GetLastError());
+						error = buf;
+					}
+					else if (current == reinterpret_cast<LONG_PTR>(&DispatchProc))
+					{
+						error = "WindowProcHook: window already carries the dispatcher without a tracked original";
+					}
+					else
+					{
+						// Publish the original before swapping, so a dispatch that arrives as part of
+						// SetWindowLongPtrW can still forward. The map insert happens first: if it throws,
+						// the window procedure has not changed.
+						Entry entry;
+						entry.original = reinterpret_cast<WNDPROC>(current);
+						windows_.emplace(hWnd, entry);
+
+						::SetLastError(0);
+						const LONG_PTR prev = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&DispatchProc));
+						if (prev == 0 && ::GetLastError() != 0)
+						{
+							windows_.erase(hWnd);
+							char buf[96];
+							std::snprintf(buf, sizeof(buf), "WindowProcHook: SetWindowLongPtrW failed (error %lu)", ::GetLastError());
+							error = buf;
+						}
+						else
+						{
+							windows_[hWnd].original = reinterpret_cast<WNDPROC>(prev);
+							dispatchEnabled_ = true;
+							return true;
+						}
+					}
 				}
 			}
 		}
 
-		// Let in-flight dispatches finish before the caller tears down what the handler uses.
-		// Skip when called from inside a dispatch on this thread (it would wait on itself).
-		if (Depth() == 0)
+		LogError(error.c_str());
+		return false;
+	}
+
+	// Restores the original procedure when the dispatcher is still the current one.
+	// Returns false when the window was not hooked, another subclass is on top, or the restore call fails.
+	bool Unhook(HWND hWnd)
+	{
+		std::string error;
+		bool restored = false;
 		{
-			const DWORD start = ::GetTickCount();
-			while (inFlight_.load() != 0 && ::GetTickCount() - start < 500)
+			std::lock_guard<std::recursive_mutex> lock(mutex_);
+			const auto it = windows_.find(hWnd);
+			if (it == windows_.end() || it->second.retired)
+				return false;
+
+			restored = RetireLocked(hWnd, it->second, &error);
+			if (entered_.load() == 0)
+				EraseRetiredLocked();
+		}
+
+		if (!error.empty())
+			LogError(error.c_str());
+		return restored;
+	}
+
+	// Disables handlers, restores every window we are still on top of, and waits until dispatches
+	// that have entered DispatchProc have finished. The wait is skipped when the caller is itself
+	// inside a dispatch (it would wait for itself). Returns false when that wait was skipped.
+	bool UnhookAll()
+	{
+		std::string error;
+		{
+			std::lock_guard<std::recursive_mutex> lock(mutex_);
+			removing_ = true;
+			dispatchEnabled_ = false;
+			for (auto& kv : windows_)
+			{
+				if (kv.second.retired)
+					continue;
+				if (!::IsWindow(kv.first))
+				{
+					kv.second.retired = true;
+					continue;
+				}
+				std::string one;
+				RetireLocked(kv.first, kv.second, &one);
+				if (!one.empty())
+				{
+					if (!error.empty())
+						error += '\n';
+					error += one;
+				}
+			}
+		}
+
+		const bool drained = Depth() == 0;
+		if (drained)
+		{
+			while (entered_.load() != 0)
 				::Sleep(1);
 		}
 
-		std::lock_guard<std::mutex> lock(mutex_);
-		for (auto it = windows_.begin(); it != windows_.end();)
 		{
-			if (it->second.restored)
-				it = windows_.erase(it);
-			else
-				++it;
+			std::lock_guard<std::recursive_mutex> lock(mutex_);
+			if (entered_.load() == 0)
+				EraseRetiredLocked();
+			removing_ = false;
 		}
+
+		if (!error.empty())
+			LogError(error.c_str());
+		return drained;
 	}
 
 	bool IsHooked(HWND hWnd)
 	{
-		std::lock_guard<std::mutex> lock(mutex_);
+		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		const auto it = windows_.find(hWnd);
-		return it != windows_.end() && !it->second.passthrough;
+		return it != windows_.end() && !it->second.passthrough && !it->second.retired;
 	}
 
 	size_t HookedCount()
 	{
-		std::lock_guard<std::mutex> lock(mutex_);
+		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		return windows_.size();
 	}
 
 private:
+	enum class RestoreResult
+	{
+		Restored,
+		BlockedBySubclass,
+		Failed
+	};
+
 	struct Entry
 	{
 		WNDPROC original = nullptr;
+		uint32_t inFlight = 0;
 		bool passthrough = false;
-		bool restored = false;
+		bool retired = false;
 	};
 
 	WindowProcHook() = default;
@@ -186,94 +239,157 @@ private:
 
 	struct DispatchScope
 	{
-		explicit DispatchScope(std::atomic<uint32_t>& counter) : counter_(counter)
+		explicit DispatchScope(std::atomic<uint32_t>& entered) : entered_(entered)
 		{
-			++counter_;
+			++entered_;
 			++Depth();
 		}
 		~DispatchScope()
 		{
 			--Depth();
-			--counter_;
+			--entered_;
 		}
-		std::atomic<uint32_t>& counter_;
+		std::atomic<uint32_t>& entered_;
 	};
 
-	// Caller holds mutex_. Only restores when the dispatcher is the current procedure.
-	static bool RestoreLocked(HWND hWnd, const Entry& entry)
+	static RestoreResult RestoreLocked(HWND hWnd, const Entry& entry)
 	{
 		const LONG_PTR current = ::GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
 		if (current != reinterpret_cast<LONG_PTR>(&DispatchProc))
-			return false;
+			return RestoreResult::BlockedBySubclass;
+
 		::SetLastError(0);
-		::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(entry.original));
-		return true;
+		const LONG_PTR previous = ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(entry.original));
+		if (previous == 0 && ::GetLastError() != 0)
+			return RestoreResult::Failed;
+		return RestoreResult::Restored;
+	}
+
+	// Caller holds mutex_. Restored entries stay until no dispatch still needs them.
+	bool RetireLocked(HWND hWnd, Entry& entry, std::string* error)
+	{
+		const RestoreResult result = RestoreLocked(hWnd, entry);
+		if (result == RestoreResult::Restored)
+		{
+			entry.retired = true;
+			return true;
+		}
+
+		// The dispatcher is still reachable. Stop calling the handler, keep the original
+		// procedure for forwarding, and keep this module mapped.
+		entry.passthrough = true;
+		PinLocked();
+		if (error != nullptr)
+		{
+			*error = result == RestoreResult::BlockedBySubclass
+				? "WindowProcHook: window was subclassed after us; leaving pass-through in place and pinning the module"
+				: "WindowProcHook: SetWindowLongPtrW failed while restoring; dispatcher remains installed and the module is pinned";
+		}
+		return false;
+	}
+
+	void PinLocked()
+	{
+		if (pinned_)
+			return;
+		HMODULE module = nullptr;
+		if (::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+			reinterpret_cast<LPCWSTR>(&DispatchProc), &module))
+			pinned_ = true;
+	}
+
+	void EraseRetiredLocked()
+	{
+		for (auto it = windows_.begin(); it != windows_.end();)
+		{
+			if (it->second.retired && it->second.inFlight == 0)
+				it = windows_.erase(it);
+			else
+				++it;
+		}
 	}
 
 	void LogError(const char* message)
 	{
+		if (message == nullptr || message[0] == '\0')
+			return;
 		ErrorLogger logger;
 		{
-			std::lock_guard<std::mutex> lock(mutex_);
+			std::lock_guard<std::recursive_mutex> lock(mutex_);
 			logger = errorLogger_;
 		}
 		if (logger)
 			logger(message);
 	}
 
-	void LogErrorLocked(const char* message)
-	{
-		if (errorLogger_)
-			errorLogger_(message);
-	}
-
 	static LRESULT CALLBACK DispatchProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		WindowProcHook& self = Instance();
-		DispatchScope scope(self.inFlight_);
+		DispatchScope scope(self.entered_);
 
 		WNDPROC original = nullptr;
 		MessageHandler handler = nullptr;
 		bool found = false;
 		{
-			std::lock_guard<std::mutex> lock(self.mutex_);
+			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
 			const auto it = self.windows_.find(hWnd);
 			if (it != self.windows_.end())
 			{
 				found = true;
 				original = it->second.original;
-				if (self.dispatchEnabled_.load() && !it->second.passthrough)
+				++it->second.inFlight;
+				const bool destroy = msg == WM_DESTROY || msg == WM_NCDESTROY;
+				if (!destroy && self.dispatchEnabled_ && !it->second.passthrough && !it->second.retired)
 					handler = self.messageHandler_;
-
-				if (msg == WM_DESTROY || msg == WM_NCDESTROY)
+				if (destroy)
 				{
-					handler = nullptr;
-					if (RestoreLocked(hWnd, it->second))
-						self.windows_.erase(it);
-					else if (msg == WM_NCDESTROY)
-						self.windows_.erase(it);
+					const RestoreResult result = RestoreLocked(hWnd, it->second);
+					if (result == RestoreResult::Restored || msg == WM_NCDESTROY)
+						it->second.retired = true;
+					else
+					{
+						it->second.passthrough = true;
+						self.PinLocked();
+					}
 				}
 			}
 		}
 
+		LRESULT result;
 		if (!found)
-			return ::DefWindowProcW(hWnd, msg, wParam, lParam);
-
-		if (handler)
+			result = ::DefWindowProcW(hWnd, msg, wParam, lParam);
+		else if (handler)
 		{
 			const LRESULT handled = handler(hWnd, msg, wParam, lParam);
-			if (handled != 0)
-				return handled;
+			result = handled != 0
+				? handled
+				: (original ? ::CallWindowProcW(original, hWnd, msg, wParam, lParam)
+					: ::DefWindowProcW(hWnd, msg, wParam, lParam));
+		}
+		else
+		{
+			result = original ? ::CallWindowProcW(original, hWnd, msg, wParam, lParam)
+				: ::DefWindowProcW(hWnd, msg, wParam, lParam);
 		}
 
-		return original ? ::CallWindowProcW(original, hWnd, msg, wParam, lParam)
-			: ::DefWindowProcW(hWnd, msg, wParam, lParam);
+		{
+			std::lock_guard<std::recursive_mutex> lock(self.mutex_);
+			const auto it = self.windows_.find(hWnd);
+			if (it != self.windows_.end() && it->second.inFlight > 0)
+				--it->second.inFlight;
+			// entered_ still counts this call. Any other dispatch incremented it before taking the mutex.
+			if (self.entered_.load() == 1)
+				self.EraseRetiredLocked();
+		}
+		return result;
 	}
 
-	std::mutex mutex_;
+	std::recursive_mutex mutex_;
 	std::unordered_map<HWND, Entry> windows_;
 	MessageHandler messageHandler_ = nullptr;
 	ErrorLogger errorLogger_ = nullptr;
-	std::atomic<bool> dispatchEnabled_{ true };
-	std::atomic<uint32_t> inFlight_{ 0 };
+	bool dispatchEnabled_ = false;
+	bool removing_ = false;
+	bool pinned_ = false;
+	std::atomic<uint32_t> entered_{ 0 };
 };

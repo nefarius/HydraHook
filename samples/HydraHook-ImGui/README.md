@@ -19,12 +19,13 @@ Replace `hl2.exe` with your target process name.
 ## Input
 
 - Mouse and keyboard messages reach ImGui through a per-window `WNDPROC` hook (`WindowProcHook.h`). It uses `SetWindowLongPtrW` and forwards to the original procedure with `CallWindowProcW`.
-- `F12` toggles the overlay. While it is hidden, no messages are passed to ImGui.
+- `F12` toggles the overlay. While it is hidden, new messages are not passed to ImGui. Hiding posts a release to the window thread, which drops held overlay buttons and keys and calls `ReleaseCapture` only if this hook's backend took mouse capture.
 - ImGui sees every message first. If it returns non-zero, the host window does not receive that message. The sample does not consult `WantCaptureMouse` / `WantCaptureKeyboard`.
+- ImGui calls from the window thread and from Present share one lock.
 - `WM_DESTROY` and `WM_NCDESTROY` always reach the host procedure.
-- On unhook the original procedure is restored. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through until the window is destroyed.
+- On unhook the original procedure is restored. If another module subclassed the window afterwards, the hook stays in the chain as a pass-through and this DLL stays loaded for the rest of the process.
 
 ## Limitations
 
 > [!NOTE]
-> Gamepad navigation is not enabled.
+> Gamepad navigation is not enabled. The Direct3D 12 overlay is x64-only; Win32 builds do not register the D3D12 callbacks.

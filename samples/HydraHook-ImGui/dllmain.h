@@ -37,7 +37,7 @@ SOFTWARE.
 #endif
 
 void HookWindowProc(HWND hWnd);
-void UnhookWindowProc();
+bool UnhookWindowProc();
 void RenderScene();
 
 IMGUI_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -63,38 +63,3 @@ EVT_HYDRAHOOK_D3D12_PRE_PRESENT EvtHydraHookD3D12Present;
 EVT_HYDRAHOOK_D3D12_PRE_RESIZE_BUFFERS EvtHydraHookD3D12PreResizeBuffers;
 EVT_HYDRAHOOK_D3D12_POST_RESIZE_BUFFERS EvtHydraHookD3D12PostResizeBuffers;
 #endif
-
-/**
- * \fn	TOGGLE_STATE(int key, bool& toggle)
- *
- * \brief	Overly complicated key toggle helper
- *
- * \author	Benjamin "Nefarius" Höglinger-Stelzer
- * \date	7/09/2018
- *
- * \param 		  	key   	The key.
- * \param [in,out]	toggle	The value to toggle.
- */
-VOID
-FORCEINLINE
-TOGGLE_STATE(int key, bool& toggle)
-{
-	static auto pressedPast = false, pressedNow = false;
-
-	if (GetAsyncKeyState(key) & 0x8000)
-	{
-		pressedNow = true;
-	}
-	else
-	{
-		pressedPast = false;
-		pressedNow = false;
-	}
-
-	if (!pressedPast && pressedNow)
-	{
-		toggle = !toggle;
-
-		pressedPast = true;
-	}
-}

@@ -606,12 +606,20 @@ namespace
         Check(g_origDestroy.load() == 1 && g_origNcDestroy.load() == 1, "chained destroy forwarded", __FILE__, __LINE__);
         Check(hook.HookedCount() == 0, "chained window removed on destroy", __FILE__, __LINE__);
 
-        // Cross-thread: owner thread pumps messages while another thread hooks/unhooks and sends
+        // Cross-thread: the owner thread pumps while this thread hooks, sends, and unhooks.
+        // Readiness is separate from the HWND so a failed CreateWindow cannot spin forever.
         std::atomic<HWND> shared{nullptr};
+        std::atomic<int> ownerReady{0};
         std::thread owner([&]()
         {
             HWND hw = MakeTestWindow();
+            if (!hw)
+            {
+                ownerReady.store(-1);
+                return;
+            }
             shared.store(hw);
+            ownerReady.store(1);
             MSG m;
             while (GetMessageW(&m, nullptr, 0, 0) > 0)
             {
@@ -619,8 +627,15 @@ namespace
                 DispatchMessageW(&m);
             }
         });
-        while (!shared.load())
+        while (ownerReady.load() == 0)
             SwitchToThread();
+        if (ownerReady.load() < 0)
+        {
+            owner.join();
+            Check(false, "owner window created", __FILE__, __LINE__);
+        }
+        else
+        {
         HWND shw = shared.load();
 
         std::atomic<bool> stop{false};
@@ -633,20 +648,33 @@ namespace
                     ++sent;
             }
         });
+        int installs = 0;
+        int observed = 0;
         for (int i = 0; i < 100; ++i)
         {
-            hook.Hook(shw);
-            Sleep(1);
+            if (!hook.Hook(shw))
+            {
+                hook.UnhookAll();
+                continue;
+            }
+            ++installs;
+            const int before = g_handlerCalls.load();
+            const LRESULT delivered = SendMessageW(shw, WM_APP + 1, 0, 0);
+            if (delivered == 0x1234 && g_handlerCalls.load() > before)
+                ++observed;
             hook.UnhookAll();
         }
         stop.store(true);
         sender.join();
+        Check(installs > 0, "at least one cross-thread hook installed", __FILE__, __LINE__);
+        Check(observed > 0, "handler saw a message while the hook was installed", __FILE__, __LINE__);
         Check(sent.load() > 0, "messages delivered during hook churn", __FILE__, __LINE__);
         Check(GetWindowLongPtrW(shw, GWLP_WNDPROC) == reinterpret_cast<LONG_PTR>(&TestOrigProc),
               "original restored after churn", __FILE__, __LINE__);
         SendMessageW(shw, WM_APP + 9, 0, 0);
         owner.join();
         Check(hook.HookedCount() == 0, "no tracked windows remain", __FILE__, __LINE__);
+        }
 
         hook.SetMessageHandler(nullptr);
         hook.SetErrorLogger(nullptr);
