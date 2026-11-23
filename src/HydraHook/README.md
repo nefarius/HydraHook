@@ -150,7 +150,18 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 - **On trigger** (ExitProcess/PostQuitMessage): `EvtHydraHookGamePreExit` -> `SetEvent(EngineCancellationEvent)` -> `WaitForSingleObject(EngineThread, 3000)` -> `call_orig`.
 - **On FreeLibrary** (host-initiated unload): `PerformShutdownCleanup` runs, then `FreeLibraryAndExitThread` (engine thread does not call it again).
 - **On DllMainProcessDetach**: No user callbacks; uses `remove_nothrow` to avoid loader-lock deadlocks.
+- **On ManualUnhook** (`HydraHookEngineUnhook`): `PerformShutdownCleanup` skips `EvtHydraHookGamePreExit`, sets `SkipDllUnloadOnExit`, signals the worker, and waits up to 8000 ms. The worker removes every hook (including `ExitProcess`/`PostQuitMessage`/`FreeLibrary`) with `remove_nothrow`, drains, runs the unhook callbacks, and exits with `ExitThread` so the DLL stays loaded.
 - **Main thread**: Wakes from `WaitForSingleObject`, invokes `EvtHydraHookGamePreUnhook`, removes all hooks, invokes `EvtHydraHookGamePostUnhook`, then `FreeLibraryAndExitThread(engine->HostInstance, 0)` (unless `FreeLibraryHookActive`).
+
+## Unhook and Rehook
+
+`HydraHookEngineUnhook(Engine)` and `HydraHookEngineRehook(Engine)` run a hook, unhook, rehook cycle in one loaded DLL. Neither may be called under the loader lock, from a hook callback, or from the worker thread.
+
+- **Unhook**: runs the ManualUnhook shutdown above, closes the worker handle, and clears the render pipeline pointers and `GameVersion`. It is idempotent.
+- **Rehook**: calls `HookActivityTracker::reset()`, clears `ShutdownCleanupDone`, `FreeLibraryHookActive` and `SkipDllUnloadOnExit`, resets the cancellation event, restores `Events*` from `SavedEvents*`, and starts a new `HydraHookMainThread`. It is a no-op while a worker is running.
+- **Callback tables**: `HydraHookEngineSet*EventCallbacks` writes both the live table and a saved copy. The worker zeroes the live tables on unhook; rehook restores the saved copies before `EvtHydraHookGameHooked` fires again.
+- **Announcements**: the once-per-hook announcements are `ResettableOnce` members of `g_announce` in `Game.cpp`. The worker re-arms all of them, the engine pointer, and the DXGI device version at the start of each run.
+- **Serialization**: `LifecycleLock` (SRW lock in the engine struct) serializes unhook and rehook.
 
 ## Build Configuration
 
@@ -169,9 +180,9 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 
 `tests/cpp/` builds three projects, wired into `HydraHook.sln` under the `tests` folder. They build with the `Debug_LIB` and `Release_LIB` solution configurations and link the static library (the smoke host does; the smoke runner loads that host).
 
-- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). No test exercises a real game hook/unhook/rehook cycle.
+- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks, `Hook` apply/remove/`remove_nothrow`, `HookActivityTracker`, utility functions, exception types, crash-handler refcounting, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
 - `HydraHookTestHost` is a small DLL that enables D3D11 hooking and exports shared counters.
-- `HydraHookWarpSmokeTests` creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
+- `HydraHookWarpSmokeTests` creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked, Present, and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers callbacks stop, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL.
 
 ## Extending HydraHook
 

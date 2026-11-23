@@ -37,6 +37,43 @@ SOFTWARE.
 #pragma once
 
 #include <atomic>
+#include <mutex>
+
+/**
+ * @brief Once-per-hook announcement guard that can be re-armed.
+ *
+ * Replaces function-local std::once_flag so a hook, unhook, rehook cycle announces
+ * each hook again. Zero-cost fast path is one acquire load.
+ */
+class ResettableOnce
+{
+public:
+    /** @brief Runs fn once until reset() is called; concurrent callers wait for the first. */
+    template <typename Fn>
+    void call(Fn&& fn)
+    {
+        if (done_.load(std::memory_order_acquire))
+            return;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (done_.load(std::memory_order_acquire))
+            return;
+
+        fn();
+        done_.store(true, std::memory_order_release);
+    }
+
+    /** @brief Re-arms the guard. */
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        done_.store(false, std::memory_order_release);
+    }
+
+private:
+    std::mutex mutex_;
+    std::atomic<bool> done_{false};
+};
 
 /**
  * @brief Internal engine instance structure (opaque in public API).
@@ -52,6 +89,13 @@ typedef struct _HYDRAHOOK_ENGINE
     HYDRAHOOK_D3D11_EVENT_CALLBACKS EventsD3D11; /**< D3D11 callbacks. */
     HYDRAHOOK_D3D12_EVENT_CALLBACKS EventsD3D12; /**< D3D12 callbacks. */
     HYDRAHOOK_ARC_EVENT_CALLBACKS EventsARC;    /**< Core Audio callbacks. */
+    HYDRAHOOK_D3D9_EVENT_CALLBACKS SavedEventsD3D9;   /**< Registered tables restored by rehook. */
+    HYDRAHOOK_D3D10_EVENT_CALLBACKS SavedEventsD3D10;
+    HYDRAHOOK_D3D11_EVENT_CALLBACKS SavedEventsD3D11;
+    HYDRAHOOK_D3D12_EVENT_CALLBACKS SavedEventsD3D12;
+    HYDRAHOOK_ARC_EVENT_CALLBACKS SavedEventsARC;
+    SRWLOCK LifecycleLock;                   /**< Serializes unhook and rehook. Zero is SRWLOCK_INIT. */
+    std::atomic<bool> SkipDllUnloadOnExit;   /**< Worker exits with ExitThread instead of FreeLibraryAndExitThread. */
     HANDLE EngineThread;                     /**< Hook worker thread. */
     HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
     PVOID CustomContext;                     /**< User-allocated context. */
@@ -116,6 +160,12 @@ struct HookActivityTracker
     static void shutdown() noexcept
     {
         s_shutting_down.store(true, std::memory_order_seq_cst);
+    }
+
+    /** @brief Clears the shutdown flag so a rehook invokes callbacks again. */
+    static void reset() noexcept
+    {
+        s_shutting_down.store(false, std::memory_order_seq_cst);
     }
 
     /**

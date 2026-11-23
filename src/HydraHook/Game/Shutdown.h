@@ -21,7 +21,8 @@ enum class ShutdownOrigin
 	ExitProcessHook,
 	PostQuitMessageHook,
 	FreeLibraryHook,
-	DllMainProcessDetach
+	DllMainProcessDetach,
+	ManualUnhook
 };
 
 /**
@@ -32,7 +33,9 @@ enum class ShutdownOrigin
  * for it to finish. For FreeLibraryHook: removes ExitProcess and PostQuitMessage
  * hooks, invokes EvtHydraHookGamePreExit, signals and waits. For DllMainProcessDetach:
  * skips user callbacks and uses remove_nothrow (loader lock); optionally signals
- * and does a brief wait.
+ * and does a brief wait. For ManualUnhook (HydraHookEngineUnhook): skips
+ * EvtHydraHookGamePreExit, signals the worker, which removes every hook itself and
+ * exits without unloading the DLL, and waits for it.
  *
  * @param engine Engine instance to clean up.
  * @param origin Shutdown origin for decision making.

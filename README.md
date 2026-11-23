@@ -24,6 +24,8 @@ API-Hooking and rendering framework for DirectX-based games.
 
 - **Runtime injection and ejection** — No launcher required. Inject into any running DirectX process and eject via `FreeLibrary` when done. Supports mid-process injection (e.g. D3D12 games already running). Graceful shutdown via `ExitProcess` / `PostQuitMessage` / `FreeLibrary` hooks avoids loader-lock and unload races.
 
+- **Unhook and rehook without unloading** — `HydraHookEngineUnhook` removes all hooks and keeps the DLL loaded; `HydraHookEngineRehook` reinstalls them and fires `EvtHydraHookGameHooked` again. Registered callback tables survive the cycle. Do not call either from `DllMain`, a hook callback, or the worker thread.
+
 - **Performance-focused** — Lock-free hot path for hook callbacks (atomic counters only; no mutex, no kernel transition). Shutdown uses loader-lock-safe `remove_nothrow` to avoid deadlocks during process exit.
 
 - **No external dependencies at runtime** — Everything needed is statically linked in. Just drop the DLL into the target process; no redistributables or runtime packages required.
@@ -63,8 +65,8 @@ Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared
 
 `Release_LIB` builds the C++ tests for the selected platform. Executables are written to `bin\x64` or `bin\x86`:
 
-- `HydraHookTests.exe` — public API helpers, engine handle checks, the Detours wrapper, shutdown tracking, crash-handler refcounting, the FPS sampler, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). No test exercises a real game hook/unhook/rehook cycle.
-- `HydraHookWarpSmokeTests.exe` — headless D3D11 WARP device. It loads `HydraHookTestHost.dll` from the same directory and checks Present / ResizeBuffers callbacks
+- `HydraHookTests.exe` — public API helpers, engine handle checks, the Detours wrapper, shutdown tracking, crash-handler refcounting, the FPS sampler, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
+- `HydraHookWarpSmokeTests.exe` — headless D3D11 WARP device. It loads `HydraHookTestHost.dll` from the same directory checks Present / ResizeBuffers callbacks, then runs a full `HydraHookEngineUnhook` / `HydraHookEngineRehook` cycle on the same DLL
 
 ```text
 bin\x64\HydraHookTests.exe

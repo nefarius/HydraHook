@@ -340,6 +340,44 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
     );
 
     /**
+     * @brief Removes all render and audio hooks while keeping the DLL and engine loaded.
+     *
+     * Invokes EvtHydraHookGamePreUnhook and EvtHydraHookGamePostUnhook, stops the worker
+     * thread, and clears the live callback tables. Callbacks registered through the
+     * HydraHookEngineSet*EventCallbacks functions are retained and restored by
+     * HydraHookEngineRehook. Calling it on an already unhooked engine succeeds.
+     *
+     * Do not call while holding the loader lock (for example from DllMain), from a hook
+     * callback, or from the engine worker thread.
+     *
+     * @param[in] Engine Valid engine handle.
+     * @retval HYDRAHOOK_ERROR_NONE Success or already unhooked.
+     * @retval HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE Engine is NULL.
+     */
+    HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(
+        _In_ PHYDRAHOOK_ENGINE Engine
+    );
+
+    /**
+     * @brief Reinstalls hooks on an engine previously stopped with HydraHookEngineUnhook.
+     *
+     * Clears the shutdown state, re-arms the once-per-hook announcements (so
+     * EvtHydraHookGameHooked fires again), restores the registered callback tables, and
+     * starts a new worker thread. Calling it on an engine whose worker is running succeeds.
+     *
+     * Do not call while holding the loader lock (for example from DllMain), from a hook
+     * callback, or from the engine worker thread.
+     *
+     * @param[in] Engine Valid engine handle.
+     * @retval HYDRAHOOK_ERROR_NONE Success or already hooked.
+     * @retval HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE Engine is NULL.
+     * @retval HYDRAHOOK_ERROR_CREATE_THREAD_FAILED CreateThread failed.
+     */
+    HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(
+        _In_ PHYDRAHOOK_ENGINE Engine
+    );
+
+    /**
      * @brief Allocates custom context memory accessible from all event callbacks.
      *
      * Replaces any previously allocated context. Use HydraHookEngineGetCustomContext

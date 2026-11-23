@@ -796,8 +796,85 @@ namespace
     void TestShutdownGuard()
     {
         HookActivityTracker::shutdown();
-        HookActivityTracker::Guard guard;
-        Check(!guard.invoke, "shutdown suppresses guard.invoke", __FILE__, __LINE__);
+        {
+            HookActivityTracker::Guard guard;
+            Check(!guard.invoke, "shutdown suppresses guard.invoke", __FILE__, __LINE__);
+        }
+
+        HookActivityTracker::reset();
+        HookActivityTracker::Guard rearmed;
+        Check(rearmed.invoke, "reset re-enables guard.invoke", __FILE__, __LINE__);
+    }
+
+    void TestResettableOnce()
+    {
+        ResettableOnce once;
+        int calls = 0;
+        once.call([&]() { ++calls; });
+        once.call([&]() { ++calls; });
+        Check(calls == 1, "announcement runs once", __FILE__, __LINE__);
+        once.reset();
+        once.call([&]() { ++calls; });
+        Check(calls == 2, "reset re-arms the announcement", __FILE__, __LINE__);
+
+        ResettableOnce shared;
+        std::atomic<int> concurrent{0};
+        std::atomic<bool> go{false};
+        std::thread threads[8];
+        for (auto& t : threads)
+        {
+            t = std::thread([&]()
+            {
+                while (!go.load())
+                    SwitchToThread();
+                shared.call([&]() { ++concurrent; Sleep(20); });
+            });
+        }
+        go.store(true);
+        for (auto& t : threads)
+            t.join();
+        Check(concurrent.load() == 1, "concurrent callers announce exactly once", __FILE__, __LINE__);
+    }
+
+    void TestHookReapply()
+    {
+        const int original = StdTarget(4);
+        Hook<CallConvention::stdcall_t, int, int> hook;
+        g_stdHook = &hook;
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            hook.apply(reinterpret_cast<size_t>(&StdTarget), &StdDetour);
+            Check(StdTarget(4) == original + 10, "detour active on each cycle", __FILE__, __LINE__);
+            Check(hook.remove_nothrow(), "remove_nothrow on each cycle", __FILE__, __LINE__);
+            Check(StdTarget(4) == original, "target restored on each cycle", __FILE__, __LINE__);
+        }
+        g_stdHook = nullptr;
+    }
+
+    void TestUnhookRehookHandles()
+    {
+        Check(HydraHookEngineUnhook(nullptr) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
+              "unhook rejects null engine", __FILE__, __LINE__);
+        Check(HydraHookEngineRehook(nullptr) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
+              "rehook rejects null engine", __FILE__, __LINE__);
+
+        PHYDRAHOOK_ENGINE engine = MakeBareEngine();
+        Check(engine != nullptr, "unhook engine allocated", __FILE__, __LINE__);
+        if (!engine)
+            return;
+
+        Check(HydraHookEngineUnhook(engine) == HYDRAHOOK_ERROR_NONE,
+              "unhook without a worker is a no-op", __FILE__, __LINE__);
+
+        HYDRAHOOK_D3D11_EVENT_CALLBACKS d3d11;
+        HYDRAHOOK_D3D11_EVENT_CALLBACKS_INIT(&d3d11);
+        d3d11.EvtHydraHookD3D11PrePresent = reinterpret_cast<PFN_HYDRAHOOK_D3D11_PRE_PRESENT>(
+            static_cast<uintptr_t>(0x10));
+        HydraHookEngineSetD3D11EventCallbacks(engine, &d3d11);
+        Check(engine->SavedEventsD3D11.EvtHydraHookD3D11PrePresent == d3d11.EvtHydraHookD3D11PrePresent,
+              "registered callbacks are saved for rehook", __FILE__, __LINE__);
+
+        std::free(engine);
     }
 }
 
@@ -815,6 +892,9 @@ int main()
     TestWindowProcHook();
     TestOverlayReleaseClaim();
     TestShutdownGuard();
+    TestResettableOnce();
+    TestHookReapply();
+    TestUnhookRehookHandles();
 
     if (g_failures != 0)
     {

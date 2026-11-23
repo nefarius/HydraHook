@@ -116,6 +116,8 @@ jobs:
           $required = @(
             'HydraHookEngineCreate',
             'HydraHookEngineDestroy',
+            'HydraHookEngineUnhook',
+            'HydraHookEngineRehook',
             'HydraHookEngineAllocCustomContext',
             'HydraHookEngineFreeCustomContext',
             'HydraHookEngineGetCustomContext',
