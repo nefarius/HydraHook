@@ -6,14 +6,16 @@
 #include <cstdio>
 #include <mutex>
 
-// F12 shows or hides the counter. F11 opens the settings menu, which takes mouse and keyboard
-// input only while it is open. Settings live in HydraHook-FPS.ini (see FpsConfigStore).
+// F12 shows or hides the counter. Shift+F12 opens the settings menu, which takes mouse and
+// keyboard input only while it is open. Both shortcuts come from HydraHook-FPS.ini (see FpsConfigStore).
 
 namespace
 {
 	std::mutex g_mutex; // Guards everything below. Always taken after the host's ImGui lock, never before.
 	FpsConfig g_config;
 	FpsConfigStore g_store;
+	KeyToggle g_counterToggle;
+	KeyToggle g_menuToggle;
 	bool g_menuOpen = false;
 	bool g_focusMenu = false;
 	bool g_dirty = false;
@@ -70,7 +72,13 @@ namespace
 		bool open = true;
 		if (ImGui::Begin("HydraHook FPS##config", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
 		{
-			ImGui::TextUnformatted("F11 menu  |  F12 counter");
+			char menuKey[40] = "None";
+			char counterKey[40] = "None";
+			char hint[96];
+			FormatFpsHotkey(config.menuKey, menuKey, sizeof(menuKey));
+			FormatFpsHotkey(config.counterKey, counterKey, sizeof(counterKey));
+			std::snprintf(hint, sizeof(hint), "%s menu  |  %s counter", menuKey, counterKey);
+			ImGui::TextUnformatted(hint);
 			ImGui::Separator();
 			ImGui::Checkbox("Show counter", &config.showCounter);
 
@@ -106,9 +114,25 @@ namespace
 
 OverlayFrameState UpdateOverlayState()
 {
-	static KeyToggle f11, f12;
-	const bool toggleCounter = f12.Poll(VK_F12);
-	const bool toggleMenu = f11.Poll(VK_F11);
+	FpsHotkey counterKey;
+	FpsHotkey menuKey;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		counterKey = g_config.counterKey;
+		menuKey = g_config.menuKey;
+	}
+
+	// One snapshot, so two chords that share a primary key see the same modifiers and key state.
+	const bool foreground = KeyToggle::ForegroundIsThisProcess();
+	const uint8_t modifiers = foreground ? KeyToggle::CurrentModifiers() : 0;
+	bool counterDown = false;
+	bool menuDown = false;
+	if (foreground && counterKey.vk != 0)
+		counterDown = KeyToggle::IsKeyDown(counterKey.vk);
+	if (foreground && menuKey.vk != 0)
+		menuDown = menuKey.vk == counterKey.vk ? counterDown : KeyToggle::IsKeyDown(menuKey.vk);
+	const bool toggleCounter = g_counterToggle.Update(counterDown, modifiers, counterKey.modifiers);
+	const bool toggleMenu = g_menuToggle.Update(menuDown, modifiers, menuKey.modifiers);
 
 	std::lock_guard<std::mutex> lock(g_mutex);
 	if (toggleCounter)
@@ -151,6 +175,8 @@ void OnOverlayContextCreated(ImGuiIO& io)
 	g_dirty = false;
 	g_cursorDirty = false;
 	g_retryAt = 0;
+	g_counterToggle.Reset();
+	g_menuToggle.Reset();
 }
 
 void OnOverlayShutdown()
@@ -159,6 +185,8 @@ void OnOverlayShutdown()
 	FlushLocked(true);
 	g_menuOpen = false;
 	g_cursorDirty = false;
+	g_counterToggle.Reset();
+	g_menuToggle.Reset();
 }
 
 // The shared ImGui host calls this once per visible frame on every backend.
