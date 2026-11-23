@@ -57,7 +57,7 @@ There is no HydraHook section on docs.nefarius.at. Do not invent one.
 
 ```text
 msbuild HydraHook.sln /m /p:Configuration=Release_LIB /p:Platform=x64
-msbuild HydraHook.sln /m /p:Configuration=Release /p:Platform=x64 /t:HydraHook
+msbuild HydraHook.sln /m /p:Configuration=Release /p:Platform=x64 "/t:core\HydraHook"
 ```
 
 Use `Platform=Win32` for x86. `Release_LIB` writes test executables to `bin\x64` or `bin\x86`.

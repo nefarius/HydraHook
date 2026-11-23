@@ -1,0 +1,48 @@
+name: Stamp version into resource files
+description: Install vpatch, compute the build version, and stamp the requested .rc files.
+
+inputs:
+  files:
+    description: Newline-separated list of .rc files to stamp
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install vpatch
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        dotnet tool install --global Nefarius.Tools.Vpatch --version 2.7.0
+        if ($LASTEXITCODE -ne 0) { throw "dotnet tool install vpatch failed ($LASTEXITCODE)" }
+        "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Compute and stamp build version
+      shell: pwsh
+      env:
+        TARGET_REF: ${{ github.ref }}
+        RUN_NUMBER: ${{ github.run_number }}
+        STAMP_FILES: ${{ inputs.files }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:TARGET_REF.StartsWith('refs/tags/')) {
+          . .\.github\scripts\Get-ReleaseBuildVersion.ps1
+          $ver = Get-ReleaseBuildVersion -Ref $env:TARGET_REF
+        } else {
+          $ver = "4.2.0.$env:RUN_NUMBER"
+        }
+        "BUILD_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Output "BUILD_VERSION=$ver"
+
+        $files = @($env:STAMP_FILES -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($files.Count -eq 0) { throw 'No resource files specified to stamp.' }
+        foreach ($file in $files) {
+          vpatch `
+            --stamp-version "$ver" `
+            --target-file $file `
+            --resource.file-version `
+            --resource.product-version
+          if ($LASTEXITCODE -ne 0) {
+            throw "vpatch failed for $file (exit $LASTEXITCODE)"
+          }
+        }

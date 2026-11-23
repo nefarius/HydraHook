@@ -26,8 +26,24 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build (${{ matrix.artifact }})
+  docs:
+    name: Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install -y doxygen
+
+      - name: Lint API comments
+        run: |
+          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
+
+  core:
+    name: Core & Tests (${{ matrix.artifact }})
     runs-on: windows-2022
     permissions:
       contents: read
@@ -42,8 +58,10 @@ jobs:
         include:
           - platform: Win32
             artifact: x86
+            triplet: x86-windows-static
           - platform: x64
             artifact: x64
+            triplet: x64-windows-static
 
     steps:
       - name: Checkout
@@ -52,121 +70,34 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Init vcpkg submodule (shallow)
-        shell: pwsh
-        run: git submodule update --init --depth 1 vcpkg
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & .\.github\scripts\Bootstrap-VcpkgOnce.ps1
-          if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg failed ($LASTEXITCODE)" }
-
-      - name: Resolve vcpkg cache key
-        id: vcpkg-cache
-        shell: pwsh
-        run: |
-          $vcpkgSha = git rev-parse "HEAD:vcpkg"
-          $imageVersion = $env:ImageVersion
-          "vcpkg-sha=$vcpkgSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "image-version=$imageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Output "vcpkg $vcpkgSha (ImageVersion=$imageVersion)"
-
-      - name: Cache vcpkg binary archives
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      - name: Setup core vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
         with:
-          path: vcpkg-archives
-          # vcpkg checks each archive's ABI hash, so a restore without ImageVersion
-          # ignores packages built by an older runner image.
-          key: vcpkg-v1-${{ matrix.artifact }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.vcpkg-cache.outputs.vcpkg-sha }}-${{ steps.vcpkg-cache.outputs.image-version }}
-          restore-keys: |
-            vcpkg-v1-${{ matrix.artifact }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ steps.vcpkg-cache.outputs.vcpkg-sha }}-
+          triplet: ${{ matrix.triplet }}
+          cache-scope: core
 
-      - name: Configure vcpkg files binary cache
-        shell: pwsh
-        run: |
-          $archives = (Join-Path $env:GITHUB_WORKSPACE 'vcpkg-archives').Replace('\', '/')
-          New-Item -ItemType Directory -Force -Path $archives | Out-Null
-          "VCPKG_BINARY_SOURCES=clear;files,$archives,readwrite" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Configure vcpkg NuGet binary cache
-        if: ${{ env.VCPKG_NUGET_TOKEN != '' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $nugetExe = & .\vcpkg\vcpkg.exe fetch nuget | Select-Object -Last 1
-          & $nugetExe sources add `
-            -Name "GitHubPackages" `
-            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" `
-            -Username "${{ github.repository_owner }}" `
-            -Password "$env:VCPKG_NUGET_TOKEN" `
-            -StorePasswordInClearText
-          if ($LASTEXITCODE -ne 0) { throw "nuget sources add failed ($LASTEXITCODE)" }
-          & $nugetExe setapikey "$env:VCPKG_NUGET_TOKEN" `
-            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
-          if ($LASTEXITCODE -ne 0) { throw "nuget setapikey failed ($LASTEXITCODE)" }
-          "VCPKG_BINARY_SOURCES=$env:VCPKG_BINARY_SOURCES;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite;nugettimeout,1800" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "VCPKG_NUGET_PUSH_OPTIONS=-SkipDuplicate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Install vpatch
-        shell: pwsh
-        run: |
-          dotnet tool install --global Nefarius.Tools.Vpatch --version 2.7.0
-          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Compute build version
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ref = '${{ github.ref }}'
-          if ($ref.StartsWith('refs/tags/')) {
-            . .\.github\scripts\Get-ReleaseBuildVersion.ps1
-            $ver = Get-ReleaseBuildVersion -Ref $ref
-          } else {
-            $ver = "4.2.0.${{ github.run_number }}"
-          }
-          "BUILD_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Output "BUILD_VERSION=$ver"
-
-      - name: Stamp version into resource files
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $files = @(
-            'src\HydraHook\HydraHook.rc',
-            'samples\HydraHook-ImGui\HydraHook-ImGui.rc',
-            'samples\HydraHook-FPS\HydraHook-FPS.rc',
-            'samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc',
-            'samples\HydraHook-OpenCV\HydraHook-OpenCV.rc'
-          )
-          foreach ($file in $files) {
-            vpatch `
-              --stamp-version "$env:BUILD_VERSION" `
-              --target-file $file `
-              --resource.file-version `
-              --resource.product-version
-            if ($LASTEXITCODE -ne 0) {
-              throw "vpatch failed for $file (exit $LASTEXITCODE)"
-            }
-          }
+      - name: Stamp version into HydraHook.rc
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
 
-      - name: Build static library, samples, and tests
+      - name: Build static library and tests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }}
-          if ($LASTEXITCODE -ne 0) { throw "Release_LIB build failed ($LASTEXITCODE)" }
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook;tests\HydraHookTests;tests\HydraHookTestHost;tests\HydraHookWarpSmokeTests"
+          if ($LASTEXITCODE -ne 0) { throw "Core Release_LIB build failed ($LASTEXITCODE)" }
 
       - name: Build standalone HydraHook.dll
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild "HydraHook.sln" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /t:HydraHook
-          if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE)" }
+          msbuild "HydraHook.sln" /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:core\HydraHook"
+          if ($LASTEXITCODE -ne 0) { throw "Core Release build failed ($LASTEXITCODE)" }
 
       - name: Run tests
         shell: pwsh
@@ -233,7 +164,76 @@ jobs:
           }
           Write-Output "HydraHook.dll exports the public API."
 
-      - name: Stage release files
+      - name: Stage core release file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $from = "bin\$arch\HydraHook.dll"
+          $dest = "staged\$arch"
+          if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item -LiteralPath $from -Destination (Join-Path $dest 'HydraHook.dll')
+
+      - name: Upload core artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-core-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  samples:
+    name: "Samples: ImGui, FPS, DirectXTK (${{ matrix.artifact }})"
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+            triplet: x86-windows-static
+          - platform: x64
+            artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Setup sample vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: samples
+          features: imgui directxtk
+
+      - name: Stamp version into resource files
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
+            samples\HydraHook-ImGui\HydraHook-ImGui.rc
+            samples\HydraHook-FPS\HydraHook-FPS.rc
+            samples\HydraHook-DirectXTK\HydraHook-DirectXTK.rc
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build ImGui, FPS, and DirectXTK samples
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-ImGui;samples\HydraHook-FPS;samples\HydraHook-DirectXTK"
+          if ($LASTEXITCODE -ne 0) { throw "Samples build failed ($LASTEXITCODE)" }
+
+      - name: Stage sample release files
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -242,12 +242,10 @@ jobs:
           $dest = "staged\$arch"
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           $names = @(
-            'HydraHook.dll',
             'HydraHook-ImGui.dll',
             'HydraHook-FPS.dll',
             'HydraHook-DirectXTK.dll',
-            'Arial.spritefont',
-            'HydraHook-OpenCV.dll'
+            'Arial.spritefont'
           )
           foreach ($name in $names) {
             $from = Join-Path $source $name
@@ -255,33 +253,117 @@ jobs:
             Copy-Item -LiteralPath $from -Destination (Join-Path $dest $name)
           }
 
-      - name: Upload artifacts
+      - name: Upload samples artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: hydrahook-${{ matrix.artifact }}
+          name: hydrahook-samples-${{ matrix.artifact }}
           path: staged/${{ matrix.artifact }}
           if-no-files-found: error
 
-  docs:
-    name: Doxygen
-    runs-on: ubuntu-latest
+  deps-opencv:
+    name: OpenCV Dependencies (${{ matrix.artifact }})
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: x86
+            triplet: x86-windows-static
+          - artifact: x64
+            triplet: x64-windows-static
+
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          submodules: false
           persist-credentials: false
 
-      - name: Install Doxygen
-        run: sudo apt-get update && sudo apt-get install -y doxygen
+      - name: Build and cache OpenCV vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: opencv
+          features: imgui opencv
+          save-cache: 'true'
 
-      - name: Lint API comments
+  sample-opencv:
+    name: "Sample: OpenCV (${{ matrix.artifact }})"
+    runs-on: windows-2022
+    needs: deps-opencv
+    permissions:
+      contents: read
+    env:
+      VCPKG_NUGET_TOKEN: ${{ secrets.VCPKG_NUGET_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Win32
+            artifact: x86
+            triplet: x86-windows-static
+          - platform: x64
+            artifact: x64
+            triplet: x64-windows-static
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Restore OpenCV vcpkg dependencies
+        uses: ./.github/actions/setup-vcpkg
+        with:
+          triplet: ${{ matrix.triplet }}
+          cache-scope: opencv
+          features: imgui opencv
+          save-cache: 'false'
+
+      - name: Stamp version into resource files
+        uses: ./.github/actions/stamp-version
+        with:
+          files: |
+            src\HydraHook\HydraHook.rc
+            samples\HydraHook-OpenCV\HydraHook-OpenCV.rc
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Build OpenCV sample
+        shell: pwsh
         run: |
-          { cat Doxyfile; echo; echo "WARN_AS_ERROR = YES"; } | doxygen -
+          $ErrorActionPreference = 'Stop'
+          msbuild "HydraHook.sln" /m /p:Configuration=Release_LIB /p:Platform=${{ matrix.platform }} /p:VcpkgManifestInstall=false "/t:samples\HydraHook-OpenCV"
+          if ($LASTEXITCODE -ne 0) { throw "OpenCV sample build failed ($LASTEXITCODE)" }
+
+      - name: Stage OpenCV release file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arch = '${{ matrix.artifact }}'
+          $from = "bin\$arch\HydraHook-OpenCV.dll"
+          $dest = "staged\$arch"
+          if (-not (Test-Path -LiteralPath $from)) { throw "Missing build output $from" }
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item -LiteralPath $from -Destination (Join-Path $dest 'HydraHook-OpenCV.dll')
+
+      - name: Upload OpenCV artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hydrahook-opencv-${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
 
   sign:
     name: Sign release binaries
     runs-on: windows-2022
-    needs: build
+    needs: [core, samples, sample-opencv]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
@@ -303,16 +385,40 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Download x86 artifact
+      - name: Download x86 core artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: hydrahook-x86
+          name: hydrahook-core-x86
           path: artifacts/x86
 
-      - name: Download x64 artifact
+      - name: Download x86 samples artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: hydrahook-x64
+          name: hydrahook-samples-x86
+          path: artifacts/x86
+
+      - name: Download x86 OpenCV artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-opencv-x86
+          path: artifacts/x86
+
+      - name: Download x64 core artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-core-x64
+          path: artifacts/x64
+
+      - name: Download x64 samples artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-samples-x64
+          path: artifacts/x64
+
+      - name: Download x64 OpenCV artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hydrahook-opencv-x64
           path: artifacts/x64
 
       - name: Assert release payload architectures

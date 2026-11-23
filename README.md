@@ -56,7 +56,7 @@ API-Hooking and rendering framework for DirectX-based games.
 2. From the repository root, run `prepare-deps.bat` (both x86 and x64), `prepare-deps.bat x64`, or `prepare-deps.bat Win32`. With no arguments the script locates Visual Studio via `vswhere` and sets up the compiler itself.
 3. Open `HydraHook.sln` and build `Release_LIB` (static library, samples, and tests) or `Release` (standalone `HydraHook.dll`)
 
-Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared in `vcpkg.json` and installed via [vcpkg](https://github.com/microsoft/vcpkg) (included as a submodule). The manifest baseline is pinned in `vcpkg-configuration.json`. GitHub Actions keeps the built packages in the Actions cache, separately for x86 and x64. Publishing those packages to GitHub Packages requires the `VCPKG_NUGET_TOKEN` secret, a PAT with `read:packages` and `write:packages`. The workflow token cannot create packages under a personal account.
+Dependencies (`spdlog`, `detours`, `imgui`, `directxtk`, `opencv4`) are declared in `vcpkg.json` and installed via [vcpkg](https://github.com/microsoft/vcpkg) (included as a submodule). The manifest baseline is pinned in `vcpkg-configuration.json`. GitHub Actions builds core/tests, the ImGui/FPS/DirectXTK samples, and the OpenCV dependencies/sample in separate jobs and caches each slice's vcpkg archives per architecture. Publishing those packages to GitHub Packages requires the `VCPKG_NUGET_TOKEN` secret, a PAT with `read:packages` and `write:packages`. The workflow token cannot create packages under a personal account.
 
 ### Tests
 
