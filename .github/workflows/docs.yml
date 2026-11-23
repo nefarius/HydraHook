@@ -62,14 +62,15 @@ jobs:
           path: docs/html
           if-no-files-found: error
 
-  deploy:
-    name: GitHub Pages
+  # Upload and deploy stay in separate jobs. actions/deploy-pages lists artifacts
+  # as soon as it starts and misses a github-pages artifact finalized in the
+  # same job (actions/deploy-pages#451). Re-running that failed job uploads a
+  # second github-pages artifact, which then fails the lookup permanently.
+  pages:
+    name: Upload Pages artifact
     needs: docs
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     permissions:
       contents: read
       pages: write
@@ -91,6 +92,42 @@ jobs:
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: docs/html
+
+  deploy:
+    name: GitHub Pages
+    needs: pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Wait until the Pages artifact is listed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            count=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "github-pages" and .expired == false)] | length')
+            if [ "$count" = "1" ]; then
+              echo "github-pages artifact is listed"
+              exit 0
+            fi
+            if [ "$count" -gt 1 ]; then
+              echo "expected one github-pages artifact, found ${count}" >&2
+              exit 1
+            fi
+            echo "attempt ${attempt}: github-pages artifact is not listed yet"
+            sleep 2
+          done
+          echo "github-pages artifact was not listed for this run" >&2
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
