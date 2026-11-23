@@ -408,9 +408,6 @@ void EvtHydraHookGameUnhooked(
 	}
 
 	ImGuiScope imguiShutdown;
-#ifdef _WIN64
-	bool d3d12GpuIdle = true;
-#endif
 
 	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
@@ -428,11 +425,13 @@ void EvtHydraHookGameUnhooked(
 			break;
 #ifdef _WIN64
 		case HydraHookDirect3DVersion12:
-			d3d12GpuIdle = D3D12_WaitForGpu(1000);
-			if (d3d12GpuIdle)
-				ImGui_ImplDX12_Shutdown();
-			else
-				HydraHookEngineLogError("Skipping D3D12 ImGui shutdown and resource release on unhook because GPU wait did not complete");
+			if (!D3D12_WaitForGpu(1000))
+			{
+				HydraHookEngineLogError("Skipping D3D12 ImGui shutdown, context destruction, and resource release on unhook because GPU wait did not complete");
+				g_AcceptInput.store(false);
+				return;
+			}
+			ImGui_ImplDX12_Shutdown();
 			break;
 #endif
 		default:
@@ -454,11 +453,8 @@ void EvtHydraHookGameUnhooked(
 	g_d3d11Device.Reset();
 
 #ifdef _WIN64
-	if (d3d12GpuIdle)
-	{
-		// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
-		D3D12_CleanupInitResources();
-	}
+	// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
+	D3D12_CleanupInitResources();
 #endif
 
 	// Allow render callbacks to re-initialize on a rehook without a DLL reload
@@ -466,8 +462,7 @@ void EvtHydraHookGameUnhooked(
 	g_d3d10InitGuard.Reset();
 	g_d3d11InitGuard.Reset();
 #ifdef _WIN64
-	if (d3d12GpuIdle)
-		g_d3d12InitGuard.Reset();
+	g_d3d12InitGuard.Reset();
 #endif
 
 	g_AcceptInput.store(false);
@@ -754,6 +749,7 @@ static ID3D12Fence* g_d3d12_pFence = nullptr;
 static HANDLE g_d3d12_hFenceEvent = nullptr;
 static UINT64 g_d3d12_fenceLastSignaledValue = 0;
 static bool g_d3d12_fenceSignalFailed = false;
+static bool g_d3d12_overlayReleasedForResize = false;
 static ID3D12DescriptorHeap* g_d3d12_pRtvDescHeap = nullptr;
 static ID3D12DescriptorHeap* g_d3d12_pSrvDescHeap = nullptr;
 static ID3D12Resource* g_d3d12_mainRenderTargetResource[D3D12_NUM_BACK_BUFFERS] = {};
@@ -909,6 +905,7 @@ static void D3D12_CleanupInitResources()
 	// Scalar state must not leak into the next init (new fence starts at 0, heap is recreated)
 	g_d3d12_fenceLastSignaledValue = 0;
 	g_d3d12_fenceSignalFailed = false;
+	g_d3d12_overlayReleasedForResize = false;
 	g_d3d12_srvDescriptorCount = 0;
 	g_d3d12_rtvDescriptorSize = 0;
 	g_d3d12_srvDescriptorIncrement = 0;
@@ -1191,6 +1188,7 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	(void)Extension;
 
 	ImGuiScope imguiDevice;
+	g_d3d12_overlayReleasedForResize = false;
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
@@ -1202,6 +1200,7 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	ImGui_ImplDX12_InvalidateDeviceObjects();
 	D3D12_CleanupOverlayResources();
 	g_d3d12_srvDescriptorCount = 0;
+	g_d3d12_overlayReleasedForResize = true;
 }
 
 /**
@@ -1230,6 +1229,10 @@ void EvtHydraHookD3D12PostResizeBuffers(
 	(void)Extension;
 
 	ImGuiScope imguiDevice;
+	if (!g_d3d12_overlayReleasedForResize)
+		return;
+	g_d3d12_overlayReleasedForResize = false;
+
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
