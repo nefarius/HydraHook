@@ -330,11 +330,16 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
      * @brief Destroys the engine and frees all resources.
      *
      * Unhooks the render pipeline and invokes shutdown callbacks. Call from DllMain()
-     * at DLL_PROCESS_DETACH.
+     * at DLL_PROCESS_DETACH. This function does not wait. It frees the engine, its
+     * cancellation event, and its thread handle only after the worker has exited and
+     * in-flight hook callbacks have drained. Otherwise the engine stays allocated.
      *
      * @param[in] HostInstance HMODULE passed to HydraHookEngineCreate.
      * @retval HYDRAHOOK_ERROR_NONE Success.
      * @retval HYDRAHOOK_ERROR_INVALID_HMODULE_HANDLE No engine for this HMODULE.
+     * @retval HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE The worker or a hook callback is still
+     *         running. The engine and its thread handle stay allocated; call again later
+     *         from outside the loader lock.
      */
     HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(
         _In_ HMODULE HostInstance

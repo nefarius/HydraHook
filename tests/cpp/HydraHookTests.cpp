@@ -244,6 +244,31 @@ namespace
             HookActivityTracker::reset();
         }
 
+        PHYDRAHOOK_ENGINE live = nullptr;
+        HYDRAHOOK_ENGINE_CONFIG liveConfig;
+        HYDRAHOOK_ENGINE_CONFIG_INIT(&liveConfig);
+        liveConfig.Logging.IsEnabled = FALSE;
+        const HMODULE self = GetModuleHandleA(nullptr);
+        Check(HydraHookEngineCreate(self, &liveConfig, &live) == HYDRAHOOK_ERROR_NONE,
+              "create before the worker exits", __FILE__, __LINE__);
+        if (live != nullptr)
+        {
+            const HYDRAHOOK_ERROR firstDestroy = HydraHookEngineDestroy(self);
+            if (firstDestroy == HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE)
+            {
+                Check(HydraHookEngineUnhook(live) == HYDRAHOOK_ERROR_NONE,
+                      "unhook engine retained by destroy", __FILE__, __LINE__);
+                Check(HydraHookEngineDestroy(self) == HYDRAHOOK_ERROR_NONE,
+                      "destroy after the retained worker exits", __FILE__, __LINE__);
+            }
+            else
+            {
+                Check(firstDestroy == HYDRAHOOK_ERROR_NONE,
+                      "destroy of a worker that had already exited", __FILE__, __LINE__);
+            }
+            HookActivityTracker::reset();
+        }
+
         WIN32_FILE_ATTRIBUTE_DATA after{};
         const BOOL existsAfter = GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &after);
         if (!existed)

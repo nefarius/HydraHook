@@ -368,6 +368,26 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		PerformShutdownCleanup(engine, ShutdownOrigin::DllMainProcessDetach);
 	}
 
+	// DllMain cannot wait: the worker may need the loader lock. A finished
+	// cleanup flag is not enough, because Unhook sets it before the worker exits.
+	const bool onWorker = engine->EngineThread != nullptr
+		&& GetThreadId(engine->EngineThread) == GetCurrentThreadId();
+	bool workerExited = engine->EngineThread == nullptr;
+	if (!workerExited && !onWorker)
+		workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
+
+	bool callbacksDrained = workerExited
+		&& !engine->DrainIncomplete.load(std::memory_order_acquire);
+	if (workerExited && !callbacksDrained)
+		callbacksDrained = HookActivityTracker::drain(0);
+
+	if (!workerExited || !callbacksDrained)
+	{
+		if (logger)
+			logger->warn("Engine kept alive; worker or hook callbacks are still running");
+		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+	}
+
 	if (logger)
 		logger->info("Freeing remaining resources");
 
