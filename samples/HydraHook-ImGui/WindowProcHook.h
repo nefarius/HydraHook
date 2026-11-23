@@ -437,7 +437,17 @@ private:
 			}
 		}
 		if (destroyError[0] != '\0')
-			self.LogError(destroyError);
+		{
+			// Logging is best-effort. A throw here must not skip the original procedure,
+			// or the host never sees WM_NCDESTROY.
+			try
+			{
+				self.LogError(destroyError);
+			}
+			catch (...)
+			{
+			}
+		}
 
 		LRESULT result;
 		if (!found)
