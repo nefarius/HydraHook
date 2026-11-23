@@ -73,6 +73,7 @@ extern "C" {
         HYDRAHOOK_ERROR_CREATE_EVENT_FAILED = 0xE0000008,       /**< CreateEvent failed for cancellation. */
         HYDRAHOOK_ERROR_CREATE_LOGGER_FAILED = 0xE0000009,      /**< Failed to create fallback logger. */
         HYDRAHOOK_ERROR_NO_LOADER_LOCK = 0xE000000A,            /**< Initialization attempted outside of loader lock. */
+        HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE = 0xE000000B,         /**< Worker did not finish unhooking, or hook callbacks are still running; engine state is kept, retry later. */
 
     } HYDRAHOOK_ERROR;
 
@@ -353,6 +354,9 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
      * @param[in] Engine Valid engine handle.
      * @retval HYDRAHOOK_ERROR_NONE Success or already unhooked.
      * @retval HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE Engine is NULL.
+     * @retval HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE The worker did not exit within 8 seconds, or a
+     *         hook callback is still running. The worker is never terminated and the engine
+     *         state is kept; call again later. Do not free resources used by callbacks yet.
      */
     HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(
         _In_ PHYDRAHOOK_ENGINE Engine
@@ -372,6 +376,7 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
      * @retval HYDRAHOOK_ERROR_NONE Success or already hooked.
      * @retval HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE Engine is NULL.
      * @retval HYDRAHOOK_ERROR_CREATE_THREAD_FAILED CreateThread failed.
+     * @retval HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE Callbacks from the previous run are still active.
      */
     HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(
         _In_ PHYDRAHOOK_ENGINE Engine

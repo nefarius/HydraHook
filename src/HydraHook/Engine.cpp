@@ -111,6 +111,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 	engine->ShutdownCleanupDone.store(false);
 	engine->FreeLibraryHookActive.store(false);
 	engine->SkipDllUnloadOnExit.store(false);
+	engine->DrainIncomplete.store(false);
 	InitializeSRWLock(&engine->LifecycleLock);
 	HookActivityTracker::reset();
 	CopyMemory(&engine->EngineConfig, EngineConfig, sizeof(HYDRAHOOK_ENGINE_CONFIG));	
@@ -316,7 +317,35 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(PHYDRAHOOK_ENGINE Engine)
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
+	// Keep the DLL loaded even if another shutdown path already claimed cleanup
+	Engine->SkipDllUnloadOnExit.store(true, std::memory_order_release);
+
 	PerformShutdownCleanup(Engine, ShutdownOrigin::ManualUnhook);
+
+	// PerformShutdownCleanup returns early when another path owns cleanup, and
+	// never terminates the worker on a manual unhook; confirm the worker is gone
+	// before releasing its handle or any engine state.
+	if (WaitForSingleObject(Engine->EngineThread, 8000) != WAIT_OBJECT_0)
+	{
+		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+	}
+
+	// The worker exits even if a callback outlives the drain timeout; keep the
+	// engine until those callbacks have returned.
+	if (Engine->DrainIncomplete.load(std::memory_order_acquire))
+	{
+		if (!HookActivityTracker::drain(1000))
+		{
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
+
+		ZeroMemory(&Engine->EventsD3D9, sizeof(Engine->EventsD3D9));
+		ZeroMemory(&Engine->EventsD3D10, sizeof(Engine->EventsD3D10));
+		ZeroMemory(&Engine->EventsD3D11, sizeof(Engine->EventsD3D11));
+		ZeroMemory(&Engine->EventsD3D12, sizeof(Engine->EventsD3D12));
+		ZeroMemory(&Engine->EventsARC, sizeof(Engine->EventsARC));
+		Engine->DrainIncomplete.store(false, std::memory_order_release);
+	}
 
 	CloseHandle(Engine->EngineThread);
 	Engine->EngineThread = nullptr;
@@ -344,9 +373,17 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 			return HYDRAHOOK_ERROR_NONE;
 		}
 
+		if (Engine->DrainIncomplete.load(std::memory_order_acquire)
+			&& !HookActivityTracker::drain(0))
+		{
+			return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
+		}
+
 		CloseHandle(Engine->EngineThread);
 		Engine->EngineThread = nullptr;
 	}
+
+	Engine->DrainIncomplete.store(false, std::memory_order_release);
 
 	HookActivityTracker::reset();
 	Engine->ShutdownCleanupDone.store(false);

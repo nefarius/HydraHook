@@ -96,6 +96,7 @@ typedef struct _HYDRAHOOK_ENGINE
     HYDRAHOOK_ARC_EVENT_CALLBACKS SavedEventsARC;
     SRWLOCK LifecycleLock;                   /**< Serializes unhook and rehook. Zero is SRWLOCK_INIT. */
     std::atomic<bool> SkipDllUnloadOnExit;   /**< Worker exits with ExitThread instead of FreeLibraryAndExitThread. */
+    std::atomic<bool> DrainIncomplete;       /**< Worker timed out draining in-flight callbacks; unhook is not complete until they return. */
     HANDLE EngineThread;                     /**< Hook worker thread. */
     HANDLE EngineCancellationEvent;           /**< Shutdown signal. */
     PVOID CustomContext;                     /**< User-allocated context. */

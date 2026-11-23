@@ -157,7 +157,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 
 `HydraHookEngineUnhook(Engine)` and `HydraHookEngineRehook(Engine)` run a hook, unhook, rehook cycle in one loaded DLL. Neither may be called under the loader lock, from a hook callback, or from the worker thread.
 
-- **Unhook**: runs the ManualUnhook shutdown above, closes the worker handle, and clears the render pipeline pointers and `GameVersion`. It is idempotent.
+- **Unhook**: runs the ManualUnhook shutdown above and never calls `TerminateThread`. It waits for the worker to exit (also when another shutdown path already claimed cleanup) and for in-flight callbacks to drain; if either fails it returns `HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE` and keeps the worker handle and state so it can be retried. On success it closes the worker handle and clears the render pipeline pointers and `GameVersion`. It is idempotent.
 - **Rehook**: calls `HookActivityTracker::reset()`, clears `ShutdownCleanupDone`, `FreeLibraryHookActive` and `SkipDllUnloadOnExit`, resets the cancellation event, restores `Events*` from `SavedEvents*`, and starts a new `HydraHookMainThread`. It is a no-op while a worker is running.
 - **Callback tables**: `HydraHookEngineSet*EventCallbacks` writes both the live table and a saved copy. The worker zeroes the live tables on unhook; rehook restores the saved copies before `EvtHydraHookGameHooked` fires again.
 - **Announcements**: the once-per-hook announcements are `ResettableOnce` members of `g_announce` in `Game.cpp`. The worker re-arms all of them, the engine pointer, and the DXGI device version at the start of each run.

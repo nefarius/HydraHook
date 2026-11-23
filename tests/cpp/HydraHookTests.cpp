@@ -857,6 +857,9 @@ namespace
               "unhook rejects null engine", __FILE__, __LINE__);
         Check(HydraHookEngineRehook(nullptr) == HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE,
               "rehook rejects null engine", __FILE__, __LINE__);
+        Check(HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE != HYDRAHOOK_ERROR_NONE
+              && HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE != HYDRAHOOK_ERROR_NO_LOADER_LOCK,
+              "unhook incomplete has a distinct error code", __FILE__, __LINE__);
 
         PHYDRAHOOK_ENGINE engine = MakeBareEngine();
         Check(engine != nullptr, "unhook engine allocated", __FILE__, __LINE__);

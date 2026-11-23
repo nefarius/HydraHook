@@ -227,7 +227,12 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->info("Thread shutdown complete");
 		break;
 	case WAIT_TIMEOUT:
-		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		if (origin == ShutdownOrigin::ManualUnhook)
+		{
+			// Never terminate on a manual unhook: the caller keeps the engine and can retry
+			logger->error("Thread hasn't finished clean-up within expected time, unhook incomplete");
+		}
+		else if (origin != ShutdownOrigin::DllMainProcessDetach)
 		{
 			TerminateThread(engine->EngineThread, 0);
 			logger->error("Thread hasn't finished clean-up within expected time, terminating");
@@ -237,11 +242,11 @@ void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 		logger->error("Unknown error, host process might crash");
 		break;
 	default:
-		if (origin != ShutdownOrigin::DllMainProcessDetach)
+		if (origin != ShutdownOrigin::DllMainProcessDetach && origin != ShutdownOrigin::ManualUnhook)
 		{
 			TerminateThread(engine->EngineThread, 0);
 		}
-		logger->error("Unexpected return value, terminating");
+		logger->error("Unexpected return value");
 		break;
 	}
 }
@@ -2104,10 +2109,12 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	if (!HookActivityTracker::drain())
 	{
 		logger->error("Timed out waiting for in-flight callbacks to drain");
+		engine->DrainIncomplete.store(true, std::memory_order_release);
 	}
 	else
 	{
 		logger->info("All in-flight hook callbacks drained");
+		engine->DrainIncomplete.store(false, std::memory_order_release);
 
 		ZeroMemory(&engine->EventsD3D9, sizeof(engine->EventsD3D9));
 		ZeroMemory(&engine->EventsD3D10, sizeof(engine->EventsD3D10));
