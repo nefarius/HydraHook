@@ -482,10 +482,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (logger)
 		logger->info("Freeing remaining resources");
 
-	if (engine->CustomContext)
+	if (PVOID ctx = engine->CustomContext.exchange(nullptr, std::memory_order_acq_rel))
 	{
-		free(engine->CustomContext);
-		engine->CustomContext = nullptr;
+		free(ctx);
 	}
 
 	if (engine->CrashHandlerInstalled)
@@ -690,7 +689,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGIN
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext)
+	if (Engine->CustomContext.load(std::memory_order_acquire))
 	{
 		HydraHookEngineFreeCustomContext(Engine);
 	}
@@ -704,7 +703,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGIN
 
 	// Zero before publishing: other threads may read Engine->CustomContext concurrently.
 	ZeroMemory(block, ContextSize);
-	Engine->CustomContext = block;
+	Engine->CustomContext.store(block, std::memory_order_release);
 	*Context = block;
 
 	return HYDRAHOOK_ERROR_NONE;
@@ -717,10 +716,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineFreeCustomContext(PHYDRAHOOK_ENGINE
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext)
+	if (PVOID ctx = Engine->CustomContext.exchange(nullptr, std::memory_order_acq_rel))
 	{
-		free(Engine->CustomContext);
-		Engine->CustomContext = NULL;
+		free(ctx);
 	}
 
 	return HYDRAHOOK_ERROR_NONE;
@@ -733,7 +731,7 @@ HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 		return nullptr;
 	}
 
-	return Engine->CustomContext;
+	return Engine->CustomContext.load(std::memory_order_acquire);
 }
 
 HYDRAHOOK_API BOOL HydraHookEngineAreCallbacksDrained(PHYDRAHOOK_ENGINE Engine)

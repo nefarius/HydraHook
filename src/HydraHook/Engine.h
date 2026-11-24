@@ -101,7 +101,7 @@ typedef struct _HYDRAHOOK_ENGINE
     std::atomic<bool> DrainIncomplete{false};       /**< Worker timed out draining in-flight callbacks; unhook is not complete until they return. */
     HANDLE EngineThread = nullptr;           /**< Hook worker thread. */
     HANDLE EngineCancellationEvent = nullptr; /**< Shutdown signal. */
-    PVOID CustomContext = nullptr;           /**< User-allocated context. */
+    std::atomic<PVOID> CustomContext{nullptr}; /**< User-allocated context; published with release, read with acquire. */
     BOOL CrashHandlerInstalled = FALSE;      /**< TRUE if this instance enabled the crash handler. */
     std::atomic<bool> ShutdownCleanupDone{false};   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
     std::atomic<bool> FreeLibraryHookActive{false}; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
