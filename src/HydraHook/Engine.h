@@ -109,7 +109,8 @@ typedef struct _HYDRAHOOK_ENGINE
     PVOID IpcStateView = nullptr;            /**< Writable view of @c HydraHookIpcStatus. */
     HANDLE RehookEvent = nullptr;            /**< Auto-reset event signaled by an external rehook request. */
     PTP_WAIT RehookWait = nullptr;           /**< Thread-pool wait armed only while stopped and recoverable. */
-    std::atomic<int32_t> RehookWaitPhase{HydraHookIpcPhaseIdle}; /**< Idle, armed, or inside the rehook callback. */
+    std::atomic<int32_t> RehookWaitPhase{HydraHookIpcPhaseIdle}; /**< Idle, armed, in the callback, or in the callback with another caller's wait. */
+    std::atomic<uint32_t> RehookOwnerThread{0}; /**< Thread id of the callback that owns @c RehookWaitPhase. 0 when none. */
     std::atomic<bool> RehookDisabled{false}; /**< Destroy won the race; the callback must not restart the worker. */
     std::atomic<uint32_t> IpcGeneration{0};  /**< Copied into the status block. Starts at 1. */
     std::atomic<uint32_t> LastShutdownOrigin{HydraHookIpcShutdownOriginNone}; /**< Last @c PerformShutdownCleanup origin. */

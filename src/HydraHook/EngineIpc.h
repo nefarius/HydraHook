@@ -61,6 +61,7 @@ constexpr std::uint32_t HydraHookIpcFlagDrainIncomplete = 1u << 1;
 constexpr std::int32_t HydraHookIpcPhaseIdle = 0;
 constexpr std::int32_t HydraHookIpcPhaseArmed = 1;
 constexpr std::int32_t HydraHookIpcPhaseInCallback = 2;
+constexpr std::int32_t HydraHookIpcPhaseInCallbackExternal = 3;
 
 #pragma pack(push, 4)
 struct HydraHookIpcStatus

@@ -671,8 +671,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 		HydraHookIpcPublish(Engine, HydraHookIpcStateStopped, HydraHookIpcShutdownOriginNone, 0, flags);
 		// The rehook callback arms after this returns. Arming here would drop InCallback first,
 		// and that later call would use a freed engine.
+		const std::int32_t phase = Engine->RehookWaitPhase.load(std::memory_order_acquire);
 		if (flags != 0
-			&& Engine->RehookWaitPhase.load(std::memory_order_acquire) != HydraHookIpcPhaseInCallback)
+			&& phase != HydraHookIpcPhaseInCallback
+			&& phase != HydraHookIpcPhaseInCallbackExternal)
 			HydraHookIpcArmRehookWait(Engine);
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
 	}
