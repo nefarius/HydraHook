@@ -595,7 +595,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(PHYDRAHOOK_ENGINE Engine)
 	CloseHandle(Engine->EngineThread);
 	Engine->EngineThread = nullptr;
 
-	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ClearRenderPipeline(Engine->RenderPipeline);
 	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
 	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
 
@@ -646,7 +646,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	Engine->EventsD3D12 = Engine->SavedEventsD3D12;
 	Engine->EventsARC = Engine->SavedEventsARC;
 
-	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ClearRenderPipeline(Engine->RenderPipeline);
 	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
 	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
 	Engine->LastShutdownOrigin.store(HydraHookIpcShutdownOriginNone, std::memory_order_release);

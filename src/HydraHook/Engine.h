@@ -139,6 +139,15 @@ inline void StoreRenderPipelinePtr(T*& slot, U* value)
     std::atomic_ref<T*>(slot).store(value, std::memory_order_release);
 }
 
+/** @brief Resets every RenderPipeline pointer atomically, so concurrent lookups never see a torn value. */
+template <typename Pipeline>
+inline void ClearRenderPipeline(Pipeline& pipeline)
+{
+    StoreRenderPipelinePtr(pipeline.pSwapChain, static_cast<IDXGISwapChain*>(nullptr));
+    StoreRenderPipelinePtr(pipeline.pD3D9Device, static_cast<LPDIRECT3DDEVICE9>(nullptr));
+    StoreRenderPipelinePtr(pipeline.pD3D9ExDevice, static_cast<LPDIRECT3DDEVICE9EX>(nullptr));
+}
+
 template <typename T>
 inline T* LoadRenderPipelinePtr(T*& slot)
 {
