@@ -25,6 +25,7 @@ SOFTWARE.
 #pragma once
 
 #include <opencv2/core.hpp>
+#include <opencv2/features2d.hpp>
 #include <vector>
 
 struct PerceptionResults
@@ -39,4 +40,17 @@ struct PerceptionResults
 	int inliers = 0;
 };
 
-void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out);
+// Tracking state carried between frames. Owned by the engine-bound context; only the
+// Capture worker thread may touch it.
+struct PerceptionState
+{
+	cv::Mat prevGray;
+	cv::Mat currGray;
+	std::vector<cv::Point2f> prevPts;
+	std::vector<cv::Point2f> currPts;
+	cv::Ptr<cv::ORB> orb; // Created on first use.
+	std::vector<cv::Vec3f> poseTrail;
+	bool needReinit = true;
+};
+
+void RunPerceptionPipeline(PerceptionState& state, cv::Mat& frame, PerceptionResults& out);

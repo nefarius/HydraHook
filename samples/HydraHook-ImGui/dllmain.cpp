@@ -33,8 +33,10 @@ SOFTWARE.
 // 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <new>
 #include <wrl/client.h>
 
 // 
@@ -50,55 +52,151 @@ SOFTWARE.
 #endif
 #include <imgui_impl_win32.h>
 
-// Set from the scene's OverlayFrameState::acceptInput. The window-proc hook only feeds ImGui while it is set.
-static std::atomic<bool> g_AcceptInput{ false };
-static std::atomic<HWND> g_InputWindow{ nullptr };
-// Buttons this hook forwarded to ImGui, and whether that caused the Win32 backend to take capture.
-static std::atomic<uint32_t> g_ForwardedButtons{ 0 };
-static std::atomic<bool> g_OverlayOwnsCapture{ false };
-static std::atomic<bool> g_ReleasePending{ false };
-static std::atomic<int> g_ReleaseAttempts{ 0 };
-// Hide generation. A queued release carries the value from the hide that posted it.
-static std::atomic<uint32_t> g_ReleaseGeneration{ 0 };
-static std::atomic<uint32_t> g_ReleaseApplied{ 0 };
-// New input stays out until the release for the current generation has run.
-static std::atomic<bool> g_HoldInput{ false };
-// Set before the final unhook release so a button-down cannot land after cleanup.
-static std::atomic<bool> g_InputClosed{ false };
+using Microsoft::WRL::ComPtr;
 
-// Serializes ImGui context use between the render thread and the window thread.
-// Re-entry on the thread that already holds it does not lock again: Present and a
-// SendMessage it triggers can share a thread, and Dear ImGui is already on that stack.
-static std::timed_mutex g_ImGuiMutex;
-static std::atomic<DWORD> g_ImGuiOwner{ 0 };
+#ifdef _WIN64
+static constexpr UINT D3D12_NUM_BACK_BUFFERS = DXGI_MAX_SWAP_CHAIN_BUFFERS;
+static constexpr UINT D3D12_NUM_FRAMES_IN_FLIGHT = 2;
+static constexpr UINT D3D12_SRV_HEAP_SIZE = 64;
+#endif
+
+// All per-engine runtime state of the shared host. It lives in the engine's custom context
+// memory, followed by the scene's context (see EvtHydraHookGameHooked).
+struct OverlayHostContext
+{
+	PHYDRAHOOK_ENGINE engine = nullptr;
+	OverlaySceneContext* scene = nullptr;
+
+	// Set from the scene's OverlayFrameState::acceptInput. The window-proc hook only feeds ImGui while it is set.
+	std::atomic<bool> acceptInput{ false };
+	std::atomic<HWND> inputWindow{ nullptr };
+	// Buttons this hook forwarded to ImGui, and whether that caused the Win32 backend to take capture.
+	std::atomic<uint32_t> forwardedButtons{ 0 };
+	std::atomic<bool> overlayOwnsCapture{ false };
+	std::atomic<bool> releasePending{ false };
+	std::atomic<int> releaseAttempts{ 0 };
+	// Hide generation. A queued release carries the value from the hide that posted it.
+	std::atomic<uint32_t> releaseGeneration{ 0 };
+	std::atomic<uint32_t> releaseApplied{ 0 };
+	// New input stays out until the release for the current generation has run.
+	std::atomic<bool> holdInput{ false };
+	// Set before the final unhook release so a button-down cannot land after cleanup.
+	std::atomic<bool> inputClosed{ false };
+	std::once_flag wndProcFirstMessage;
+
+	// Serializes ImGui context use between the render thread and the window thread.
+	// Re-entry on the thread that already holds it does not lock again: Present and a
+	// SendMessage it triggers can share a thread, and Dear ImGui is already on that stack.
+	std::timed_mutex imguiMutex;
+	std::atomic<DWORD> imguiOwner{ 0 };
+
+	HYDRAHOOK_D3D_VERSION gameVersion = HydraHookDirect3DVersionUnknown;
+
+	// Per-backend render-path init guards.
+	ResettableInitGuard d3d9InitGuard;
+	ResettableInitGuard d3d10InitGuard;
+	ResettableInitGuard d3d11InitGuard;
+#ifdef _WIN64
+	ResettableInitGuard d3d12InitGuard;
+#endif
+
+	ComPtr<ID3D10Device> d3d10Device;
+	ComPtr<ID3D10RenderTargetView> d3d10Target;
+	ComPtr<ID3D11Device> d3d11Device;
+	ComPtr<ID3D11DeviceContext> d3d11Context;
+	ComPtr<ID3D11RenderTargetView> d3d11Target;
+
+#ifdef _WIN64
+	struct D3D12State
+	{
+		ID3D12Device* pDevice = nullptr;
+		ID3D12CommandQueue* pCommandQueue = nullptr;
+		ID3D12CommandAllocator* pCommandAllocator = nullptr;
+		ID3D12GraphicsCommandList* pCommandList = nullptr;
+		ID3D12Fence* pFence = nullptr;
+		HANDLE hFenceEvent = nullptr;
+		UINT64 fenceLastSignaledValue = 0;
+		bool fenceSignalFailed = false;
+		bool overlayReleasedForResize = false;
+		ID3D12DescriptorHeap* pRtvDescHeap = nullptr;
+		ID3D12DescriptorHeap* pSrvDescHeap = nullptr;
+		ID3D12Resource* mainRenderTargetResource[D3D12_NUM_BACK_BUFFERS] = {};
+		D3D12_CPU_DESCRIPTOR_HANDLE mainRenderTargetDescriptor[D3D12_NUM_BACK_BUFFERS] = {};
+		UINT rtvDescriptorSize = 0;
+		UINT srvDescriptorIncrement = 0;
+		UINT numBackBuffers = D3D12_NUM_BACK_BUFFERS;
+		UINT srvDescriptorCount = 0;
+	} d3d12;
+#endif
+};
+
+static_assert(alignof(OverlayHostContext) <= alignof(std::max_align_t),
+	"malloc-backed engine context cannot satisfy this alignment");
+
+// The host has no globals. D3D11/D3D12 callbacks get the context through their extension. The
+// D3D9 and D3D10 callbacks resolve the engine from the device or swap chain they receive, and
+// the window-procedure handler receives the engine as hook user data. The context itself is
+// looked up on every use, so it reads as null once the engine has released it.
+static OverlayHostContext* HostFromEngine(PHYDRAHOOK_ENGINE engine)
+{
+	return engine ? static_cast<OverlayHostContext*>(HydraHookEngineGetCustomContext(engine)) : nullptr;
+}
+
+static OverlayHostContext* HostFromExtension(PHYDRAHOOK_EVT_PRE_EXTENSION Extension)
+{
+	return Extension ? static_cast<OverlayHostContext*>(Extension->Context) : nullptr;
+}
+
+static OverlayHostContext* HostFromExtension(PHYDRAHOOK_EVT_POST_EXTENSION Extension)
+{
+	return Extension ? static_cast<OverlayHostContext*>(Extension->Context) : nullptr;
+}
+
+static OverlayHostContext* HostFromD3D9Device(LPDIRECT3DDEVICE9 pDevice)
+{
+	PHYDRAHOOK_ENGINE engine = HydraHookEngineGetHandleFromD3D9Device(pDevice);
+	if (!engine)
+		engine = HydraHookEngineGetHandleFromD3D9ExDevice(reinterpret_cast<LPDIRECT3DDEVICE9EX>(pDevice));
+	return HostFromEngine(engine);
+}
+
+static OverlayHostContext* HostFromD3D10SwapChain(IDXGISwapChain* pSwapChain)
+{
+	return HostFromEngine(HydraHookEngineGetHandleFromD3D10SwapChain(pSwapChain));
+}
+
+static constexpr size_t AlignUp(size_t value, size_t alignment)
+{
+	return (value + alignment - 1) / alignment * alignment;
+}
 
 struct ImGuiScope
 {
-	ImGuiScope()
+	explicit ImGuiScope(OverlayHostContext& ctx) : ctx_(ctx)
 	{
 		const DWORD self = ::GetCurrentThreadId();
-		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+		if (ctx_.imguiOwner.load(std::memory_order_relaxed) == self)
 		{
 			acquired_ = true;
 			return;
 		}
-		g_ImGuiMutex.lock();
-		g_ImGuiOwner.store(self, std::memory_order_relaxed);
+		ctx_.imguiMutex.lock();
+		ctx_.imguiOwner.store(self, std::memory_order_relaxed);
 		locked_ = true;
 		acquired_ = true;
 	}
 
-	explicit ImGuiScope(std::chrono::milliseconds timeout)
+	ImGuiScope(OverlayHostContext& ctx, std::chrono::milliseconds timeout) : ctx_(ctx)
 	{
 		const DWORD self = ::GetCurrentThreadId();
-		if (g_ImGuiOwner.load(std::memory_order_relaxed) == self)
+		if (ctx_.imguiOwner.load(std::memory_order_relaxed) == self)
 		{
 			acquired_ = true;
 			return;
 		}
-		if (g_ImGuiMutex.try_lock_for(timeout))
+		if (ctx_.imguiMutex.try_lock_for(timeout))
 		{
-			g_ImGuiOwner.store(self, std::memory_order_relaxed);
+			ctx_.imguiOwner.store(self, std::memory_order_relaxed);
 			locked_ = true;
 			acquired_ = true;
 		}
@@ -108,8 +206,8 @@ struct ImGuiScope
 	{
 		if (!locked_)
 			return;
-		g_ImGuiOwner.store(0, std::memory_order_relaxed);
-		g_ImGuiMutex.unlock();
+		ctx_.imguiOwner.store(0, std::memory_order_relaxed);
+		ctx_.imguiMutex.unlock();
 	}
 
 	bool owns_lock() const { return acquired_; }
@@ -118,10 +216,21 @@ struct ImGuiScope
 	ImGuiScope& operator=(const ImGuiScope&) = delete;
 
 private:
+	OverlayHostContext& ctx_;
 	bool locked_ = false;
 	bool acquired_ = false;
 };
 
+static bool UnhookWindowProc(OverlayHostContext& ctx);
+static void HookWindowProc(OverlayHostContext& ctx, HWND hWnd);
+
+#ifdef _WIN64
+static void D3D12_CleanupOverlayResources(OverlayHostContext& ctx);
+static void D3D12_CleanupInitResources(OverlayHostContext& ctx);
+static bool D3D12_WaitForGpu(OverlayHostContext& ctx, DWORD timeoutMs = INFINITE);
+#endif
+
+// Process-wide registration of a window message. The value only caches an OS atom.
 static UINT OverlayReleaseMessage()
 {
 	static UINT message = ::RegisterWindowMessageW(L"HydraHook.ImGui.ReleaseOverlayInput");
@@ -134,33 +243,33 @@ static UINT OverlayReleaseMessage()
 	return message;
 }
 
-static void RequestOverlayRelease()
+static void RequestOverlayRelease(OverlayHostContext& ctx)
 {
 	// Same lock as ReleaseOverlayInput. An older cleanup must not clear the hold
 	// after this hide has published it.
-	ImGuiScope scope;
-	g_ReleaseAttempts.store(0);
-	g_HoldInput.store(true);
-	g_ReleaseGeneration.fetch_add(1);
-	g_ReleasePending.store(true);
+	ImGuiScope scope(ctx);
+	ctx.releaseAttempts.store(0);
+	ctx.holdInput.store(true);
+	ctx.releaseGeneration.fetch_add(1);
+	ctx.releasePending.store(true);
 }
 
 // Posts the release for the generation observed at entry. A newer hide keeps its own pending bit.
-static void DeliverPendingRelease()
+static void DeliverPendingRelease(OverlayHostContext& ctx)
 {
-	if (!g_ReleasePending.load())
+	if (!ctx.releasePending.load())
 		return;
 
-	const uint32_t generation = g_ReleaseGeneration.load();
-	const HWND window = g_InputWindow.load();
+	const uint32_t generation = ctx.releaseGeneration.load();
+	const HWND window = ctx.inputWindow.load();
 	if (window == nullptr || !::IsWindow(window))
 	{
-		ImGuiScope scope;
-		if (ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation))
+		ImGuiScope scope(ctx);
+		if (ClearPendingIfCurrent(ctx.releaseGeneration, ctx.releasePending, generation))
 		{
-			g_HoldInput.store(false);
-			g_ForwardedButtons.store(0);
-			g_OverlayOwnsCapture.store(false);
+			ctx.holdInput.store(false);
+			ctx.forwardedButtons.store(0);
+			ctx.overlayOwnsCapture.store(false);
 		}
 		return;
 	}
@@ -168,8 +277,8 @@ static void DeliverPendingRelease()
 	const UINT message = OverlayReleaseMessage();
 	if (message == 0)
 	{
-		ImGuiScope scope;
-		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
+		ImGuiScope scope(ctx);
+		ClearPendingIfCurrent(ctx.releaseGeneration, ctx.releasePending, generation);
 		return;
 	}
 
@@ -177,50 +286,26 @@ static void DeliverPendingRelease()
 	{
 		// Same lock as RequestOverlayRelease. The generation check and the clear
 		// must not straddle a newer hide, or that hide is never posted and input stays held.
-		ImGuiScope scope;
-		ClearPendingIfCurrent(g_ReleaseGeneration, g_ReleasePending, generation);
+		ImGuiScope scope(ctx);
+		ClearPendingIfCurrent(ctx.releaseGeneration, ctx.releasePending, generation);
 		return;
 	}
 
-	const int attempt = g_ReleaseAttempts.fetch_add(1) + 1;
+	const int attempt = ctx.releaseAttempts.fetch_add(1) + 1;
 	if (attempt <= 8)
 		HydraHookEngineLogError("Couldn't post overlay input release (error %lu)", ::GetLastError());
 }
 
 // Asks the scene what to do this frame. Losing input acceptance queues the same release as hiding.
 // Returns whether the scene should render.
-static bool BeginOverlayFrame()
+static bool BeginOverlayFrame(OverlayHostContext& ctx)
 {
-	const OverlayFrameState state = UpdateOverlayState();
-	if (g_AcceptInput.exchange(state.acceptInput) && !state.acceptInput)
-		RequestOverlayRelease();
-	DeliverPendingRelease();
+	const OverlayFrameState state = UpdateOverlayState(ctx.scene);
+	if (ctx.acceptInput.exchange(state.acceptInput) && !state.acceptInput)
+		RequestOverlayRelease(ctx);
+	DeliverPendingRelease(ctx);
 	return state.render;
 }
-
-static HYDRAHOOK_D3D_VERSION g_GameVersion = HydraHookDirect3DVersionUnknown;
-
-// Per-backend render-path init guards; reset on unhook so a rehook re-initializes.
-static ResettableInitGuard g_d3d9InitGuard;
-static ResettableInitGuard g_d3d10InitGuard;
-static ResettableInitGuard g_d3d11InitGuard;
-#ifdef _WIN64
-static ResettableInitGuard g_d3d12InitGuard;
-#endif
-
-#ifdef _WIN64
-static void D3D12_CleanupOverlayResources();
-static void D3D12_CleanupInitResources();
-static bool D3D12_WaitForGpu(DWORD timeoutMs = INFINITE);
-#endif
-
-using Microsoft::WRL::ComPtr;
-
-static ComPtr<ID3D10Device> g_d3d10Device;
-static ComPtr<ID3D10RenderTargetView> g_d3d10Target;
-static ComPtr<ID3D11Device> g_d3d11Device;
-static ComPtr<ID3D11DeviceContext> g_d3d11Context;
-static ComPtr<ID3D11RenderTargetView> g_d3d11Target;
 
 template<typename Context>
 struct ShaderResourceStage
@@ -298,9 +383,10 @@ HYDRAHOOK_DEFINE_DLLMAIN(
 )
 
 /**
- * @brief Initializes ImGui and registers Direct3D event callbacks for the detected rendering version.
+ * @brief Allocates the engine-bound context, initializes ImGui and registers Direct3D event callbacks.
  *
- * Creates a Dear ImGui context, applies default styling, prepares per-API callback structures
+ * Allocates one custom-context block that holds the host state followed by the scene's state,
+ * creates a Dear ImGui context, applies default styling, prepares per-API callback structures
  * for D3D9/D3D10/D3D11 (and D3D12 on 64-bit builds) and registers the appropriate callbacks
  * with the provided HydraHook engine according to the detected GameVersion.
  *
@@ -312,18 +398,34 @@ void EvtHydraHookGameHooked(
 	const HYDRAHOOK_D3D_VERSION GameVersion
 )
 {
-	// Present, Present1 and resize hooks can announce the same renderer.
-	if (g_GameVersion != HydraHookDirect3DVersionUnknown)
+	// Present, Present1 and resize hooks can announce the same renderer. A context kept alive
+	// after an incomplete unhook also lands here and must not be replaced.
+	if (HydraHookEngineGetCustomContext(EngineHandle) != nullptr)
 		return;
 
 	HydraHookEngineLogInfo("Loading ImGui plugin");
+
+	constexpr size_t hostSize = AlignUp(sizeof(OverlayHostContext), alignof(std::max_align_t));
+	PVOID memory = nullptr;
+	if (HydraHookEngineAllocCustomContext(EngineHandle, &memory, hostSize + OverlaySceneContextSize())
+		!= HYDRAHOOK_ERROR_NONE || !memory)
+	{
+		HydraHookEngineLogError("Failed to allocate custom context for the ImGui host");
+		return;
+	}
+
+	// Placement new: both contexts have non-trivial members.
+	auto* ctx = new (memory) OverlayHostContext();
+	ctx->engine = EngineHandle;
+	ctx->scene = reinterpret_cast<OverlaySceneContext*>(static_cast<uint8_t*>(memory) + hostSize);
+	OverlaySceneConstruct(ctx->scene);
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	// Setup Dear ImGui style
 	ImGui::StyleColorsDark();
-	OnOverlayContextCreated(io);
+	OnOverlayContextCreated(ctx->scene, io);
 
 	HYDRAHOOK_D3D9_EVENT_CALLBACKS d3d9;
 	HYDRAHOOK_D3D9_EVENT_CALLBACKS_INIT(&d3d9);
@@ -352,7 +454,7 @@ void EvtHydraHookGameHooked(
 	d3d12.EvtHydraHookD3D12PostResizeBuffers = EvtHydraHookD3D12PostResizeBuffers;
 #endif
 
-	g_GameVersion = GameVersion;
+	ctx->gameVersion = GameVersion;
 
 	switch (GameVersion)
 	{
@@ -378,6 +480,7 @@ void EvtHydraHookGameHooked(
  *
  * \brief   Gets called when all core engine hooks have been released. At this stage it is safe
  *          to remove our own additional hooks and shut down the hooking sub-system as well.
+ *          The engine context is only released when nothing can still reference it.
  *
  * \author  Benjamin "Nefarius" Höglinger
  * \date    16.06.2018
@@ -385,7 +488,9 @@ void EvtHydraHookGameHooked(
 void EvtHydraHookGameUnhooked(
 	PHYDRAHOOK_ENGINE EngineHandle)
 {
-	(void)EngineHandle;
+	auto* ctx = static_cast<OverlayHostContext*>(HydraHookEngineGetCustomContext(EngineHandle));
+	if (!ctx)
+		return;
 
 	HydraHookEngineLogInfo("Unhooking ImGui overlay");
 
@@ -393,81 +498,91 @@ void EvtHydraHookGameUnhooked(
 	// A handler that called unhook itself, stalled past the timeout, or could not yet process
 	// the capture-release message cannot be waited on; destroying the context under it is a
 	// use-after-free, so only drop our own render targets when GPU completion is confirmed.
-	if (!UnhookWindowProc())
+	if (!UnhookWindowProc(*ctx))
 	{
 		HydraHookEngineLogError("WNDPROC unhook did not drain in-flight message handlers; leaving the ImGui context alive");
-		g_d3d10Target.Reset();
-		g_d3d11Target.Reset();
+		// Render targets are only dropped once no render callback can still use them.
+		if (!HydraHookEngineAreCallbacksDrained(EngineHandle))
+			return;
+		ctx->d3d10Target.Reset();
+		ctx->d3d11Target.Reset();
 #ifdef _WIN64
-		if (D3D12_WaitForGpu(1000))
-			D3D12_CleanupOverlayResources();
+		if (D3D12_WaitForGpu(*ctx, 1000))
+			D3D12_CleanupOverlayResources(*ctx);
 		else
 			HydraHookEngineLogError("Skipping D3D12 overlay resource release on unhook because GPU wait did not complete");
 #endif
 		return;
 	}
 
-	ImGuiScope imguiShutdown;
-
-	// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
-	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
+	// A render callback that outlived the engine's drain timeout may still hold the context.
+	// Leave ImGui and the context allocated; the engine releases the memory when it is destroyed.
+	if (!HydraHookEngineAreCallbacksDrained(EngineHandle))
 	{
-		switch (g_GameVersion)
+		HydraHookEngineLogError("Render callbacks did not drain; leaving the ImGui context alive");
+		return;
+	}
+
+	{
+		ImGuiScope imguiShutdown(*ctx);
+
+		// Shutdown ImGui backend based on detected game version (order: backend first, then Win32, then context)
+		if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		{
-		case HydraHookDirect3DVersion9:
-			ImGui_ImplDX9_Shutdown();
-			break;
-		case HydraHookDirect3DVersion10:
-			ImGui_ImplDX10_Shutdown();
-			break;
-		case HydraHookDirect3DVersion11:
-			ImGui_ImplDX11_Shutdown();
-			break;
-#ifdef _WIN64
-		case HydraHookDirect3DVersion12:
-			if (!D3D12_WaitForGpu(1000))
+			switch (ctx->gameVersion)
 			{
-				HydraHookEngineLogError("Skipping D3D12 ImGui shutdown, context destruction, and resource release on unhook because GPU wait did not complete");
-				g_AcceptInput.store(false);
-				return;
+			case HydraHookDirect3DVersion9:
+				ImGui_ImplDX9_Shutdown();
+				break;
+			case HydraHookDirect3DVersion10:
+				ImGui_ImplDX10_Shutdown();
+				break;
+			case HydraHookDirect3DVersion11:
+				ImGui_ImplDX11_Shutdown();
+				break;
+#ifdef _WIN64
+			case HydraHookDirect3DVersion12:
+				if (!D3D12_WaitForGpu(*ctx, 1000))
+				{
+					HydraHookEngineLogError("Skipping D3D12 ImGui shutdown, context destruction, and resource release on unhook because GPU wait did not complete");
+					ctx->acceptInput.store(false);
+					return;
+				}
+				ImGui_ImplDX12_Shutdown();
+				break;
+#endif
+			default:
+				break;
 			}
-			ImGui_ImplDX12_Shutdown();
-			break;
-#endif
-		default:
-			break;
 		}
-	}
 
-	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendPlatformUserData)
-		ImGui_ImplWin32_Shutdown();
-	if (ImGui::GetCurrentContext() != nullptr)
-	{
-		ImGui::DestroyContext();
-	}
+		if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendPlatformUserData)
+			ImGui_ImplWin32_Shutdown();
+		if (ImGui::GetCurrentContext() != nullptr)
+		{
+			ImGui::DestroyContext();
+		}
 
-	g_d3d10Target.Reset();
-	g_d3d10Device.Reset();
-	g_d3d11Target.Reset();
-	g_d3d11Context.Reset();
-	g_d3d11Device.Reset();
+		ctx->d3d10Target.Reset();
+		ctx->d3d10Device.Reset();
+		ctx->d3d11Target.Reset();
+		ctx->d3d11Context.Reset();
+		ctx->d3d11Device.Reset();
 
 #ifdef _WIN64
-	// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
-	D3D12_CleanupInitResources();
+		// Release D3D12 overlay resources (device, queue, heaps, etc. created by overlay)
+		D3D12_CleanupInitResources(*ctx);
 #endif
 
-	// Allow render callbacks to re-initialize on a rehook without a DLL reload
-	g_d3d9InitGuard.Reset();
-	g_d3d10InitGuard.Reset();
-	g_d3d11InitGuard.Reset();
-#ifdef _WIN64
-	g_d3d12InitGuard.Reset();
-#endif
+		ctx->acceptInput.store(false);
+		OnOverlayShutdown(ctx->scene);
+	}
 
-	g_AcceptInput.store(false);
-	OnOverlayShutdown();
-	g_GameVersion = HydraHookDirect3DVersionUnknown;
+	// Window procedures are restored and drained and the render hooks are gone: nothing
+	// resolves the context anymore. A rehook announces the renderer again and allocates anew.
+	OverlaySceneDestroy(ctx->scene);
+	ctx->~OverlayHostContext();
+	HydraHookEngineFreeCustomContext(EngineHandle);
 }
 
 #pragma region D3D9(Ex)
@@ -480,10 +595,15 @@ void EvtHydraHookD3D9Present(
 	const RGNDATA       *pDirtyRegion
 )
 {
+	OverlayHostContext* pCtx = HostFromD3D9Device(pDevice);
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
+
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	const bool initialized = g_d3d9InitGuard.EnsureInitialized([&]()
+	const bool initialized = ctx.d3d9InitGuard.EnsureInitialized([&]()
 	{
 		D3DDEVICE_CREATION_PARAMETERS params;
 
@@ -499,7 +619,7 @@ void EvtHydraHookD3D9Present(
 
 		HydraHookEngineLogInfo("ImGui (DX9) initialized");
 
-		HookWindowProc(params.hFocusWindow);
+		HookWindowProc(ctx, params.hFocusWindow);
 
 		return true;
 	});
@@ -507,17 +627,17 @@ void EvtHydraHookD3D9Present(
 	if (!initialized)
 		return;
 
-	if (!BeginOverlayFrame())
+	if (!BeginOverlayFrame(ctx))
 		return;
 
-	ImGuiScope imguiFrame;
+	ImGuiScope imguiFrame(ctx);
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	RenderScene();
+	RenderScene(ctx.scene);
 
 	if (SUCCEEDED(pDevice->BeginScene()))
 	{
@@ -531,7 +651,10 @@ void EvtHydraHookD3D9PreReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	ImGuiScope imguiDevice;
+	OverlayHostContext* ctx = HostFromD3D9Device(pDevice);
+	if (!ctx)
+		return;
+	ImGuiScope imguiDevice(*ctx);
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
@@ -541,7 +664,10 @@ void EvtHydraHookD3D9PostReset(
 	D3DPRESENT_PARAMETERS   *pPresentationParameters
 )
 {
-	ImGuiScope imguiDevice;
+	OverlayHostContext* ctx = HostFromD3D9Device(pDevice);
+	if (!ctx)
+		return;
+	ImGuiScope imguiDevice(*ctx);
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
@@ -565,7 +691,10 @@ void EvtHydraHookD3D9PreResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	ImGuiScope imguiDevice;
+	OverlayHostContext* ctx = HostFromD3D9Device(pDevice);
+	if (!ctx)
+		return;
+	ImGuiScope imguiDevice(*ctx);
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_InvalidateDeviceObjects();
 }
@@ -576,7 +705,10 @@ void EvtHydraHookD3D9PostResetEx(
 	D3DDISPLAYMODEEX        *pFullscreenDisplayMode
 )
 {
-	ImGuiScope imguiDevice;
+	OverlayHostContext* ctx = HostFromD3D9Device(pDevice);
+	if (!ctx)
+		return;
+	ImGuiScope imguiDevice(*ctx);
 	if (ImGui::GetCurrentContext() && ImGui::GetIO().BackendRendererUserData)
 		ImGui_ImplDX9_CreateDeviceObjects();
 }
@@ -594,14 +726,19 @@ void EvtHydraHookD3D10Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
+	OverlayHostContext* pCtx = HostFromD3D10SwapChain(pSwapChain);
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
+
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	const bool initialized = g_d3d10InitGuard.EnsureInitialized([&]()
+	const bool initialized = ctx.d3d10InitGuard.EnsureInitialized([&]()
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pSwapChain, &g_d3d10Device)))
+		if (FAILED(D3D10_DEVICE_FROM_SWAPCHAIN(pSwapChain, &ctx.d3d10Device)))
 		{
 			HydraHookEngineLogError("Couldn't get device from swapchain");
 			return false;
@@ -613,11 +750,11 @@ void EvtHydraHookD3D10Present(
 		HydraHookEngineLogInfo("Initializing ImGui");
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
-		ImGui_ImplDX10_Init(g_d3d10Device.Get());
+		ImGui_ImplDX10_Init(ctx.d3d10Device.Get());
 
 		HydraHookEngineLogInfo("ImGui (DX10) initialized");
 
-		HookWindowProc(sd.OutputWindow);
+		HookWindowProc(ctx, sd.OutputWindow);
 
 		return true;
 	});
@@ -625,10 +762,10 @@ void EvtHydraHookD3D10Present(
 	if (!initialized)
 		return;
 
-	if (!BeginOverlayFrame())
+	if (!BeginOverlayFrame(ctx))
 		return;
 
-	ImGuiScope imguiFrame;
+	ImGuiScope imguiFrame(ctx);
 
 
 	// Start the Dear ImGui frame
@@ -636,10 +773,10 @@ void EvtHydraHookD3D10Present(
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	RenderScene();
+	RenderScene(ctx.scene);
 
-	DrawToBackBuffer<ID3D10Resource, ID3D10DepthStencilView, ID3D10ShaderResourceView>(pSwapChain, g_d3d10Device.Get(),
-		g_d3d10Device.Get(), g_d3d10Target, d3d10Stages, ImGui_ImplDX10_RenderDrawData);
+	DrawToBackBuffer<ID3D10Resource, ID3D10DepthStencilView, ID3D10ShaderResourceView>(pSwapChain, ctx.d3d10Device.Get(),
+		ctx.d3d10Device.Get(), ctx.d3d10Target, d3d10Stages, ImGui_ImplDX10_RenderDrawData);
 }
 
 void EvtHydraHookD3D10PreResizeBuffers(
@@ -651,7 +788,8 @@ void EvtHydraHookD3D10PreResizeBuffers(
 	UINT            SwapChainFlags
 )
 {
-	g_d3d10Target.Reset();
+	if (OverlayHostContext* ctx = HostFromD3D10SwapChain(pSwapChain))
+		ctx->d3d10Target.Reset();
 }
 
 #pragma endregion
@@ -668,14 +806,19 @@ void EvtHydraHookD3D11Present(
 	if (Flags & DXGI_PRESENT_TEST)
 		return;
 
+	OverlayHostContext* pCtx = HostFromExtension(Extension);
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
+
 	//
 	// This section is only called once to initialize ImGui
 	// 
-	const bool initialized = g_d3d11InitGuard.EnsureInitialized([&]()
+	const bool initialized = ctx.d3d11InitGuard.EnsureInitialized([&]()
 	{
 		HydraHookEngineLogInfo("Grabbing device and context pointers");
 
-		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pSwapChain, &g_d3d11Device, &g_d3d11Context)))
+		if (FAILED(D3D11_DEVICE_IMMEDIATE_CONTEXT_FROM_SWAPCHAIN(pSwapChain, &ctx.d3d11Device, &ctx.d3d11Context)))
 		{
 			HydraHookEngineLogError("Couldn't get device and context from swapchain");
 			return false;
@@ -687,11 +830,11 @@ void EvtHydraHookD3D11Present(
 		HydraHookEngineLogInfo("Initializing ImGui");
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
-		ImGui_ImplDX11_Init(g_d3d11Device.Get(), g_d3d11Context.Get());
+		ImGui_ImplDX11_Init(ctx.d3d11Device.Get(), ctx.d3d11Context.Get());
 
 		HydraHookEngineLogInfo("ImGui (DX11) initialized");
 
-		HookWindowProc(sd.OutputWindow);
+		HookWindowProc(ctx, sd.OutputWindow);
 
 		return true;
 	});
@@ -699,20 +842,20 @@ void EvtHydraHookD3D11Present(
 	if (!initialized)
 		return;
 
-	if (!BeginOverlayFrame())
+	if (!BeginOverlayFrame(ctx))
 		return;
 
-	ImGuiScope imguiFrame;
+	ImGuiScope imguiFrame(ctx);
 
 	// Start the Dear ImGui frame
 	ImGui_ImplDX11_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	RenderScene();
+	RenderScene(ctx.scene);
 
-	DrawToBackBuffer<ID3D11Resource, ID3D11DepthStencilView, ID3D11ShaderResourceView>(pSwapChain, g_d3d11Device.Get(),
-		g_d3d11Context.Get(), g_d3d11Target, d3d11Stages, ImGui_ImplDX11_RenderDrawData);
+	DrawToBackBuffer<ID3D11Resource, ID3D11DepthStencilView, ID3D11ShaderResourceView>(pSwapChain, ctx.d3d11Device.Get(),
+		ctx.d3d11Context.Get(), ctx.d3d11Target, d3d11Stages, ImGui_ImplDX11_RenderDrawData);
 }
 
 //
@@ -728,7 +871,8 @@ void EvtHydraHookD3D11PreResizeBuffers(
 	PHYDRAHOOK_EVT_PRE_EXTENSION Extension
 )
 {
-	g_d3d11Target.Reset();
+	if (OverlayHostContext* ctx = HostFromExtension(Extension))
+		ctx->d3d11Target.Reset();
 }
 
 #pragma endregion
@@ -737,52 +881,33 @@ void EvtHydraHookD3D11PreResizeBuffers(
 
 #ifdef _WIN64
 
-static constexpr UINT D3D12_NUM_BACK_BUFFERS = DXGI_MAX_SWAP_CHAIN_BUFFERS;
-static constexpr UINT D3D12_NUM_FRAMES_IN_FLIGHT = 2;
-static constexpr UINT D3D12_SRV_HEAP_SIZE = 64;
-
-static ID3D12Device* g_d3d12_pDevice = nullptr;
-static ID3D12CommandQueue* g_d3d12_pCommandQueue = nullptr;
-static ID3D12CommandAllocator* g_d3d12_pCommandAllocator = nullptr;
-static ID3D12GraphicsCommandList* g_d3d12_pCommandList = nullptr;
-static ID3D12Fence* g_d3d12_pFence = nullptr;
-static HANDLE g_d3d12_hFenceEvent = nullptr;
-static UINT64 g_d3d12_fenceLastSignaledValue = 0;
-static bool g_d3d12_fenceSignalFailed = false;
-static bool g_d3d12_overlayReleasedForResize = false;
-static ID3D12DescriptorHeap* g_d3d12_pRtvDescHeap = nullptr;
-static ID3D12DescriptorHeap* g_d3d12_pSrvDescHeap = nullptr;
-static ID3D12Resource* g_d3d12_mainRenderTargetResource[D3D12_NUM_BACK_BUFFERS] = {};
-static D3D12_CPU_DESCRIPTOR_HANDLE g_d3d12_mainRenderTargetDescriptor[D3D12_NUM_BACK_BUFFERS] = {};
-static UINT g_d3d12_rtvDescriptorSize = 0;
-static UINT g_d3d12_srvDescriptorIncrement = 0;
-static UINT g_d3d12_numBackBuffers = D3D12_NUM_BACK_BUFFERS;
-static UINT g_d3d12_srvDescriptorCount = 0;
-
 /**
  * @brief Allocates the next available shader-visible SRV descriptor from the internal DX12 descriptor heap.
  *
- * Produces CPU and GPU descriptor handles for a new SRV and advances g_d3d12_srvDescriptorCount.
- * When the heap is exhausted (g_d3d12_srvDescriptorCount >= D3D12_SRV_HEAP_SIZE), the function
+ * Produces CPU and GPU descriptor handles for a new SRV and advances the context's descriptor count.
+ * When the heap is exhausted (count >= D3D12_SRV_HEAP_SIZE), the function
  * zeroes *out_cpu and *out_gpu and returns; callers receive zeroed handles on allocation failure.
+ * The context arrives through ImGui_ImplDX12_InitInfo::UserData.
  *
+ * @param info ImGui DX12 init info whose UserData points to the OverlayHostContext.
  * @param out_cpu Pointer to receive the CPU descriptor handle for the allocated SRV.
  * @param out_gpu Pointer to receive the GPU descriptor handle for the allocated SRV.
  */
 static void D3D12_SrvDescriptorAlloc(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
 {
-	(void)info;
-	if (g_d3d12_srvDescriptorCount >= D3D12_SRV_HEAP_SIZE)
+	auto* ctx = static_cast<OverlayHostContext*>(info->UserData);
+	if (!ctx || ctx->d3d12.srvDescriptorCount >= D3D12_SRV_HEAP_SIZE)
 	{
 		*out_cpu = {};
 		*out_gpu = {};
 		return;
 	}
-	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_d3d12_pSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
-	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_d3d12_pSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
-	cpu.ptr += g_d3d12_srvDescriptorCount * g_d3d12_srvDescriptorIncrement;
-	gpu.ptr += g_d3d12_srvDescriptorCount * g_d3d12_srvDescriptorIncrement;
-	g_d3d12_srvDescriptorCount++;
+	auto& d = ctx->d3d12;
+	D3D12_CPU_DESCRIPTOR_HANDLE cpu = d.pSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
+	D3D12_GPU_DESCRIPTOR_HANDLE gpu = d.pSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
+	cpu.ptr += d.srvDescriptorCount * d.srvDescriptorIncrement;
+	gpu.ptr += d.srvDescriptorCount * d.srvDescriptorIncrement;
+	d.srvDescriptorCount++;
 	*out_cpu = cpu;
 	*out_gpu = gpu;
 }
@@ -804,8 +929,6 @@ static void D3D12_SrvDescriptorFree(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DES
 	(void)gpu_handle;
 }
 
-static void D3D12_CleanupOverlayResources();
-
 /**
  * @brief Creates RTV descriptor heap and render target views for the swap chain's back buffers.
  *
@@ -814,8 +937,9 @@ static void D3D12_CleanupOverlayResources();
  *
  * @return true on success, false on failure.
  */
-static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain)
+static bool D3D12_CreateOverlayResources(OverlayHostContext& ctx, IDXGISwapChain* pSwapChain)
 {
+	auto& d = ctx.d3d12;
 	ID3D12Resource* pBackBuffer = nullptr;
 	if (FAILED(D3D12_BACKBUFFER_FROM_SWAPCHAIN(pSwapChain, &pBackBuffer, 0)))
 	{
@@ -825,39 +949,39 @@ static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain)
 
 	DXGI_SWAP_CHAIN_DESC sd;
 	pSwapChain->GetDesc(&sd);
-	g_d3d12_numBackBuffers = sd.BufferCount;
-	if (g_d3d12_numBackBuffers > D3D12_NUM_BACK_BUFFERS)
-		g_d3d12_numBackBuffers = D3D12_NUM_BACK_BUFFERS;
+	d.numBackBuffers = sd.BufferCount;
+	if (d.numBackBuffers > D3D12_NUM_BACK_BUFFERS)
+		d.numBackBuffers = D3D12_NUM_BACK_BUFFERS;
 
 	D3D12_DESCRIPTOR_HEAP_DESC rtvDesc = {};
 	rtvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-	rtvDesc.NumDescriptors = g_d3d12_numBackBuffers;
+	rtvDesc.NumDescriptors = d.numBackBuffers;
 	rtvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	rtvDesc.NodeMask = 1;
-	if (FAILED(g_d3d12_pDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&g_d3d12_pRtvDescHeap))))
+	if (FAILED(d.pDevice->CreateDescriptorHeap(&rtvDesc, IID_PPV_ARGS(&d.pRtvDescHeap))))
 	{
 		pBackBuffer->Release();
 		HydraHookEngineLogError("Couldn't create RTV descriptor heap");
 		return false;
 	}
 
-	g_d3d12_rtvDescriptorSize = g_d3d12_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_d3d12_pRtvDescHeap->GetCPUDescriptorHandleForHeapStart();
+	d.rtvDescriptorSize = d.pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = d.pRtvDescHeap->GetCPUDescriptorHandleForHeapStart();
 
-	for (UINT i = 0; i < g_d3d12_numBackBuffers; i++)
+	for (UINT i = 0; i < d.numBackBuffers; i++)
 	{
 		ID3D12Resource* pBuffer = nullptr;
 		if (FAILED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(&pBuffer))))
 		{
-			D3D12_CleanupOverlayResources();
+			D3D12_CleanupOverlayResources(ctx);
 			pBackBuffer->Release();
 			HydraHookEngineLogError("Couldn't get swap chain buffer %u", i);
 			return false;
 		}
-		g_d3d12_pDevice->CreateRenderTargetView(pBuffer, nullptr, rtvHandle);
-		g_d3d12_mainRenderTargetResource[i] = pBuffer;
-		g_d3d12_mainRenderTargetDescriptor[i] = rtvHandle;
-		rtvHandle.ptr += g_d3d12_rtvDescriptorSize;
+		d.pDevice->CreateRenderTargetView(pBuffer, nullptr, rtvHandle);
+		d.mainRenderTargetResource[i] = pBuffer;
+		d.mainRenderTargetDescriptor[i] = rtvHandle;
+		rtvHandle.ptr += d.rtvDescriptorSize;
 	}
 	pBackBuffer->Release();
 	return true;
@@ -866,24 +990,25 @@ static bool D3D12_CreateOverlayResources(IDXGISwapChain* pSwapChain)
 /**
  * @brief Releases and clears D3D12 overlay render target resources and the RTV descriptor heap.
  *
- * Frees any back-buffer resources stored in g_d3d12_mainRenderTargetResource (up to
- * g_d3d12_numBackBuffers) and releases the g_d3d12_pRtvDescHeap, setting the freed pointers to nullptr.
+ * Frees any back-buffer resources stored in the context (up to numBackBuffers) and releases
+ * the RTV descriptor heap, setting the freed pointers to nullptr.
  */
-static void D3D12_CleanupOverlayResources()
+static void D3D12_CleanupOverlayResources(OverlayHostContext& ctx)
 {
-	for (UINT i = 0; i < g_d3d12_numBackBuffers; i++)
+	auto& d = ctx.d3d12;
+	for (UINT i = 0; i < d.numBackBuffers; i++)
 	{
-		if (g_d3d12_mainRenderTargetResource[i])
+		if (d.mainRenderTargetResource[i])
 		{
-			g_d3d12_mainRenderTargetResource[i]->Release();
-			g_d3d12_mainRenderTargetResource[i] = nullptr;
+			d.mainRenderTargetResource[i]->Release();
+			d.mainRenderTargetResource[i] = nullptr;
 		}
-		g_d3d12_mainRenderTargetDescriptor[i] = {};
+		d.mainRenderTargetDescriptor[i] = {};
 	}
-	if (g_d3d12_pRtvDescHeap)
+	if (d.pRtvDescHeap)
 	{
-		g_d3d12_pRtvDescHeap->Release();
-		g_d3d12_pRtvDescHeap = nullptr;
+		d.pRtvDescHeap->Release();
+		d.pRtvDescHeap = nullptr;
 	}
 }
 
@@ -891,74 +1016,76 @@ static void D3D12_CleanupOverlayResources()
  * @brief Releases all D3D12 init resources (device, queue, allocator, list, fence, heaps).
  * Call before early return from the initialization block to avoid leaks.
  */
-static void D3D12_CleanupInitResources()
+static void D3D12_CleanupInitResources(OverlayHostContext& ctx)
 {
-	D3D12_CleanupOverlayResources();
-	if (g_d3d12_pSrvDescHeap) { g_d3d12_pSrvDescHeap->Release(); g_d3d12_pSrvDescHeap = nullptr; }
-	if (g_d3d12_hFenceEvent) { CloseHandle(g_d3d12_hFenceEvent); g_d3d12_hFenceEvent = nullptr; }
-	if (g_d3d12_pFence) { g_d3d12_pFence->Release(); g_d3d12_pFence = nullptr; }
-	if (g_d3d12_pCommandList) { g_d3d12_pCommandList->Release(); g_d3d12_pCommandList = nullptr; }
-	if (g_d3d12_pCommandAllocator) { g_d3d12_pCommandAllocator->Release(); g_d3d12_pCommandAllocator = nullptr; }
-	if (g_d3d12_pCommandQueue) { g_d3d12_pCommandQueue->Release(); g_d3d12_pCommandQueue = nullptr; }
-	if (g_d3d12_pDevice) { g_d3d12_pDevice->Release(); g_d3d12_pDevice = nullptr; }
+	auto& d = ctx.d3d12;
+	D3D12_CleanupOverlayResources(ctx);
+	if (d.pSrvDescHeap) { d.pSrvDescHeap->Release(); d.pSrvDescHeap = nullptr; }
+	if (d.hFenceEvent) { CloseHandle(d.hFenceEvent); d.hFenceEvent = nullptr; }
+	if (d.pFence) { d.pFence->Release(); d.pFence = nullptr; }
+	if (d.pCommandList) { d.pCommandList->Release(); d.pCommandList = nullptr; }
+	if (d.pCommandAllocator) { d.pCommandAllocator->Release(); d.pCommandAllocator = nullptr; }
+	if (d.pCommandQueue) { d.pCommandQueue->Release(); d.pCommandQueue = nullptr; }
+	if (d.pDevice) { d.pDevice->Release(); d.pDevice = nullptr; }
 
 	// Scalar state must not leak into the next init (new fence starts at 0, heap is recreated)
-	g_d3d12_fenceLastSignaledValue = 0;
-	g_d3d12_fenceSignalFailed = false;
-	g_d3d12_overlayReleasedForResize = false;
-	g_d3d12_srvDescriptorCount = 0;
-	g_d3d12_rtvDescriptorSize = 0;
-	g_d3d12_srvDescriptorIncrement = 0;
-	g_d3d12_numBackBuffers = D3D12_NUM_BACK_BUFFERS;
+	d.fenceLastSignaledValue = 0;
+	d.fenceSignalFailed = false;
+	d.overlayReleasedForResize = false;
+	d.srvDescriptorCount = 0;
+	d.rtvDescriptorSize = 0;
+	d.srvDescriptorIncrement = 0;
+	d.numBackBuffers = D3D12_NUM_BACK_BUFFERS;
 }
 
 /**
  * @brief Blocks the CPU until the GPU has completed work up to the last signaled fence value.
  *
- * Waits on the fence event for g_d3d12_fenceLastSignaledValue (signaled by the caller before invoking).
+ * Waits on the fence event for the context's last signaled fence value (signaled by the caller before invoking).
  *
  * @param timeoutMs Maximum time to wait in milliseconds (defaults to INFINITE).
  * @return true if GPU completion up to the last signaled fence is confirmed (or no fence work was pending);
  *         false if the device was removed, event registration failed, or waiting did not complete.
  */
-static bool D3D12_WaitForGpu(DWORD timeoutMs)
+static bool D3D12_WaitForGpu(OverlayHostContext& ctx, DWORD timeoutMs)
 {
-	if (!g_d3d12_pFence || !g_d3d12_hFenceEvent)
-		return !g_d3d12_fenceSignalFailed;
-	if (g_d3d12_fenceSignalFailed)
+	auto& d = ctx.d3d12;
+	if (!d.pFence || !d.hFenceEvent)
+		return !d.fenceSignalFailed;
+	if (d.fenceSignalFailed)
 	{
-		if (!g_d3d12_pCommandQueue)
+		if (!d.pCommandQueue)
 			return false;
-		const UINT64 retryFence = g_d3d12_fenceLastSignaledValue + 1;
-		const HRESULT retryHr = g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, retryFence);
+		const UINT64 retryFence = d.fenceLastSignaledValue + 1;
+		const HRESULT retryHr = d.pCommandQueue->Signal(d.pFence, retryFence);
 		if (FAILED(retryHr))
 		{
 			HydraHookEngineLogError("Retry ID3D12CommandQueue::Signal failed (0x%08X); GPU completion remains unconfirmed",
 				static_cast<unsigned int>(retryHr));
 			return false;
 		}
-		g_d3d12_fenceLastSignaledValue = retryFence;
-		g_d3d12_fenceSignalFailed = false;
+		d.fenceLastSignaledValue = retryFence;
+		d.fenceSignalFailed = false;
 	}
-	const UINT64 fence = g_d3d12_fenceLastSignaledValue;
+	const UINT64 fence = d.fenceLastSignaledValue;
 	if (fence == 0)
 		return true;
-	const UINT64 completed = g_d3d12_pFence->GetCompletedValue();
+	const UINT64 completed = d.pFence->GetCompletedValue();
 	if (completed == UINT64_MAX)
 		return false;
 	if (completed >= fence)
 		return true;
-	const HRESULT hr = g_d3d12_pFence->SetEventOnCompletion(fence, g_d3d12_hFenceEvent);
+	const HRESULT hr = d.pFence->SetEventOnCompletion(fence, d.hFenceEvent);
 	if (FAILED(hr))
 	{
-		const UINT64 after = g_d3d12_pFence->GetCompletedValue();
+		const UINT64 after = d.pFence->GetCompletedValue();
 		if (after != UINT64_MAX && after >= fence)
 			return true;
 		HydraHookEngineLogError("ID3D12Fence::SetEventOnCompletion failed (0x%08X)", static_cast<unsigned int>(hr));
 		return false;
 	}
-	const DWORD waitResult = WaitForSingleObject(g_d3d12_hFenceEvent, timeoutMs);
-	const UINT64 after = g_d3d12_pFence->GetCompletedValue();
+	const DWORD waitResult = WaitForSingleObject(d.hFenceEvent, timeoutMs);
+	const UINT64 after = d.pFence->GetCompletedValue();
 	if (after != UINT64_MAX && after >= fence)
 		return true;
 	HydraHookEngineLogError("D3D12 GPU fence wait did not complete (result %lu)", waitResult);
@@ -977,7 +1104,7 @@ static bool D3D12_WaitForGpu(DWORD timeoutMs)
  * @param pSwapChain The DXGI swap chain to render the overlay into.
  * @param SyncInterval Ignored by this hook.
  * @param Flags Ignored by this hook.
- * @param Extension Unused hook extension parameter.
+ * @param Extension Hook extension carrying the engine-bound host context.
  */
 void EvtHydraHookD3D12Present(
 	IDXGISwapChain* pSwapChain,
@@ -990,55 +1117,60 @@ void EvtHydraHookD3D12Present(
 		return;
 
 	(void)SyncInterval;
-	(void)Extension;
+
+	OverlayHostContext* pCtx = HostFromExtension(Extension);
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
+	auto& d = ctx.d3d12;
 
 	// Retries on failure: the command queue may not be captured yet (mid-process injection)
-	const bool initialized = g_d3d12InitGuard.EnsureInitialized([&]() -> bool
+	const bool initialized = ctx.d3d12InitGuard.EnsureInitialized([&]() -> bool
 	{
-		ImGuiScope imguiInit;
+		ImGuiScope imguiInit(ctx);
 		HydraHookEngineLogInfo("Grabbing D3D12 device and command queue from swapchain");
 
-		if (FAILED(D3D12_DEVICE_FROM_SWAPCHAIN(pSwapChain, &g_d3d12_pDevice)))
+		if (FAILED(D3D12_DEVICE_FROM_SWAPCHAIN(pSwapChain, &d.pDevice)))
 		{
 			HydraHookEngineLogError("Couldn't get D3D12 device from swapchain");
 			return false;
 		}
 
-		g_d3d12_pCommandQueue = HydraHookEngineGetD3D12CommandQueue(pSwapChain);
-		if (!g_d3d12_pCommandQueue)
+		d.pCommandQueue = HydraHookEngineGetD3D12CommandQueue(pSwapChain);
+		if (!d.pCommandQueue)
 		{
 			HydraHookEngineLogInfo("D3D12 command queue not yet captured (mid-process injection); will retry next frame");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
-		if (FAILED(g_d3d12_pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_d3d12_pCommandAllocator))))
+		if (FAILED(d.pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&d.pCommandAllocator))))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 command allocator");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
-		if (FAILED(g_d3d12_pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_d3d12_pCommandAllocator, nullptr, IID_PPV_ARGS(&g_d3d12_pCommandList))) ||
-			FAILED(g_d3d12_pCommandList->Close()))
+		if (FAILED(d.pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, d.pCommandAllocator, nullptr, IID_PPV_ARGS(&d.pCommandList))) ||
+			FAILED(d.pCommandList->Close()))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 command list");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
-		if (FAILED(g_d3d12_pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_d3d12_pFence))))
+		if (FAILED(d.pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&d.pFence))))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 fence");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
-		g_d3d12_hFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (!g_d3d12_hFenceEvent)
+		d.hFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (!d.hFenceEvent)
 		{
 			HydraHookEngineLogError("Couldn't create fence event");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
@@ -1046,17 +1178,17 @@ void EvtHydraHookD3D12Present(
 		srvDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		srvDesc.NumDescriptors = D3D12_SRV_HEAP_SIZE;
 		srvDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		if (FAILED(g_d3d12_pDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&g_d3d12_pSrvDescHeap))))
+		if (FAILED(d.pDevice->CreateDescriptorHeap(&srvDesc, IID_PPV_ARGS(&d.pSrvDescHeap))))
 		{
 			HydraHookEngineLogError("Couldn't create D3D12 SRV descriptor heap");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
-		g_d3d12_srvDescriptorIncrement = g_d3d12_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		d.srvDescriptorIncrement = d.pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-		if (!D3D12_CreateOverlayResources(pSwapChain))
+		if (!D3D12_CreateOverlayResources(ctx, pSwapChain))
 		{
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
@@ -1064,35 +1196,36 @@ void EvtHydraHookD3D12Present(
 		pSwapChain->GetDesc(&sd);
 
 		ImGui_ImplDX12_InitInfo init_info = {};
-		init_info.Device = g_d3d12_pDevice;
-		init_info.CommandQueue = g_d3d12_pCommandQueue;
+		init_info.Device = d.pDevice;
+		init_info.CommandQueue = d.pCommandQueue;
 		init_info.NumFramesInFlight = D3D12_NUM_FRAMES_IN_FLIGHT;
 		init_info.RTVFormat = sd.BufferDesc.Format;
 		init_info.DSVFormat = DXGI_FORMAT_UNKNOWN;
-		init_info.SrvDescriptorHeap = g_d3d12_pSrvDescHeap;
+		init_info.UserData = &ctx;
+		init_info.SrvDescriptorHeap = d.pSrvDescHeap;
 		init_info.SrvDescriptorAllocFn = D3D12_SrvDescriptorAlloc;
 		init_info.SrvDescriptorFreeFn = D3D12_SrvDescriptorFree;
 
 		if (!ImGui_ImplDX12_Init(&init_info))
 		{
 			HydraHookEngineLogError("ImGui_ImplDX12_Init failed");
-			D3D12_CleanupInitResources();
+			D3D12_CleanupInitResources(ctx);
 			return false;
 		}
 
 		ImGui_ImplWin32_Init(sd.OutputWindow);
 		HydraHookEngineLogInfo("ImGui (DX12) initialized");
-		HookWindowProc(sd.OutputWindow);
+		HookWindowProc(ctx, sd.OutputWindow);
 		return true;
 	}, true);
 
 	if (!initialized)
 		return;
 
-	if (!BeginOverlayFrame())
+	if (!BeginOverlayFrame(ctx))
 		return;
 
-	ImGuiScope imguiFrame;
+	ImGuiScope imguiFrame(ctx);
 
 	UINT backBufferIdx = 0;
 	IDXGISwapChain3* pSwapChain3 = nullptr;
@@ -1101,19 +1234,19 @@ void EvtHydraHookD3D12Present(
 		backBufferIdx = pSwapChain3->GetCurrentBackBufferIndex();
 		pSwapChain3->Release();
 	}
-	if (backBufferIdx >= g_d3d12_numBackBuffers || !g_d3d12_mainRenderTargetResource[backBufferIdx])
+	if (backBufferIdx >= d.numBackBuffers || !d.mainRenderTargetResource[backBufferIdx])
 		return;
 
 	// Only wait when reusing an allocator still in flight. Present can overlap GPU work.
-	if (!D3D12_WaitForGpu())
+	if (!D3D12_WaitForGpu(ctx))
 		return;
 
 	ImGui_ImplDX12_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
-	if (FAILED(g_d3d12_pCommandAllocator->Reset()) ||
-		FAILED(g_d3d12_pCommandList->Reset(g_d3d12_pCommandAllocator, nullptr)))
+	if (FAILED(d.pCommandAllocator->Reset()) ||
+		FAILED(d.pCommandList->Reset(d.pCommandAllocator, nullptr)))
 	{
 		ImGui::EndFrame();
 		return;
@@ -1122,35 +1255,35 @@ void EvtHydraHookD3D12Present(
 	D3D12_RESOURCE_BARRIER barrier = {};
 	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	barrier.Transition.pResource = g_d3d12_mainRenderTargetResource[backBufferIdx];
+	barrier.Transition.pResource = d.mainRenderTargetResource[backBufferIdx];
 	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
 	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-	g_d3d12_pCommandList->ResourceBarrier(1, &barrier);
+	d.pCommandList->ResourceBarrier(1, &barrier);
 
-	g_d3d12_pCommandList->OMSetRenderTargets(1, &g_d3d12_mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
-	g_d3d12_pCommandList->SetDescriptorHeaps(1, &g_d3d12_pSrvDescHeap);
+	d.pCommandList->OMSetRenderTargets(1, &d.mainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
+	d.pCommandList->SetDescriptorHeaps(1, &d.pSrvDescHeap);
 
-	RenderScene();
+	RenderScene(ctx.scene);
 
-	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_d3d12_pCommandList);
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), d.pCommandList);
 
 	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-	g_d3d12_pCommandList->ResourceBarrier(1, &barrier);
-	g_d3d12_pCommandList->Close();
+	d.pCommandList->ResourceBarrier(1, &barrier);
+	d.pCommandList->Close();
 
-	g_d3d12_pCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&g_d3d12_pCommandList);
-	const UINT64 nextFence = g_d3d12_fenceLastSignaledValue + 1;
-	const HRESULT signalHr = g_d3d12_pCommandQueue->Signal(g_d3d12_pFence, nextFence);
+	d.pCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&d.pCommandList);
+	const UINT64 nextFence = d.fenceLastSignaledValue + 1;
+	const HRESULT signalHr = d.pCommandQueue->Signal(d.pFence, nextFence);
 	if (SUCCEEDED(signalHr))
 	{
-		g_d3d12_fenceLastSignaledValue = nextFence;
-		g_d3d12_fenceSignalFailed = false;
+		d.fenceLastSignaledValue = nextFence;
+		d.fenceSignalFailed = false;
 	}
 	else
 	{
-		g_d3d12_fenceSignalFailed = true;
+		d.fenceSignalFailed = true;
 		HydraHookEngineLogError("ID3D12CommandQueue::Signal failed (0x%08X); marking GPU completion unconfirmed",
 			static_cast<unsigned int>(signalHr));
 	}
@@ -1167,7 +1300,7 @@ void EvtHydraHookD3D12Present(
  * @param Height New back buffer height.
  * @param NewFormat New DXGI format for the back buffers.
  * @param SwapChainFlags Flags that affect swap chain behavior.
- * @param Extension Reserved extension data provided by the hook framework.
+ * @param Extension Hook extension carrying the engine-bound host context.
  */
 void EvtHydraHookD3D12PreResizeBuffers(
 	IDXGISwapChain* pSwapChain,
@@ -1185,22 +1318,26 @@ void EvtHydraHookD3D12PreResizeBuffers(
 	(void)Height;
 	(void)NewFormat;
 	(void)SwapChainFlags;
-	(void)Extension;
 
-	ImGuiScope imguiDevice;
-	g_d3d12_overlayReleasedForResize = false;
+	OverlayHostContext* pCtx = HostFromExtension(Extension);
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
+
+	ImGuiScope imguiDevice(ctx);
+	ctx.d3d12.overlayReleasedForResize = false;
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
-	if (!D3D12_WaitForGpu())
+	if (!D3D12_WaitForGpu(ctx))
 	{
 		HydraHookEngineLogError("Skipping D3D12 overlay resize cleanup because GPU wait did not complete");
 		return;
 	}
 	ImGui_ImplDX12_InvalidateDeviceObjects();
-	D3D12_CleanupOverlayResources();
-	g_d3d12_srvDescriptorCount = 0;
-	g_d3d12_overlayReleasedForResize = true;
+	D3D12_CleanupOverlayResources(ctx);
+	ctx.d3d12.srvDescriptorCount = 0;
+	ctx.d3d12.overlayReleasedForResize = true;
 }
 
 /**
@@ -1226,17 +1363,21 @@ void EvtHydraHookD3D12PostResizeBuffers(
 	(void)Height;
 	(void)NewFormat;
 	(void)SwapChainFlags;
-	(void)Extension;
 
-	ImGuiScope imguiDevice;
-	if (!g_d3d12_overlayReleasedForResize)
+	OverlayHostContext* pCtx = HostFromExtension(Extension);
+	if (!pCtx)
 		return;
-	g_d3d12_overlayReleasedForResize = false;
+	OverlayHostContext& ctx = *pCtx;
+
+	ImGuiScope imguiDevice(ctx);
+	if (!ctx.d3d12.overlayReleasedForResize)
+		return;
+	ctx.d3d12.overlayReleasedForResize = false;
 
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendRendererUserData)
 		return;
 
-	if (!D3D12_CreateOverlayResources(pSwapChain))
+	if (!D3D12_CreateOverlayResources(ctx, pSwapChain))
 	{
 		HydraHookEngineLogError("D3D12_CreateOverlayResources failed after resize");
 		return;
@@ -1271,25 +1412,25 @@ static int OverlayButton(UINT msg, WPARAM wParam, bool* down)
 	}
 }
 
-static void ReleaseOverlayInput(HWND hWnd, uint32_t generation, bool force)
+static void ReleaseOverlayInput(OverlayHostContext& ctx, HWND hWnd, uint32_t generation, bool force)
 {
-	if (!force && generation != g_ReleaseGeneration.load())
+	if (!force && generation != ctx.releaseGeneration.load())
 		return;
 
-	ImGuiScope scope;
+	ImGuiScope scope(ctx);
 	// A duplicate post of this hide must not clear input admitted after the first release.
-	if (!ClaimOverlayRelease(g_ReleaseGeneration, g_ReleaseApplied, generation, force))
+	if (!ClaimOverlayRelease(ctx.releaseGeneration, ctx.releaseApplied, generation, force))
 		return;
 
 	if (!ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 	{
-		g_ForwardedButtons.store(0);
-		g_OverlayOwnsCapture.store(false);
+		ctx.forwardedButtons.store(0);
+		ctx.overlayOwnsCapture.store(false);
 	}
 	else
 	{
-		const bool ownedCapture = g_OverlayOwnsCapture.exchange(false);
-		const uint32_t buttons = g_ForwardedButtons.exchange(0);
+		const bool ownedCapture = ctx.overlayOwnsCapture.exchange(false);
+		const uint32_t buttons = ctx.forwardedButtons.exchange(0);
 		// Button-up would ReleaseCapture when the mask hits zero. Clear the private mask
 		// directly so a host-owned capture is left in place and the host sees no WM_CAPTURECHANGED.
 		ClearImGuiWin32Buttons(hWnd, buttons, ownedCapture);
@@ -1300,24 +1441,29 @@ static void ReleaseOverlayInput(HWND hWnd, uint32_t generation, bool force)
 		io.ClearInputKeys();
 	}
 
-	if (force || g_ReleaseGeneration.load() == generation)
+	if (force || ctx.releaseGeneration.load() == generation)
 	{
-		g_ReleasePending.store(false);
-		g_HoldInput.store(false);
+		ctx.releasePending.store(false);
+		ctx.holdInput.store(false);
 	}
 }
 
-static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+// The hook passes the engine handle registered in HookWindowProc as user data.
+static LRESULT ImGuiMessageHandler(void* userData, HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ WndProc hook received first message"); });
+	OverlayHostContext* pCtx = HostFromEngine(static_cast<PHYDRAHOOK_ENGINE>(userData));
+	if (!pCtx)
+		return 0;
+	OverlayHostContext& ctx = *pCtx;
+
+	std::call_once(ctx.wndProcFirstMessage, []() { HydraHookEngineLogInfo("++ WndProc hook received first message"); });
 
 	const UINT releaseMessage = OverlayReleaseMessage();
 	if (releaseMessage != 0 && msg == releaseMessage)
 	{
 		const uint32_t generation = static_cast<uint32_t>(wParam);
 		// wParam 0 is the unhook path and always runs. Hide posts start at 1.
-		ReleaseOverlayInput(hWnd, generation, generation == 0);
+		ReleaseOverlayInput(ctx, hWnd, generation, generation == 0);
 		return 0;
 	}
 
@@ -1325,9 +1471,9 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	// buttons in the backend mask without releasing or taking capture for the host.
 	if (msg == WM_CAPTURECHANGED && reinterpret_cast<HWND>(lParam) != hWnd)
 	{
-		const uint32_t buttons = g_ForwardedButtons.exchange(0);
-		g_OverlayOwnsCapture.store(false);
-		ImGuiScope scope;
+		const uint32_t buttons = ctx.forwardedButtons.exchange(0);
+		ctx.overlayOwnsCapture.store(false);
+		ImGuiScope scope(ctx);
 		ClearImGuiWin32Buttons(hWnd, buttons, false);
 		return 0;
 	}
@@ -1335,25 +1481,25 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	// If unhook closed input while capture or forwarded buttons were still held (for example,
 	// SendMessageTimeoutW timed out and PostMessageW also failed), release directly on the
 	// window-owning thread as soon as any message is pumped, then forward the message normally.
-	if (ShouldFallbackReleaseOnClosedInput(g_InputClosed, g_OverlayOwnsCapture, g_ForwardedButtons))
+	if (ShouldFallbackReleaseOnClosedInput(ctx.inputClosed, ctx.overlayOwnsCapture, ctx.forwardedButtons))
 	{
-		ReleaseOverlayInput(hWnd, 0, true);
+		ReleaseOverlayInput(ctx, hWnd, 0, true);
 		return 0;
 	}
 
 	// Hidden, waiting for a queued release, or tearing down: do not hand new input to ImGui.
-	if (g_HoldInput.load() || g_InputClosed.load() || !g_AcceptInput.load())
+	if (ctx.holdInput.load() || ctx.inputClosed.load() || !ctx.acceptInput.load())
 		return 0;
 
-	ImGuiScope scope;
-	if (g_HoldInput.load() || g_InputClosed.load() || !g_AcceptInput.load()
+	ImGuiScope scope(ctx);
+	if (ctx.holdInput.load() || ctx.inputClosed.load() || !ctx.acceptInput.load()
 		|| !ImGui::GetCurrentContext() || !ImGui::GetIO().BackendPlatformUserData)
 		return 0;
 
 	bool down = false;
 	const int button = OverlayButton(msg, wParam, &down);
 	const HWND capturedBefore = button >= 0 ? ::GetCapture() : nullptr;
-	const bool ownedCapture = g_OverlayOwnsCapture.load();
+	const bool ownedCapture = ctx.overlayOwnsCapture.load();
 	// A host-owned capture must not go through the backend's button-up path: that path
 	// calls ReleaseCapture when the mask hits zero and the host observes WM_CAPTURECHANGED.
 	const bool keepHostCapture = button >= 0 && !down && !ownedCapture && capturedBefore == hWnd;
@@ -1367,15 +1513,15 @@ static LRESULT ImGuiMessageHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 	{
 		if (down)
 		{
-			g_ForwardedButtons.fetch_or(1u << button);
+			ctx.forwardedButtons.fetch_or(1u << button);
 			if (capturedBefore == nullptr && ::GetCapture() == hWnd)
-				g_OverlayOwnsCapture.store(true);
+				ctx.overlayOwnsCapture.store(true);
 		}
 		else
 		{
-			const uint32_t left = g_ForwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
+			const uint32_t left = ctx.forwardedButtons.fetch_and(~(1u << button)) & ~(1u << button);
 			if (left == 0)
-				g_OverlayOwnsCapture.store(false);
+				ctx.overlayOwnsCapture.store(false);
 		}
 	}
 
@@ -1393,9 +1539,10 @@ static void WindowProcHookLogError(const char* message)
  * Validates the handle, stores the original WNDPROC per window and forwards unhandled
  * messages with CallWindowProcW. See WindowProcHook.h for threading and teardown rules.
  *
+ * @param ctx Host context that records the input window and resets the input state.
  * @param hWnd Handle to the target window whose window procedure will be hooked.
  */
-void HookWindowProc(HWND hWnd)
+static void HookWindowProc(OverlayHostContext& ctx, HWND hWnd)
 {
 	if (OverlayReleaseMessage() == 0)
 	{
@@ -1403,15 +1550,15 @@ void HookWindowProc(HWND hWnd)
 		return;
 	}
 
-	g_InputClosed.store(false);
-	g_HoldInput.store(false);
+	ctx.inputClosed.store(false);
+	ctx.holdInput.store(false);
 	auto& hook = WindowProcHook::Instance();
 	hook.SetErrorLogger(WindowProcHookLogError);
-	hook.SetMessageHandler(ImGuiMessageHandler);
+	hook.SetMessageHandler(ImGuiMessageHandler, ctx.engine);
 
 	if (hook.Hook(hWnd))
 	{
-		g_InputWindow.store(hWnd);
+		ctx.inputWindow.store(hWnd);
 		HydraHookEngineLogInfo("WNDPROC hook installed");
 	}
 	else
@@ -1421,37 +1568,40 @@ void HookWindowProc(HWND hWnd)
 void EvtHydraHookGamePreExit(
 	PHYDRAHOOK_ENGINE EngineHandle)
 {
-	(void)EngineHandle;
+	auto* pCtx = static_cast<OverlayHostContext*>(HydraHookEngineGetCustomContext(EngineHandle));
+	if (!pCtx)
+		return;
+	OverlayHostContext& ctx = *pCtx;
 
 	// Runs on the thread initiating shutdown (for PostQuitMessage, usually the window thread)
 	// before PerformShutdownCleanup blocks waiting on the worker thread. Close overlay input and
 	// release any capture here so UnhookWindowProc does not need a cross-thread SendMessage.
-	g_ReleasePending.store(false);
-	g_HoldInput.store(true);
-	g_InputClosed.store(true);
+	ctx.releasePending.store(false);
+	ctx.holdInput.store(true);
+	ctx.inputClosed.store(true);
 
-	// Bound mutex acquisition so a stalled render thread holding g_ImGuiMutex cannot hang exit.
-	ImGuiScope scope(std::chrono::milliseconds(50));
+	// Bound mutex acquisition so a stalled render thread holding the ImGui lock cannot hang exit.
+	ImGuiScope scope(ctx, std::chrono::milliseconds(50));
 	if (!scope.owns_lock())
 	{
-		g_HoldInput.store(false);
+		ctx.holdInput.store(false);
 		HydraHookEngineLogWarning("Pre-exit could not acquire ImGui lock within 50 ms; deferring input cleanup");
 		return;
 	}
 
-	const bool needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
+	const bool needsWindowRelease = ctx.overlayOwnsCapture.load() || ctx.forwardedButtons.load() != 0;
 	if (!needsWindowRelease)
 	{
-		g_HoldInput.store(false);
+		ctx.holdInput.store(false);
 		return;
 	}
 
-	const HWND window = g_InputWindow.load();
+	const HWND window = ctx.inputWindow.load();
 	if (window != nullptr && ::IsWindow(window)
 		&& ::GetWindowThreadProcessId(window, nullptr) == ::GetCurrentThreadId())
 	{
 		// Holding ImGuiScope here guarantees ReleaseOverlayInput re-enters without blocking.
-		ReleaseOverlayInput(window, 0, true);
+		ReleaseOverlayInput(ctx, window, 0, true);
 	}
 }
 
@@ -1460,21 +1610,21 @@ void EvtHydraHookGamePreExit(
  *
  * @return false when called from inside a hooked message handler, when capture release could
  *         not be delivered synchronously, or when draining timed out. The caller must not
- *         destroy ImGui while a handler or deferred release may still run.
+ *         destroy ImGui or the host context while a handler or deferred release may still run.
  */
-bool UnhookWindowProc()
+static bool UnhookWindowProc(OverlayHostContext& ctx)
 {
-	g_ReleasePending.store(false);
-	g_HoldInput.store(true);
+	ctx.releasePending.store(false);
+	ctx.holdInput.store(true);
 	bool needsWindowRelease = false;
 	{
 		// Block new button-downs before checking whether the window thread still needs to release
 		// capture or held buttons. Drop the lock before messaging so the window thread can enter.
-		ImGuiScope scope;
-		g_InputClosed.store(true);
-		needsWindowRelease = g_OverlayOwnsCapture.load() || g_ForwardedButtons.load() != 0;
+		ImGuiScope scope(ctx);
+		ctx.inputClosed.store(true);
+		needsWindowRelease = ctx.overlayOwnsCapture.load() || ctx.forwardedButtons.load() != 0;
 	}
-	const HWND window = g_InputWindow.load();
+	const HWND window = ctx.inputWindow.load();
 	const UINT releaseMessage = OverlayReleaseMessage();
 	bool releaseDelivered = true;
 	if (needsWindowRelease && window != nullptr && releaseMessage != 0 && ::IsWindow(window))
@@ -1482,7 +1632,7 @@ bool UnhookWindowProc()
 		const DWORD owner = ::GetWindowThreadProcessId(window, nullptr);
 		if (owner == ::GetCurrentThreadId())
 		{
-			ReleaseOverlayInput(window, 0, true);
+			ReleaseOverlayInput(ctx, window, 0, true);
 		}
 		else
 		{
@@ -1505,14 +1655,14 @@ bool UnhookWindowProc()
 
 	if (!releaseDelivered)
 	{
-		g_HoldInput.store(false);
+		ctx.holdInput.store(false);
 		return false;
 	}
 
-	g_InputWindow.store(nullptr);
-	g_ForwardedButtons.store(0);
-	g_OverlayOwnsCapture.store(false);
-	g_HoldInput.store(false);
+	ctx.inputWindow.store(nullptr);
+	ctx.forwardedButtons.store(0);
+	ctx.overlayOwnsCapture.store(false);
+	ctx.holdInput.store(false);
 
 	const bool drained = WindowProcHook::Instance().UnhookAll();
 	if (drained)

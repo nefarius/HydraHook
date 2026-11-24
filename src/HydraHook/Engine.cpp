@@ -482,10 +482,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (logger)
 		logger->info("Freeing remaining resources");
 
-	if (engine->CustomContext)
+	if (PVOID ctx = engine->CustomContext.exchange(nullptr, std::memory_order_acq_rel))
 	{
-		free(engine->CustomContext);
-		engine->CustomContext = nullptr;
+		free(ctx);
 	}
 
 	if (engine->CrashHandlerInstalled)
@@ -595,7 +594,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineUnhook(PHYDRAHOOK_ENGINE Engine)
 	CloseHandle(Engine->EngineThread);
 	Engine->EngineThread = nullptr;
 
-	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ClearRenderPipeline(Engine->RenderPipeline);
 	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
 	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
 
@@ -646,7 +645,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	Engine->EventsD3D12 = Engine->SavedEventsD3D12;
 	Engine->EventsARC = Engine->SavedEventsARC;
 
-	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ClearRenderPipeline(Engine->RenderPipeline);
 	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
 	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
 	Engine->LastShutdownOrigin.store(HydraHookIpcShutdownOriginNone, std::memory_order_release);
@@ -690,20 +689,22 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGIN
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext)
+	if (Engine->CustomContext.load(std::memory_order_acquire))
 	{
 		HydraHookEngineFreeCustomContext(Engine);
 	}
 
-	Engine->CustomContext = malloc(ContextSize);
+	void* block = malloc(ContextSize);
 
-	if (!Engine->CustomContext)
+	if (!block)
 	{
 		return HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED;
 	}
 
-	ZeroMemory(Engine->CustomContext, ContextSize);
-	*Context = Engine->CustomContext;
+	// Zero before publishing: other threads may read Engine->CustomContext concurrently.
+	ZeroMemory(block, ContextSize);
+	Engine->CustomContext.store(block, std::memory_order_release);
+	*Context = block;
 
 	return HYDRAHOOK_ERROR_NONE;
 }
@@ -715,10 +716,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineFreeCustomContext(PHYDRAHOOK_ENGINE
 		return HYDRAHOOK_ERROR_INVALID_ENGINE_HANDLE;
 	}
 
-	if (Engine->CustomContext)
+	if (PVOID ctx = Engine->CustomContext.exchange(nullptr, std::memory_order_acq_rel))
 	{
-		free(Engine->CustomContext);
-		Engine->CustomContext = NULL;
+		free(ctx);
 	}
 
 	return HYDRAHOOK_ERROR_NONE;
@@ -731,7 +731,17 @@ HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 		return nullptr;
 	}
 
-	return Engine->CustomContext;
+	return Engine->CustomContext.load(std::memory_order_acquire);
+}
+
+HYDRAHOOK_API BOOL HydraHookEngineAreCallbacksDrained(PHYDRAHOOK_ENGINE Engine)
+{
+	if (!Engine)
+	{
+		return FALSE;
+	}
+
+	return Engine->DrainIncomplete.load(std::memory_order_acquire) ? FALSE : TRUE;
 }
 
 #ifndef HYDRAHOOK_NO_D3D9
@@ -748,15 +758,27 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3DDEVICE9 Device)
 {
+	if (Device == nullptr)
+	{
+		return nullptr;
+	}
+
 	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9Device == Device)
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pD3D9Device) == Device)
 		{
 			return engine;
 		}
+	}
+
+	// Several devices can present concurrently and only one is tracked. This module normally
+	// hosts one engine, which then is the only candidate.
+	if (Device != nullptr && g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
 	}
 
 	return nullptr;
@@ -764,15 +786,27 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIRECT3DDEVICE9EX Device)
 {
+	if (Device == nullptr)
+	{
+		return nullptr;
+	}
+
 	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9ExDevice == Device)
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pD3D9ExDevice) == Device)
 		{
 			return engine;
 		}
+	}
+
+	// Several devices can present concurrently and only one is tracked. This module normally
+	// hosts one engine, which then is the only candidate.
+	if (Device != nullptr && g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
 	}
 
 	return nullptr;
@@ -790,6 +824,32 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engin
 		Engine->EventsD3D10 = *Callbacks;
 		Engine->SavedEventsD3D10 = *Callbacks;
 	}
+}
+
+HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D10SwapChain(IDXGISwapChain* SwapChain)
+{
+	if (SwapChain == nullptr)
+		return nullptr;
+
+	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+	for (const auto& kv : g_EngineHostInstances)
+	{
+		const auto& engine = kv.second;
+
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pSwapChain) == SwapChain)
+		{
+			return engine;
+		}
+	}
+
+	// A game can own several swap chains and only the latest presented one is tracked. This
+	// module normally hosts one engine, which then is the only candidate.
+	if (g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
+	}
+
+	return nullptr;
 }
 
 #endif

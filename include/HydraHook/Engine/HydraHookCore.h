@@ -437,6 +437,22 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
         PHYDRAHOOK_ENGINE Engine
     );
 
+    /**
+     * @brief Reports whether all in-flight render callbacks were confirmed finished by the last unhook.
+     *
+     * Query it from EvtHydraHookGamePostUnhook before destroying a custom context. When it
+     * returns FALSE, a callback may still hold a pointer obtained from the context; keep the
+     * context allocated. The engine releases it in HydraHookEngineDestroy after the callbacks
+     * have returned.
+     *
+     * @param[in] Engine Valid engine handle.
+     * @return TRUE when the callback drain completed, FALSE when it timed out or @p Engine is NULL.
+     */
+    HYDRAHOOK_API BOOL HydraHookEngineAreCallbacksDrained(
+        _In_
+        PHYDRAHOOK_ENGINE Engine
+    );
+
 #ifndef HYDRAHOOK_NO_D3D9
 
     /**

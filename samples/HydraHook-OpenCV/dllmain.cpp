@@ -38,8 +38,12 @@ static void EvtHydraHookGameHooked(
 
 static void EvtHydraHookGamePreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 {
-	(void)EngineHandle;
-	Capture_Shutdown();
+	Capture_PreUnhook(EngineHandle);
+}
+
+static void EvtHydraHookGamePostUnhook(PHYDRAHOOK_ENGINE EngineHandle)
+{
+	Capture_PostUnhook(EngineHandle);
 }
 
 HYDRAHOOK_DEFINE_DLLMAIN(
@@ -47,5 +51,6 @@ HYDRAHOOK_DEFINE_DLLMAIN(
 	cfg.Direct3D.HookDirect3D12 = sizeof(void*) == 8;
 	cfg.EvtHydraHookGameHooked = EvtHydraHookGameHooked;
 	cfg.EvtHydraHookGamePreUnhook = EvtHydraHookGamePreUnhook;
+	cfg.EvtHydraHookGamePostUnhook = EvtHydraHookGamePostUnhook;
 	cfg.CrashHandler.IsEnabled = TRUE;
 )

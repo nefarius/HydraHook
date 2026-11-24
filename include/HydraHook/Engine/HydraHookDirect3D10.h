@@ -115,6 +115,30 @@ D3D10_DEVICE_FROM_SWAPCHAIN(
     return pSwapChain->GetDevice(__uuidof(ID3D10Device), (PVOID*)ppDevice);
 }
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Resolves the engine handle from the swap chain passed to a Direct3D 10 callback.
+ *
+ * Direct3D 10 callbacks carry no extension, so this is the way to reach
+ * HydraHookEngineGetCustomContext() from them. The engine tracks the swap chain of the most
+ * recent D3D10 Present or Present1 it dispatched. When that does not match (the game owns
+ * several swap chains) and the module hosts exactly one engine, that engine is returned.
+ *
+ * @param[in] SwapChain Swap chain received by the callback.
+ * @return Engine handle, or NULL if @p SwapChain is NULL or not tracked by any engine.
+ */
+HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D10SwapChain(
+    _In_
+    IDXGISwapChain *SwapChain
+);
+
+#ifdef __cplusplus
+}
+#endif
+
 /**
  * @brief Initializes Direct3D 10 callback collection (zeros all pointers).
  * @param[out] Callbacks Callback structure to initialize.

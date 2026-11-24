@@ -29,26 +29,58 @@ SOFTWARE.
 #include <cmath>
 #include <cstdio>
 #include <mutex>
+#include <new>
 
-// F12 shows or hides the whole overlay; while it is visible it also takes input.
-static std::atomic<bool> g_Visible{ true };
-
-OverlayFrameState UpdateOverlayState()
+// Per-engine state of the demo scene. Lives in the engine's custom context memory next to the host's.
+struct OverlaySceneContext
 {
-	static KeyToggle f12;
-	if (f12.Poll(VK_F12))
-		g_Visible.store(!g_Visible.load());
-	const bool visible = g_Visible.load();
+	// F12 shows or hides the whole overlay; while it is visible it also takes input.
+	std::atomic<bool> visible{ true };
+	KeyToggle f12;
+	std::once_flag renderLogged;
+
+	// Plot demo state.
+	bool animate = true;
+	float values[90] = {};
+	int valuesOffset = 0;
+	float refreshTime = 0.0f;
+	float phase = 0.0f;
+	int funcType = 0;
+	int displayCount = 70;
+	float progress = 0.0f;
+	float progressDir = 1.0f;
+};
+
+size_t OverlaySceneContextSize()
+{
+	return sizeof(OverlaySceneContext);
+}
+
+void OverlaySceneConstruct(OverlaySceneContext* scene)
+{
+	new (scene) OverlaySceneContext();
+}
+
+void OverlaySceneDestroy(OverlaySceneContext* scene)
+{
+	scene->~OverlaySceneContext();
+}
+
+OverlayFrameState UpdateOverlayState(OverlaySceneContext* scene)
+{
+	if (scene->f12.Poll(VK_F12))
+		scene->visible.store(!scene->visible.load());
+	const bool visible = scene->visible.load();
 	return { visible, visible };
 }
 
-void OnOverlayContextCreated(ImGuiIO&)
+void OnOverlayContextCreated(OverlaySceneContext*, ImGuiIO&)
 {
 }
 
-void OnOverlayShutdown()
+void OnOverlayShutdown(OverlaySceneContext* scene)
 {
-	g_Visible.store(true);
+	scene->visible.store(true);
 }
 
 /**
@@ -57,10 +89,9 @@ void OnOverlayShutdown()
  * Displays an ImGui window with frame-time plots, line plots and histograms (including a selectable function and sample count),
  * an "Animate" toggle, and an animated progress bar with textual label. Submits ImGui draw data by calling ImGui::Render().
  */
-void RenderScene()
+void RenderScene(OverlaySceneContext* scene)
 {
-	static std::once_flag flag;
-	std::call_once(flag, []() { HydraHookEngineLogInfo("++ RenderScene called"); });
+	std::call_once(scene->renderLogged, []() { HydraHookEngineLogInfo("++ RenderScene called"); });
 
 	ImGui::ShowMetricsWindow();
 
@@ -72,28 +103,24 @@ void RenderScene()
 			ImGuiWindowFlags_AlwaysAutoResize
 		);
 
-		static bool animate = true;
-		ImGui::Checkbox("Animate", &animate);
+		ImGui::Checkbox("Animate", &scene->animate);
 
-		static float arr[] = { 0.6f, 0.1f, 1.0f, 0.5f, 0.92f, 0.1f, 0.2f };
+		static constexpr float arr[] = { 0.6f, 0.1f, 1.0f, 0.5f, 0.92f, 0.1f, 0.2f };
 		ImGui::PlotLines("Frame Times", arr, IM_ARRAYSIZE(arr));
 
 		// Create a dummy array of contiguous float values to plot
 		// Tip: If your float aren't contiguous but part of a structure, you can pass a pointer to your first float and the sizeof() of your structure in the Stride parameter.
-		static float values[90] = { 0 };
-		static int values_offset = 0;
-		static float refresh_time = 0.0f;
-		if (!animate || refresh_time == 0.0f)
-			refresh_time = (float)ImGui::GetTime();
-		while (refresh_time < ImGui::GetTime()) // Create dummy data at fixed 60 hz rate for the demo
+		float* values = scene->values;
+		if (!scene->animate || scene->refreshTime == 0.0f)
+			scene->refreshTime = (float)ImGui::GetTime();
+		while (scene->refreshTime < ImGui::GetTime()) // Create dummy data at fixed 60 hz rate for the demo
 		{
-			static float phase = 0.0f;
-			values[values_offset] = cosf(phase);
-			values_offset = (values_offset + 1) % IM_ARRAYSIZE(values);
-			phase += 0.10f*values_offset;
-			refresh_time += 1.0f / 60.0f;
+			values[scene->valuesOffset] = cosf(scene->phase);
+			scene->valuesOffset = (scene->valuesOffset + 1) % IM_ARRAYSIZE(scene->values);
+			scene->phase += 0.10f * scene->valuesOffset;
+			scene->refreshTime += 1.0f / 60.0f;
 		}
-		ImGui::PlotLines("Lines", values, IM_ARRAYSIZE(values), values_offset, "avg 0.0", -1.0f, 1.0f, ImVec2(0, 80));
+		ImGui::PlotLines("Lines", values, IM_ARRAYSIZE(scene->values), scene->valuesOffset, "avg 0.0", -1.0f, 1.0f, ImVec2(0, 80));
 		ImGui::PlotHistogram("Histogram", arr, IM_ARRAYSIZE(arr), 0, NULL, 0.0f, 1.0f, ImVec2(0, 80));
 
 		// Use functions to generate output
@@ -102,23 +129,23 @@ void RenderScene()
 			static float Sin(void*, int i) { return sinf(i * 0.1f); }
 			static float Saw(void*, int i) { return (i & 1) ? 1.0f : -1.0f; }
 		};
-		static int func_type = 0, display_count = 70;
 		ImGui::Separator();
-		ImGui::PushItemWidth(100); ImGui::Combo("func", &func_type, "Sin\0Saw\0"); ImGui::PopItemWidth();
+		ImGui::PushItemWidth(100); ImGui::Combo("func", &scene->funcType, "Sin\0Saw\0"); ImGui::PopItemWidth();
 		ImGui::SameLine();
-		ImGui::SliderInt("Sample count", &display_count, 1, 400);
-		float(*func)(void*, int) = (func_type == 0) ? Funcs::Sin : Funcs::Saw;
-		ImGui::PlotLines("Lines", func, NULL, display_count, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
-		ImGui::PlotHistogram("Histogram", func, NULL, display_count, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
+		ImGui::SliderInt("Sample count", &scene->displayCount, 1, 400);
+		float(*func)(void*, int) = (scene->funcType == 0) ? Funcs::Sin : Funcs::Saw;
+		ImGui::PlotLines("Lines", func, NULL, scene->displayCount, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
+		ImGui::PlotHistogram("Histogram", func, NULL, scene->displayCount, 0, NULL, -1.0f, 1.0f, ImVec2(0, 80));
 		ImGui::Separator();
 
 		// Animate a simple progress bar
-		static float progress = 0.0f, progress_dir = 1.0f;
-		if (animate)
+		float& progress = scene->progress;
+		float& progressDir = scene->progressDir;
+		if (scene->animate)
 		{
-			progress += progress_dir * 0.4f * ImGui::GetIO().DeltaTime;
-			if (progress >= +1.1f) { progress = +1.1f; progress_dir *= -1.0f; }
-			if (progress <= -0.1f) { progress = -0.1f; progress_dir *= -1.0f; }
+			progress += progressDir * 0.4f * ImGui::GetIO().DeltaTime;
+			if (progress >= +1.1f) { progress = +1.1f; progressDir *= -1.0f; }
+			if (progress <= -0.1f) { progress = -0.1f; progressDir *= -1.0f; }
 		}
 
 		// Typically we would use ImVec2(-1.0f,0.0f) to use all available width, or ImVec2(width,0.0f) for a specified width. ImVec2(0.0f,0.0f) uses ItemWidth.

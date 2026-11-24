@@ -101,7 +101,7 @@ typedef struct _HYDRAHOOK_ENGINE
     std::atomic<bool> DrainIncomplete{false};       /**< Worker timed out draining in-flight callbacks; unhook is not complete until they return. */
     HANDLE EngineThread = nullptr;           /**< Hook worker thread. */
     HANDLE EngineCancellationEvent = nullptr; /**< Shutdown signal. */
-    PVOID CustomContext = nullptr;           /**< User-allocated context. */
+    std::atomic<PVOID> CustomContext{nullptr}; /**< User-allocated context; published with release, read with acquire. */
     BOOL CrashHandlerInstalled = FALSE;      /**< TRUE if this instance enabled the crash handler. */
     std::atomic<bool> ShutdownCleanupDone{false};   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
     std::atomic<bool> FreeLibraryHookActive{false}; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
@@ -115,11 +115,11 @@ typedef struct _HYDRAHOOK_ENGINE
     std::atomic<uint32_t> IpcGeneration{0};  /**< Copied into the status block. Starts at 1. */
     std::atomic<uint32_t> LastShutdownOrigin{HydraHookIpcShutdownOriginNone}; /**< Last @c PerformShutdownCleanup origin. */
 
-    union
+    struct RenderPipelineState
     {
-        IDXGISwapChain* pSwapChain;      /**< D3D10/11/12 swap chain. */
-        LPDIRECT3DDEVICE9 pD3D9Device;   /**< D3D9 device. */
-        LPDIRECT3DDEVICE9EX pD3D9ExDevice; /**< D3D9Ex device. */
+        std::atomic<IDXGISwapChain*> pSwapChain{nullptr};      /**< D3D10/11/12 swap chain. */
+        std::atomic<LPDIRECT3DDEVICE9> pD3D9Device{nullptr};   /**< D3D9 device. */
+        std::atomic<LPDIRECT3DDEVICE9EX> pD3D9ExDevice{nullptr}; /**< D3D9Ex device. */
     } RenderPipeline{};
 
     struct
@@ -128,6 +128,31 @@ typedef struct _HYDRAHOOK_ENGINE
     } CoreAudio{};
 
 } HYDRAHOOK_ENGINE;
+
+/**
+ * @brief Publishes a RenderPipeline pointer. Render threads write it while other threads look
+ *        engines up by it (HydraHookEngineGetHandleFrom*), so every access goes through these.
+ */
+template <typename T, typename U>
+inline void StoreRenderPipelinePtr(std::atomic<T*>& slot, U* value)
+{
+    slot.store(value, std::memory_order_release);
+}
+
+/** @brief Resets every RenderPipeline pointer atomically, so concurrent lookups never see a torn value. */
+template <typename Pipeline>
+inline void ClearRenderPipeline(Pipeline& pipeline)
+{
+    pipeline.pSwapChain.store(nullptr, std::memory_order_release);
+    pipeline.pD3D9Device.store(nullptr, std::memory_order_release);
+    pipeline.pD3D9ExDevice.store(nullptr, std::memory_order_release);
+}
+
+template <typename T>
+inline T* LoadRenderPipelinePtr(const std::atomic<T*>& slot)
+{
+    return slot.load(std::memory_order_acquire);
+}
 
 /**
  * @brief Lock-free tracker for in-flight hook lambda invocations.

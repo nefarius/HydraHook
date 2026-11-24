@@ -218,6 +218,14 @@ namespace
 
         Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device", __FILE__, __LINE__);
+        Check(HydraHookEngineAreCallbacksDrained(nullptr) == FALSE, "null engine is not drained", __FILE__, __LINE__);
+        engine->DrainIncomplete.store(true);
+        Check(HydraHookEngineAreCallbacksDrained(engine) == FALSE, "incomplete drain reported", __FILE__, __LINE__);
+        engine->DrainIncomplete.store(false);
+        Check(HydraHookEngineAreCallbacksDrained(engine) == TRUE, "complete drain reported", __FILE__, __LINE__);
+        Check(HydraHookEngineGetHandleFromD3D10SwapChain(nullptr) == nullptr, "null d3d10 swap chain", __FILE__, __LINE__);
+        Check(HydraHookEngineGetHandleFromD3D10SwapChain(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(0x10))) == nullptr,
+              "untracked d3d10 swap chain", __FILE__, __LINE__);
         Check(HydraHookEngineGetD3D12CommandQueue(nullptr) == nullptr, "null d3d12 queue", __FILE__, __LINE__);
         using SetD3D12Callbacks = void (*)(PHYDRAHOOK_ENGINE, PHYDRAHOOK_D3D12_EVENT_CALLBACKS);
         using GetD3D12Queue = ID3D12CommandQueue* (*)(IDXGISwapChain*);
@@ -245,6 +253,17 @@ namespace
         Check(createdError == HYDRAHOOK_ERROR_NONE, "create with logging disabled", __FILE__, __LINE__);
         if (createdError == HYDRAHOOK_ERROR_NONE)
         {
+            // One registered engine: lookups with an untracked identity fall back to it; null never does.
+            const auto fakeDevice = reinterpret_cast<LPDIRECT3DDEVICE9>(static_cast<uintptr_t>(0x20));
+            const auto fakeDeviceEx = reinterpret_cast<LPDIRECT3DDEVICE9EX>(static_cast<uintptr_t>(0x30));
+            const auto fakeChain = reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(0x40));
+            Check(HydraHookEngineGetHandleFromD3D9Device(fakeDevice) == created, "d3d9 lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9ExDevice(fakeDeviceEx) == created, "d3d9ex lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D10SwapChain(fakeChain) == created, "d3d10 lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device never matches", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device never matches", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D10SwapChain(nullptr) == nullptr, "null d3d10 swap chain never matches", __FILE__, __LINE__);
+
             std::string longMessage(300, 'A');
             HydraHookEngineLogInfo("%s", longMessage.c_str());
             Check(HydraHookEngineUnhook(created) == HYDRAHOOK_ERROR_NONE, "unhook disabled logger", __FILE__, __LINE__);
@@ -986,6 +1005,29 @@ namespace
         g_handlerCalls = 0;
         SendMessageW(w1, WM_APP + 1, 0, 0);
         Check(g_handlerCalls.load() == 0, "unhooked window bypasses handler", __FILE__, __LINE__);
+
+        // Handler with user data receives the registered pointer and replaces the plain handler
+        {
+            static std::atomic<void*> seenUserData{ nullptr };
+            int marker = 0;
+            seenUserData = nullptr;
+            hook.SetMessageHandler([](void* userData, HWND, UINT msg, WPARAM, LPARAM) -> LRESULT
+            {
+                if (msg != WM_APP + 20)
+                    return 0;
+                seenUserData = userData;
+                return 0x55;
+            }, &marker);
+            g_handlerCalls = 0;
+            Check(SendMessageW(w2, WM_APP + 20, 0, 0) == 0x55, "user-data handler result", __FILE__, __LINE__);
+            Check(seenUserData.load() == &marker, "user-data handler gets its pointer", __FILE__, __LINE__);
+            Check(g_handlerCalls.load() == 0, "plain handler replaced by user-data handler", __FILE__, __LINE__);
+
+            hook.SetMessageHandler(TestHandler);
+            seenUserData = nullptr;
+            SendMessageW(w2, WM_APP + 20, 0, 0);
+            Check(seenUserData.load() == nullptr, "user-data handler replaced by plain handler", __FILE__, __LINE__);
+        }
 
         // Destroy messages reach the original and clean up
         g_origDestroy = 0;

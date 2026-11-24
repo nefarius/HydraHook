@@ -474,12 +474,13 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                   if (guard.invoke)
 				                   {
+					                   StoreRenderPipelinePtr(engine->RenderPipeline.pD3D9Device, dev); // Keep the lookup current for further devices.
 					                   g_announce.present9.call([&pDev = dev]()
 					                   {
 						                   spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                   "++ IDirect3DDevice9Ex::Present called");
 
-						                   engine->RenderPipeline.pD3D9Device = pDev;
+						                   StoreRenderPipelinePtr(engine->RenderPipeline.pD3D9Device, pDev);
 
 						                   INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion9);
 					                   });
@@ -571,12 +572,13 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 
 				                     if (guard.invoke)
 				                     {
+					                     StoreRenderPipelinePtr(engine->RenderPipeline.pD3D9ExDevice, dev); // Keep the lookup current for further devices.
 					                     g_announce.present9.call([&pDev = dev]()
 					                     {
 						                     spdlog::get("HYDRAHOOK")->clone("d3d9")->info(
 							                     "++ IDirect3DDevice9Ex::PresentEx called");
 
-						                     engine->RenderPipeline.pD3D9ExDevice = pDev;
+						                     StoreRenderPipelinePtr(engine->RenderPipeline.pD3D9ExDevice, pDev);
 
 						                     INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion9);
 					                     });
@@ -944,7 +946,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                           spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 								                           "++ IDXGISwapChain::Present called");
 
-							                           engine->RenderPipeline.pSwapChain = pChain;
+							                           StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion12);
 						                           });
@@ -981,7 +983,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                           spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                           "++ IDXGISwapChain::Present called");
 
-							                           engine->RenderPipeline.pSwapChain = pChain;
+							                           StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion11);
 						                           });
@@ -1025,12 +1027,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							{
 							{
 
+						                           // Keep the lookup current if the game swaps its swap chain.
+						                           StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, chain);
 						                           g_announce.present10.call([&pChain = chain]()
 						                           {
 							                           spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                           "++ IDXGISwapChain::Present called");
 
-							                           engine->RenderPipeline.pSwapChain = pChain;
+							                           StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                           INVOKE_HYDRAHOOK_GAME_HOOKED(engine, HydraHookDirect3DVersion10);
 						                           });
@@ -1353,7 +1357,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                            spdlog::get("HYDRAHOOK")->clone("d3d12")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D12)");
 
-							                            engine->RenderPipeline.pSwapChain = pChain;
+							                            StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion12);
@@ -1393,7 +1397,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							                            spdlog::get("HYDRAHOOK")->clone("d3d11")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D11)");
 
-							                            engine->RenderPipeline.pSwapChain = pChain;
+							                            StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion11);
@@ -1428,12 +1432,14 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							{
 							{
 
+						                            // Keep the lookup current if the game swaps its swap chain.
+						                            StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, chain);
 						                            g_announce.present10.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
 								                            "++ IDXGISwapChain1::Present1 called (D3D10)");
 
-							                            engine->RenderPipeline.pSwapChain = pChain;
+							                            StoreRenderPipelinePtr(engine->RenderPipeline.pSwapChain, pChain);
 
 							                            INVOKE_HYDRAHOOK_GAME_HOOKED(
 								                            engine, HydraHookDirect3DVersion10);
