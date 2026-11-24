@@ -695,15 +695,17 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineAllocCustomContext(PHYDRAHOOK_ENGIN
 		HydraHookEngineFreeCustomContext(Engine);
 	}
 
-	Engine->CustomContext = malloc(ContextSize);
+	void* block = malloc(ContextSize);
 
-	if (!Engine->CustomContext)
+	if (!block)
 	{
 		return HYDRAHOOK_ERROR_CONTEXT_ALLOCATION_FAILED;
 	}
 
-	ZeroMemory(Engine->CustomContext, ContextSize);
-	*Context = Engine->CustomContext;
+	// Zero before publishing: other threads may read Engine->CustomContext concurrently.
+	ZeroMemory(block, ContextSize);
+	Engine->CustomContext = block;
+	*Context = block;
 
 	return HYDRAHOOK_ERROR_NONE;
 }

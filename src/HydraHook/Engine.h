@@ -115,11 +115,11 @@ typedef struct _HYDRAHOOK_ENGINE
     std::atomic<uint32_t> IpcGeneration{0};  /**< Copied into the status block. Starts at 1. */
     std::atomic<uint32_t> LastShutdownOrigin{HydraHookIpcShutdownOriginNone}; /**< Last @c PerformShutdownCleanup origin. */
 
-    union
+    struct RenderPipelineState
     {
-        IDXGISwapChain* pSwapChain;      /**< D3D10/11/12 swap chain. */
-        LPDIRECT3DDEVICE9 pD3D9Device;   /**< D3D9 device. */
-        LPDIRECT3DDEVICE9EX pD3D9ExDevice; /**< D3D9Ex device. */
+        std::atomic<IDXGISwapChain*> pSwapChain{nullptr};      /**< D3D10/11/12 swap chain. */
+        std::atomic<LPDIRECT3DDEVICE9> pD3D9Device{nullptr};   /**< D3D9 device. */
+        std::atomic<LPDIRECT3DDEVICE9EX> pD3D9ExDevice{nullptr}; /**< D3D9Ex device. */
     } RenderPipeline{};
 
     struct
@@ -134,24 +134,24 @@ typedef struct _HYDRAHOOK_ENGINE
  *        engines up by it (HydraHookEngineGetHandleFrom*), so every access goes through these.
  */
 template <typename T, typename U>
-inline void StoreRenderPipelinePtr(T*& slot, U* value)
+inline void StoreRenderPipelinePtr(std::atomic<T*>& slot, U* value)
 {
-    std::atomic_ref<T*>(slot).store(value, std::memory_order_release);
+    slot.store(value, std::memory_order_release);
 }
 
 /** @brief Resets every RenderPipeline pointer atomically, so concurrent lookups never see a torn value. */
 template <typename Pipeline>
 inline void ClearRenderPipeline(Pipeline& pipeline)
 {
-    StoreRenderPipelinePtr(pipeline.pSwapChain, static_cast<IDXGISwapChain*>(nullptr));
-    StoreRenderPipelinePtr(pipeline.pD3D9Device, static_cast<LPDIRECT3DDEVICE9>(nullptr));
-    StoreRenderPipelinePtr(pipeline.pD3D9ExDevice, static_cast<LPDIRECT3DDEVICE9EX>(nullptr));
+    pipeline.pSwapChain.store(nullptr, std::memory_order_release);
+    pipeline.pD3D9Device.store(nullptr, std::memory_order_release);
+    pipeline.pD3D9ExDevice.store(nullptr, std::memory_order_release);
 }
 
 template <typename T>
-inline T* LoadRenderPipelinePtr(T*& slot)
+inline T* LoadRenderPipelinePtr(const std::atomic<T*>& slot)
 {
-    return std::atomic_ref<T*>(slot).load(std::memory_order_acquire);
+    return slot.load(std::memory_order_acquire);
 }
 
 /**

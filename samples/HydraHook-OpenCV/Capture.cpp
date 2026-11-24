@@ -174,14 +174,23 @@ static ContextBlock* BlockFromEngine(PHYDRAHOOK_ENGINE Engine)
 	return static_cast<ContextBlock*>(HydraHookEngineGetCustomContext(Engine));
 }
 
+// The block is published before the context is constructed; callbacks must not touch it until then.
+static OpenCVContext* ReadyContext(void* raw)
+{
+	if (!raw)
+		return nullptr;
+	auto* block = static_cast<ContextBlock*>(raw);
+	return block->state.load(std::memory_order_acquire) == ContextReady ? &block->ctx : nullptr;
+}
+
 static OpenCVContext* ContextFromExtension(PHYDRAHOOK_EVT_PRE_EXTENSION Extension)
 {
-	return Extension && Extension->Context ? &static_cast<ContextBlock*>(Extension->Context)->ctx : nullptr;
+	return ReadyContext(Extension ? Extension->Context : nullptr);
 }
 
 static OpenCVContext* ContextFromExtension(PHYDRAHOOK_EVT_POST_EXTENSION Extension)
 {
-	return Extension && Extension->Context ? &static_cast<ContextBlock*>(Extension->Context)->ctx : nullptr;
+	return ReadyContext(Extension ? Extension->Context : nullptr);
 }
 static bool D3D11_CreateCaptureResources(OpenCVContext& ctx, ID3D11Device* pDevice, UINT width, UINT height);
 static void D3D11_ReleaseCaptureResources(OpenCVContext& ctx);
@@ -934,6 +943,8 @@ static bool D3D12_CreateCaptureResources(OpenCVContext& ctx, UINT width, UINT he
 	d.captureWidth = width;
 	d.captureHeight = height;
 	d.captureRowPitch = (UINT)footprint.Footprint.RowPitch;
+	// Fresh readbacks: the first Present of this generation copies without publishing.
+	d.frameCounter = 0;
 	return true;
 }
 
@@ -973,6 +984,8 @@ static void D3D12_CleanupInitResources(OpenCVContext& ctx)
 	if (d.pSrvDescHeap) { d.pSrvDescHeap->Release(); d.pSrvDescHeap = nullptr; }
 	if (d.hFenceEvent) { CloseHandle(d.hFenceEvent); d.hFenceEvent = nullptr; }
 	if (d.pFence) { d.pFence->Release(); d.pFence = nullptr; }
+	// A replacement fence starts at 0; a stale value would make the next cleanup wait forever.
+	d.fenceLastSignaledValue = 0;
 	if (d.pCommandList) { d.pCommandList->Release(); d.pCommandList = nullptr; }
 	if (d.pCommandAllocator) { d.pCommandAllocator->Release(); d.pCommandAllocator = nullptr; }
 	if (d.pCommandQueue) { d.pCommandQueue->Release(); d.pCommandQueue = nullptr; }
