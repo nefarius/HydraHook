@@ -133,9 +133,8 @@ namespace
 		const HYDRAHOOK_ERROR error = HydraHookEngineRehook(target);
 		if (error != HYDRAHOOK_ERROR_NONE)
 		{
+			// Arm may drop this callback's ownership. Do not touch the engine after it returns.
 			HydraHookIpcArmRehookWait(target);
-			std::int32_t stuck = HydraHookIpcPhaseInCallback;
-			target->RehookWaitPhase.compare_exchange_strong(stuck, HydraHookIpcPhaseIdle);
 			return;
 		}
 
