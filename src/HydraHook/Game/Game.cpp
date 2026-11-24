@@ -413,7 +413,10 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 				engine->FreeLibraryHookActive.store(true, std::memory_order_release);
 				PerformShutdownCleanup(engine, ShutdownOrigin::FreeLibraryHook);
 				g_freeLibraryHook.remove_nothrow();
-				FreeLibraryAndExitThread(hLibModule, 0);
+				// FreeLibraryAndExitThread does not return. The remote thread's exit code is
+				// this value. The injector treats 0 as a failed FreeLibrary, so report TRUE,
+				// which is what a successful FreeLibrary returns.
+				FreeLibraryAndExitThread(hLibModule, TRUE);
 			}
 			return g_freeLibraryHook.call_orig(hLibModule);
 		});
