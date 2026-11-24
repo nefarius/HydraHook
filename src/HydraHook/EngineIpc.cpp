@@ -33,26 +33,21 @@ namespace
 	}
 
 	// Relative 100ms. The callback uses this when the request is already accepted but cannot run yet.
+	// Phase stays InCallback until the last engine access, so abandon cannot free the engine first.
 	void QueueRehookRetry(PHYDRAHOOK_ENGINE engine)
 	{
 		if (!engine)
 			return;
 
-		if (!engine->RehookWait || !engine->RehookEvent || engine->RehookDisabled.load(std::memory_order_acquire))
+		const auto finish = [&](std::int32_t next)
 		{
 			std::int32_t inCallback = HydraHookIpcPhaseInCallback;
-			engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseIdle);
-			return;
-		}
+			engine->RehookWaitPhase.compare_exchange_strong(inCallback, next);
+		};
 
-		std::int32_t inCallback = HydraHookIpcPhaseInCallback;
-		if (!engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseArmed))
-			return;
-
-		if (engine->RehookDisabled.load(std::memory_order_acquire))
+		if (!engine->RehookWait || !engine->RehookEvent || engine->RehookDisabled.load(std::memory_order_acquire))
 		{
-			std::int32_t armed = HydraHookIpcPhaseArmed;
-			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+			finish(HydraHookIpcPhaseIdle);
 			return;
 		}
 
@@ -66,9 +61,11 @@ namespace
 		if (engine->RehookDisabled.load(std::memory_order_acquire)
 			&& SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
 		{
-			std::int32_t armed = HydraHookIpcPhaseArmed;
-			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+			finish(HydraHookIpcPhaseIdle);
+			return;
 		}
+
+		finish(HydraHookIpcPhaseArmed);
 	}
 
 	VOID CALLBACK HydraHookIpcOnRehook(PTP_CALLBACK_INSTANCE, PVOID context, PTP_WAIT, TP_WAIT_RESULT)
@@ -77,9 +74,16 @@ namespace
 		if (!target)
 			return;
 
+		// A retry publishes its wait before it leaves InCallback. If this callback arrives in that window,
+		// wait until the publisher stores Armed, then take ownership. Idle means the publisher cancelled it.
 		std::int32_t expected = HydraHookIpcPhaseArmed;
-		if (!target->RehookWaitPhase.compare_exchange_strong(expected, HydraHookIpcPhaseInCallback))
-			return;
+		while (!target->RehookWaitPhase.compare_exchange_strong(expected, HydraHookIpcPhaseInCallback))
+		{
+			if (expected != HydraHookIpcPhaseInCallback)
+				return;
+			expected = HydraHookIpcPhaseArmed;
+			SwitchToThread();
+		}
 
 		const auto leave = [&]()
 		{
@@ -243,36 +247,34 @@ void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
 	if (!engine)
 		return;
 
-	const auto dropCallback = [&]()
+	// The failed-rehook callback is still InCallback. Stay there until the last access below.
+	const bool ownedByCallback =
+		engine->RehookWaitPhase.load(std::memory_order_acquire) == HydraHookIpcPhaseInCallback;
+	const auto finishCallback = [&](std::int32_t next)
 	{
 		std::int32_t inCallback = HydraHookIpcPhaseInCallback;
-		engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseIdle);
+		engine->RehookWaitPhase.compare_exchange_strong(inCallback, next);
 	};
 
 	if (!engine->RehookWait || !engine->RehookEvent || engine->RehookDisabled.load(std::memory_order_acquire))
 	{
-		dropCallback();
+		if (ownedByCallback)
+			finishCallback(HydraHookIpcPhaseIdle);
 		return;
 	}
 
-	std::int32_t phase = engine->RehookWaitPhase.load(std::memory_order_acquire);
-	if (phase == HydraHookIpcPhaseInCallback)
-	{
-		if (!engine->RehookWaitPhase.compare_exchange_strong(phase, HydraHookIpcPhaseArmed))
-			return;
-	}
-	else
+	if (!ownedByCallback)
 	{
 		std::int32_t expected = HydraHookIpcPhaseIdle;
 		if (!engine->RehookWaitPhase.compare_exchange_strong(expected, HydraHookIpcPhaseArmed))
 			return;
-	}
 
-	if (engine->RehookDisabled.load(std::memory_order_acquire))
-	{
-		std::int32_t armed = HydraHookIpcPhaseArmed;
-		engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
-		return;
+		if (engine->RehookDisabled.load(std::memory_order_acquire))
+		{
+			std::int32_t armed = HydraHookIpcPhaseArmed;
+			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+			return;
+		}
 	}
 
 	ResetEvent(engine->RehookEvent);
@@ -281,9 +283,18 @@ void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
 	if (engine->RehookDisabled.load(std::memory_order_acquire)
 		&& SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
 	{
-		std::int32_t armed = HydraHookIpcPhaseArmed;
-		engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+		if (ownedByCallback)
+			finishCallback(HydraHookIpcPhaseIdle);
+		else
+		{
+			std::int32_t armed = HydraHookIpcPhaseArmed;
+			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+		}
+		return;
 	}
+
+	if (ownedByCallback)
+		finishCallback(HydraHookIpcPhaseArmed);
 }
 
 void HydraHookIpcDisarmRehookWait(PHYDRAHOOK_ENGINE engine)
