@@ -32,6 +32,45 @@ namespace
 			logger->warn("{} ({})", message, error);
 	}
 
+	// Relative 100ms. The callback uses this when the request is already accepted but cannot run yet.
+	void QueueRehookRetry(PHYDRAHOOK_ENGINE engine)
+	{
+		if (!engine)
+			return;
+
+		if (!engine->RehookWait || !engine->RehookEvent || engine->RehookDisabled.load(std::memory_order_acquire))
+		{
+			std::int32_t inCallback = HydraHookIpcPhaseInCallback;
+			engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseIdle);
+			return;
+		}
+
+		std::int32_t inCallback = HydraHookIpcPhaseInCallback;
+		if (!engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseArmed))
+			return;
+
+		if (engine->RehookDisabled.load(std::memory_order_acquire))
+		{
+			std::int32_t armed = HydraHookIpcPhaseArmed;
+			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+			return;
+		}
+
+		ULARGE_INTEGER due;
+		due.QuadPart = static_cast<ULONGLONG>(static_cast<LONGLONG>(-100) * 10000);
+		FILETIME timeout;
+		timeout.dwLowDateTime = due.LowPart;
+		timeout.dwHighDateTime = due.HighPart;
+		SetThreadpoolWait(engine->RehookWait, engine->RehookEvent, &timeout);
+
+		if (engine->RehookDisabled.load(std::memory_order_acquire)
+			&& SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
+		{
+			std::int32_t armed = HydraHookIpcPhaseArmed;
+			engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+		}
+	}
+
 	VOID CALLBACK HydraHookIpcOnRehook(PTP_CALLBACK_INSTANCE, PVOID context, PTP_WAIT, TP_WAIT_RESULT)
 	{
 		auto* target = static_cast<PHYDRAHOOK_ENGINE>(context);
@@ -85,7 +124,13 @@ namespace
 			return;
 		}
 
-		const HYDRAHOOK_ERROR error = retry ? HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE : HydraHookEngineRehook(target);
+		if (retry)
+		{
+			QueueRehookRetry(target);
+			return;
+		}
+
+		const HYDRAHOOK_ERROR error = HydraHookEngineRehook(target);
 		if (error != HYDRAHOOK_ERROR_NONE)
 		{
 			HydraHookIpcArmRehookWait(target);
@@ -187,16 +232,11 @@ void HydraHookIpcPublishRunning(PHYDRAHOOK_ENGINE engine)
 		return;
 
 	auto* status = static_cast<HydraHookIpcStatus*>(engine->IpcStateView);
-	const LONG initializing = static_cast<LONG>(HydraHookIpcStateInitializing);
-	if (InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&status->State), 0, 0) != initializing)
-		return;
-
-	InterlockedExchange(reinterpret_cast<volatile LONG*>(&status->GameVersion),
-	                    static_cast<LONG>(engine->GameVersion));
-	InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&status->LastTransitionTick64),
-	                      static_cast<LONG64>(GetTickCount64()));
+	// Leave GameVersion alone. A Hooked announcement publishes that field, and writing it here can
+	// replace the announced API after State has already become Hooked.
 	InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&status->State),
-	                           static_cast<LONG>(HydraHookIpcStateRunning), initializing);
+	                           static_cast<LONG>(HydraHookIpcStateRunning),
+	                           static_cast<LONG>(HydraHookIpcStateInitializing));
 }
 
 void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)

@@ -95,7 +95,7 @@ void HydraHookIpcCreate(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcPublish(PHYDRAHOOK_ENGINE engine, std::uint32_t state, std::uint32_t origin, std::uint32_t gameVersion,
                          std::uint32_t flags);
 
-/** @brief Publishes Running only while the block is still Initializing, so Hooked is kept. */
+/** @brief Moves Initializing to Running. Does not write the graphics API a Hooked publish owns. */
 void HydraHookIpcPublishRunning(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcDisarmRehookWait(PHYDRAHOOK_ENGINE engine);
