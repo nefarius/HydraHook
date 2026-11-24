@@ -22,7 +22,7 @@ API-Hooking and rendering framework for DirectX-based games.
 
 ## Features
 
-- **Runtime injection and ejection** — No launcher required. Inject into any running DirectX process and eject via `FreeLibrary` when done. Supports mid-process injection (e.g. D3D12 games already running). Graceful shutdown via `ExitProcess` / `PostQuitMessage` / `FreeLibrary` hooks avoids loader-lock and unload races.
+- **Runtime injection and ejection** — No launcher required. Inject into any running DirectX process and eject via `FreeLibrary` when done. Supports mid-process injection (e.g. D3D12 games already running). Graceful shutdown via `ExitProcess` / `PostQuitMessage` / `FreeLibrary` hooks avoids loader-lock and unload races; the `FreeLibrary` hook exits the unloading thread via `FreeLibraryAndExitThread(..., TRUE)` so remote-thread ejectors observe a `TRUE` result.
 
 - **Unhook and rehook without unloading** — `HydraHookEngineUnhook` removes all hooks and keeps the DLL loaded; `HydraHookEngineRehook` reinstalls them and fires `EvtHydraHookGameHooked` again. Registered callback tables survive the cycle. Do not call either from `DllMain`, a hook callback, or the worker thread.
 

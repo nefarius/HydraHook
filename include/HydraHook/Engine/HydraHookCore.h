@@ -307,7 +307,11 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID) \
      * @brief Creates and initializes the HydraHook engine.
      *
      * Spawns a worker thread that detects and hooks the host process's render pipeline
-     * (Direct3D 9/10/11/12) and optionally Core Audio. Call from DllMain() at DLL_PROCESS_ATTACH.
+     * (Direct3D 9/10/11/12) and optionally Core Audio. Also hooks ExitProcess,
+     * PostQuitMessage, and FreeLibrary for graceful shutdown; on FreeLibrary of the
+     * host module the hook finishes with FreeLibraryAndExitThread(hLibModule, TRUE)
+     * so remote-thread ejectors observe a TRUE BOOL result. Call from DllMain() at
+     * DLL_PROCESS_ATTACH.
      *
      * @param[in] HostInstance HMODULE of the injecting DLL (typically from DllMain).
      * @param[in] EngineConfig Configuration and event callbacks.
