@@ -3,8 +3,8 @@
  * @brief Session-local shared-memory engine status and rehook control.
  *
  * Each engine publishes a 64-byte status block named
- * Local\HydraHook.State.<pid>.<hostInstanceHex16> and a companion auto-reset
- * event Local\HydraHook.Rehook.<pid>.<hostInstanceHex16>. Readers (HydraHook
+ * Local\\HydraHook.State.\<pid\>.\<hostInstanceHex16\> and a companion auto-reset
+ * event Local\\HydraHook.Rehook.\<pid\>.\<hostInstanceHex16\>. Readers (HydraHook
  * Manager) open the section read-only. The rehook event is waited on with the
  * process thread pool only while the engine is stopped for a recoverable
  * reason, so a pinned DLL can be restarted without LoadLibrary.
