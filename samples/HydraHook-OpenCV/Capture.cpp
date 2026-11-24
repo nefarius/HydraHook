@@ -986,6 +986,7 @@ static void D3D12_CleanupInitResources(OpenCVContext& ctx)
 	if (d.pFence) { d.pFence->Release(); d.pFence = nullptr; }
 	// A replacement fence starts at 0; a stale value would make the next cleanup wait forever.
 	d.fenceLastSignaledValue = 0;
+	d.skipResizeRebuild = false; // The deferred resize state referred to the resources just released.
 	if (d.pCommandList) { d.pCommandList->Release(); d.pCommandList = nullptr; }
 	if (d.pCommandAllocator) { d.pCommandAllocator->Release(); d.pCommandAllocator = nullptr; }
 	if (d.pCommandQueue) { d.pCommandQueue->Release(); d.pCommandQueue = nullptr; }
