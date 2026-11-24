@@ -1614,11 +1614,25 @@ namespace
         } while (GetTickCount64() < deadline);
         Check(restarted, "signaling rehook publishes generation 2 and Running", __FILE__, __LINE__);
 
+        const ULONGLONG phaseDeadline = GetTickCount64() + 5000;
+        bool callbackLeft = false;
+        do
+        {
+            const std::int32_t phase = engine->RehookWaitPhase.load();
+            if (phase != HydraHookIpcPhaseInCallback && phase != HydraHookIpcPhaseInCallbackExternal)
+            {
+                callbackLeft = true;
+                break;
+            }
+            Sleep(10);
+        } while (GetTickCount64() < phaseDeadline);
+        Check(callbackLeft, "creating callback released the phase before the overlap hold", __FILE__, __LINE__);
+
         HANDLE holdReached = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         HANDLE holdRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         g_rehookHoldReached = holdReached;
         g_rehookHoldRelease = holdRelease;
-        HydraHookIpcRehookHoldForTest = RehookHoldForOverlapTest;
+        HydraHookIpcRehookHoldForTest.store(RehookHoldForOverlapTest, std::memory_order_release);
         Check(HydraHookEngineUnhook(engine) == HYDRAHOOK_ERROR_NONE,
               "unhook before overlap rehook", __FILE__, __LINE__);
         Check(WaitForEngineIpc(self, HydraHookIpcStateStopped, &status, 5000),
@@ -1643,7 +1657,7 @@ namespace
         }
         if (holdRelease)
             SetEvent(holdRelease);
-        HydraHookIpcRehookHoldForTest = nullptr;
+        HydraHookIpcRehookHoldForTest.store(nullptr, std::memory_order_release);
         const ULONGLONG armedDeadline = GetTickCount64() + 5000;
         bool armed = false;
         do

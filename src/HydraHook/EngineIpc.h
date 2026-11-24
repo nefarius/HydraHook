@@ -34,6 +34,7 @@
 
 #include "HydraHook/Engine/HydraHookCore.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -95,7 +96,7 @@ inline void HydraHookIpcFormatNames(DWORD pid, std::uintptr_t host, wchar_t* sta
 using HydraHookIpcRehookHold = void (*)(PHYDRAHOOK_ENGINE engine);
 
 /** Test seam. Invoked after a successful rehook callback starts the worker and before it releases the phase. */
-extern HydraHookIpcRehookHold HydraHookIpcRehookHoldForTest;
+extern std::atomic<HydraHookIpcRehookHold> HydraHookIpcRehookHoldForTest;
 
 void HydraHookIpcCreate(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcPublish(PHYDRAHOOK_ENGINE engine, std::uint32_t state, std::uint32_t origin, std::uint32_t gameVersion,

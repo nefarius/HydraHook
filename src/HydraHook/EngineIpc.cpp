@@ -23,7 +23,7 @@
 
 #include <cstring>
 
-HydraHookIpcRehookHold HydraHookIpcRehookHoldForTest = nullptr;
+std::atomic<HydraHookIpcRehookHold> HydraHookIpcRehookHoldForTest{nullptr};
 
 namespace
 {
@@ -168,8 +168,8 @@ namespace
 			return;
 		}
 
-		if (HydraHookIpcRehookHoldForTest)
-			HydraHookIpcRehookHoldForTest(target);
+		if (const HydraHookIpcRehookHold hold = HydraHookIpcRehookHoldForTest.load(std::memory_order_acquire))
+			hold(target);
 
 		leave();
 	}
