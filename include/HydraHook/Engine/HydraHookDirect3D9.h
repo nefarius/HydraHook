@@ -143,7 +143,7 @@ extern "C" {
     /**
      * @brief Resolves engine handle from IDirect3DDevice9 pointer.
      * @param[in] Device Valid D3D9 device pointer.
-     * @return Engine handle, or NULL if not found.
+     * @return Engine handle, or NULL if not found. When the device is not the one the engine tracks (several devices present) and the module hosts exactly one engine, that engine is returned.
      */
     HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(
         _In_
@@ -153,7 +153,7 @@ extern "C" {
     /**
      * @brief Resolves engine handle from IDirect3DDevice9Ex pointer.
      * @param[in] Device Valid D3D9Ex device pointer.
-     * @return Engine handle, or NULL if not found.
+     * @return Engine handle, or NULL if not found. When the device is not the one the engine tracks (several devices present) and the module hosts exactly one engine, that engine is returned.
      */
     HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(
         _In_

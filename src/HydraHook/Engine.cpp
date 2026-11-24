@@ -769,6 +769,13 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 		}
 	}
 
+	// Several devices can present concurrently and only one is tracked. This module normally
+	// hosts one engine, which then is the only candidate.
+	if (Device != nullptr && g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
+	}
+
 	return nullptr;
 }
 
@@ -783,6 +790,13 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIREC
 		{
 			return engine;
 		}
+	}
+
+	// Several devices can present concurrently and only one is tracked. This module normally
+	// hosts one engine, which then is the only candidate.
+	if (Device != nullptr && g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
 	}
 
 	return nullptr;
