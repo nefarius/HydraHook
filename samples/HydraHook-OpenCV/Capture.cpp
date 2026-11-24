@@ -327,6 +327,11 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 		return;
 	}
 
+	// Announcements for different renderers can overlap on different render threads. The lock
+	// only serializes this function; it holds no state.
+	static std::mutex setupMutex;
+	std::lock_guard<std::mutex> setupLock(setupMutex);
+
 	// Each renderer is announced separately and may be announced more than once, so a live
 	// context is reused. A stopped one (earlier unhook) is replaced, but only once nothing can
 	// still reference it.
@@ -334,8 +339,6 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 	if (block)
 	{
 		const int state = block->state.load(std::memory_order_acquire);
-		if (state == ContextInitializing)
-			return;
 		if (state != ContextReady)
 		{
 			// Never constructed: no callback can have been registered against it.

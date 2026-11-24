@@ -501,6 +501,9 @@ void EvtHydraHookGameUnhooked(
 	if (!UnhookWindowProc(*ctx))
 	{
 		HydraHookEngineLogError("WNDPROC unhook did not drain in-flight message handlers; leaving the ImGui context alive");
+		// Render targets are only dropped once no render callback can still use them.
+		if (!HydraHookEngineAreCallbacksDrained(EngineHandle))
+			return;
 		ctx->d3d10Target.Reset();
 		ctx->d3d11Target.Reset();
 #ifdef _WIN64
