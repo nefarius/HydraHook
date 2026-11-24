@@ -94,6 +94,9 @@ inline void HydraHookIpcFormatNames(DWORD pid, std::uintptr_t host, wchar_t* sta
 void HydraHookIpcCreate(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcPublish(PHYDRAHOOK_ENGINE engine, std::uint32_t state, std::uint32_t origin, std::uint32_t gameVersion,
                          std::uint32_t flags);
+
+/** @brief Publishes Running only while the block is still Initializing, so Hooked is kept. */
+void HydraHookIpcPublishRunning(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcDisarmRehookWait(PHYDRAHOOK_ENGINE engine);
 

@@ -202,6 +202,9 @@ struct HookActivityTracker
     }
 };
 
+/** @brief Pins the module that contains this engine for the rest of the process. */
+bool HydraHookPinWorkerModule();
+
 /** @brief Invokes EvtHydraHookGameHooked if non-NULL. */
 #define INVOKE_HYDRAHOOK_GAME_HOOKED(_engine_, _version_)    \
     do {                                                     \

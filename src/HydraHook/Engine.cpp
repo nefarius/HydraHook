@@ -139,24 +139,25 @@ namespace
 		bool owned_;
 	};
 
-	void PinWorkerModule()
-	{
-		// PIN cannot be undone. The worker's code stays mapped for the process lifetime.
-		HMODULE module = nullptr;
-		GetModuleHandleExW(
-			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-			reinterpret_cast<LPCWSTR>(&PinWorkerModule),
-			&module);
-	}
-
 	HYDRAHOOK_ERROR RetainEngine(const std::shared_ptr<spdlog::logger>& logger, const char* reason)
 	{
 		g_hookDestructorDetachSuppressed = true;
-		PinWorkerModule();
+		HydraHookPinWorkerModule();
 		if (logger)
 			logger->warn("{}", reason);
 		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
 	}
+}
+
+
+bool HydraHookPinWorkerModule()
+{
+	// PIN cannot be undone. The worker's code stays mapped for the process lifetime.
+	HMODULE module = nullptr;
+	return GetModuleHandleExW(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+		reinterpret_cast<LPCWSTR>(&HydraHookPinWorkerModule),
+		&module) != FALSE;
 }
 
 
@@ -442,8 +443,20 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (!HookActivityTracker::drain(0))
 		return RetainEngine(logger, "Engine kept alive; hook callbacks are still running");
 
-	if (!HydraHookIpcAbandonRehookWait(engine))
-		return RetainEngine(logger, "Engine kept alive; rehook callback is running");
+	{
+		// A rehook callback takes this lock while it replaces the worker. Trying
+		// again here, after the exited-worker check, catches that replacement.
+		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
+		if (!lifecycle)
+			return RetainEngine(logger, "Engine kept alive; lifecycle lock is busy");
+
+		if (!HydraHookIpcAbandonRehookWait(engine))
+			return RetainEngine(logger, "Engine kept alive; rehook callback is running");
+
+		if (engine->EngineThread != nullptr
+			&& WaitForSingleObject(engine->EngineThread, 0) == WAIT_TIMEOUT)
+			return RetainEngine(logger, "Engine kept alive; worker is still running");
+	}
 
 	g_hookDestructorDetachSuppressed = false;
 

@@ -1718,8 +1718,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #pragma endregion
 
 	logger->info("Library initialized successfully");
-	HydraHookIpcPublish(engine, HydraHookIpcStateRunning, HydraHookIpcShutdownOriginNone,
-	                    static_cast<std::uint32_t>(engine->GameVersion), 0);
+	HydraHookIpcPublishRunning(engine);
 
 	//
 	// Wait until cancellation requested
@@ -1856,9 +1855,11 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	std::uint32_t ipcFlags = 0;
 	if (engine->DrainIncomplete.load(std::memory_order_acquire))
 		ipcFlags |= HydraHookIpcFlagDrainIncomplete;
-	const bool recoverable = ipcOrigin == HydraHookIpcShutdownOriginPostQuitMessage
-		|| ipcOrigin == HydraHookIpcShutdownOriginManualUnhook;
-	if (recoverable && !engine->RehookDisabled.load(std::memory_order_acquire))
+	const bool manualUnhook = ipcOrigin == HydraHookIpcShutdownOriginManualUnhook;
+	const bool postQuit = ipcOrigin == HydraHookIpcShutdownOriginPostQuitMessage;
+	const bool rehookAllowed = !engine->RehookDisabled.load(std::memory_order_acquire)
+		&& (manualUnhook || (postQuit && HydraHookPinWorkerModule()));
+	if (rehookAllowed)
 		ipcFlags |= HydraHookIpcFlagRehookSupported;
 	if ((ipcFlags & HydraHookIpcFlagRehookSupported) != 0)
 		HydraHookIpcArmRehookWait(engine);

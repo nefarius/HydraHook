@@ -54,9 +54,27 @@ namespace
 		}
 
 		bool retry = false;
-		if (target->EngineThread != nullptr)
+		HANDLE thread = nullptr;
+		if (TryAcquireSRWLockExclusive(&target->LifecycleLock))
 		{
-			const DWORD waited = WaitForSingleObject(target->EngineThread, 1000);
+			if (target->EngineThread != nullptr
+				&& !DuplicateHandle(GetCurrentProcess(), target->EngineThread, GetCurrentProcess(), &thread,
+				                    SYNCHRONIZE, FALSE, 0))
+			{
+				thread = nullptr;
+				retry = true;
+			}
+			ReleaseSRWLockExclusive(&target->LifecycleLock);
+		}
+		else
+		{
+			retry = true;
+		}
+
+		if (thread != nullptr)
+		{
+			const DWORD waited = WaitForSingleObject(thread, 1000);
+			CloseHandle(thread);
 			if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED)
 				retry = true;
 		}
@@ -67,17 +85,16 @@ namespace
 			return;
 		}
 
-		if (retry)
+		const HYDRAHOOK_ERROR error = retry ? HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE : HydraHookEngineRehook(target);
+		if (error != HYDRAHOOK_ERROR_NONE)
 		{
-			leave();
 			HydraHookIpcArmRehookWait(target);
+			std::int32_t stuck = HydraHookIpcPhaseInCallback;
+			target->RehookWaitPhase.compare_exchange_strong(stuck, HydraHookIpcPhaseIdle);
 			return;
 		}
 
-		const HYDRAHOOK_ERROR error = HydraHookEngineRehook(target);
 		leave();
-		if (error != HYDRAHOOK_ERROR_NONE)
-			HydraHookIpcArmRehookWait(target);
 	}
 }
 
@@ -164,16 +181,53 @@ void HydraHookIpcPublish(PHYDRAHOOK_ENGINE engine, std::uint32_t state, std::uin
 	InterlockedExchange(reinterpret_cast<volatile LONG*>(&status->State), static_cast<LONG>(state));
 }
 
-void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
+void HydraHookIpcPublishRunning(PHYDRAHOOK_ENGINE engine)
 {
-	if (!engine || !engine->RehookWait || !engine->RehookEvent)
-		return;
-	if (engine->RehookDisabled.load(std::memory_order_acquire))
+	if (!engine || !engine->IpcStateView)
 		return;
 
-	std::int32_t expected = HydraHookIpcPhaseIdle;
-	if (!engine->RehookWaitPhase.compare_exchange_strong(expected, HydraHookIpcPhaseArmed))
+	auto* status = static_cast<HydraHookIpcStatus*>(engine->IpcStateView);
+	const LONG initializing = static_cast<LONG>(HydraHookIpcStateInitializing);
+	if (InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&status->State), 0, 0) != initializing)
 		return;
+
+	InterlockedExchange(reinterpret_cast<volatile LONG*>(&status->GameVersion),
+	                    static_cast<LONG>(engine->GameVersion));
+	InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&status->LastTransitionTick64),
+	                      static_cast<LONG64>(GetTickCount64()));
+	InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&status->State),
+	                           static_cast<LONG>(HydraHookIpcStateRunning), initializing);
+}
+
+void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
+{
+	if (!engine)
+		return;
+
+	const auto dropCallback = [&]()
+	{
+		std::int32_t inCallback = HydraHookIpcPhaseInCallback;
+		engine->RehookWaitPhase.compare_exchange_strong(inCallback, HydraHookIpcPhaseIdle);
+	};
+
+	if (!engine->RehookWait || !engine->RehookEvent || engine->RehookDisabled.load(std::memory_order_acquire))
+	{
+		dropCallback();
+		return;
+	}
+
+	std::int32_t phase = engine->RehookWaitPhase.load(std::memory_order_acquire);
+	if (phase == HydraHookIpcPhaseInCallback)
+	{
+		if (!engine->RehookWaitPhase.compare_exchange_strong(phase, HydraHookIpcPhaseArmed))
+			return;
+	}
+	else
+	{
+		std::int32_t expected = HydraHookIpcPhaseIdle;
+		if (!engine->RehookWaitPhase.compare_exchange_strong(expected, HydraHookIpcPhaseArmed))
+			return;
+	}
 
 	if (engine->RehookDisabled.load(std::memory_order_acquire))
 	{
@@ -185,9 +239,9 @@ void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
 	ResetEvent(engine->RehookEvent);
 	SetThreadpoolWait(engine->RehookWait, engine->RehookEvent, nullptr);
 
-	if (engine->RehookDisabled.load(std::memory_order_acquire))
+	if (engine->RehookDisabled.load(std::memory_order_acquire)
+		&& SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
 	{
-		SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr);
 		std::int32_t armed = HydraHookIpcPhaseArmed;
 		engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
 	}
@@ -200,7 +254,9 @@ void HydraHookIpcDisarmRehookWait(PHYDRAHOOK_ENGINE engine)
 	if (engine->RehookWaitPhase.load(std::memory_order_acquire) != HydraHookIpcPhaseArmed)
 		return;
 
-	SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr);
+	if (!SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
+		return;
+
 	std::int32_t armed = HydraHookIpcPhaseArmed;
 	engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
 }
@@ -219,10 +275,12 @@ bool HydraHookIpcAbandonRehookWait(PHYDRAHOOK_ENGINE engine)
 
 	if (engine->RehookWaitPhase.load(std::memory_order_acquire) == HydraHookIpcPhaseArmed)
 	{
-		const BOOL cancelled = SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr);
+		if (!SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
+			return false;
+
 		std::int32_t armed = HydraHookIpcPhaseArmed;
 		engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
-		if (!cancelled || engine->RehookWaitPhase.load(std::memory_order_acquire) == HydraHookIpcPhaseInCallback)
+		if (engine->RehookWaitPhase.load(std::memory_order_acquire) == HydraHookIpcPhaseInCallback)
 			return false;
 	}
 
