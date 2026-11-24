@@ -358,10 +358,13 @@ bool HydraHookIpcAbandonRehookWait(PHYDRAHOOK_ENGINE engine)
 	if (!engine->RehookWait)
 		return true;
 
-	if (CallbackOwnsPhase(engine->RehookWaitPhase.load(std::memory_order_acquire)))
+	// One snapshot decides. A second load can observe InCallback and skip the cancel
+	// after this read already saw Armed, which lets destroy free a live callback.
+	const std::int32_t phase = engine->RehookWaitPhase.load(std::memory_order_acquire);
+	if (CallbackOwnsPhase(phase))
 		return false;
 
-	if (engine->RehookWaitPhase.load(std::memory_order_acquire) == HydraHookIpcPhaseArmed)
+	if (phase == HydraHookIpcPhaseArmed)
 	{
 		if (!SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
 			return false;
