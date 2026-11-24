@@ -164,10 +164,34 @@ bool DispatchSwapChainDevice(IDXGISwapChain* chain, BOOL enabled)
 	return true;
 }
 
+std::uint32_t IpcShutdownOrigin(ShutdownOrigin origin)
+{
+	switch (origin)
+	{
+	case ShutdownOrigin::ExitProcessHook:
+		return HydraHookIpcShutdownOriginExitProcess;
+	case ShutdownOrigin::PostQuitMessageHook:
+		return HydraHookIpcShutdownOriginPostQuitMessage;
+	case ShutdownOrigin::FreeLibraryHook:
+		return HydraHookIpcShutdownOriginFreeLibrary;
+	case ShutdownOrigin::DllMainProcessDetach:
+		return HydraHookIpcShutdownOriginDllMainDetach;
+	case ShutdownOrigin::ManualUnhook:
+		return HydraHookIpcShutdownOriginManualUnhook;
+	default:
+		return HydraHookIpcShutdownOriginNone;
+	}
+}
+
 void PerformShutdownCleanup(PHYDRAHOOK_ENGINE engine, ShutdownOrigin origin)
 {
 	if (engine->ShutdownCleanupDone.exchange(true))
 		return;
+
+	const std::uint32_t ipcOrigin = IpcShutdownOrigin(origin);
+	engine->LastShutdownOrigin.store(ipcOrigin, std::memory_order_release);
+	HydraHookIpcPublish(engine, HydraHookIpcStateShuttingDown, ipcOrigin,
+	                    static_cast<std::uint32_t>(engine->GameVersion), 0);
 
 	auto logChannel = "shutdown";
 	auto logMessage = "Performing pre-DLL-detach clean-up tasks";
@@ -1694,6 +1718,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 #pragma endregion
 
 	logger->info("Library initialized successfully");
+	HydraHookIpcPublishRunning(engine);
 
 	//
 	// Wait until cancellation requested
@@ -1825,6 +1850,22 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	}
 
 	logger->info("Exiting worker thread");
+
+	const std::uint32_t ipcOrigin = engine->LastShutdownOrigin.load(std::memory_order_acquire);
+	std::uint32_t ipcFlags = 0;
+	if (engine->DrainIncomplete.load(std::memory_order_acquire))
+		ipcFlags |= HydraHookIpcFlagDrainIncomplete;
+	const bool manualUnhook = ipcOrigin == HydraHookIpcShutdownOriginManualUnhook;
+	const bool postQuit = ipcOrigin == HydraHookIpcShutdownOriginPostQuitMessage;
+	const bool rehookAllowed = !engine->RehookDisabled.load(std::memory_order_acquire)
+		&& engine->RehookWait != nullptr
+		&& (manualUnhook || (postQuit && HydraHookPinWorkerModule()));
+	if (rehookAllowed)
+		ipcFlags |= HydraHookIpcFlagRehookSupported;
+	if ((ipcFlags & HydraHookIpcFlagRehookSupported) != 0)
+		HydraHookIpcArmRehookWait(engine);
+	HydraHookIpcPublish(engine, HydraHookIpcStateStopped, ipcOrigin, static_cast<std::uint32_t>(engine->GameVersion),
+	                    ipcFlags);
 
 	if (engine->FreeLibraryHookActive.load(std::memory_order_acquire)
 		|| engine->SkipDllUnloadOnExit.load(std::memory_order_acquire))

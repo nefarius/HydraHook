@@ -139,24 +139,25 @@ namespace
 		bool owned_;
 	};
 
-	void PinWorkerModule()
-	{
-		// PIN cannot be undone. The worker's code stays mapped for the process lifetime.
-		HMODULE module = nullptr;
-		GetModuleHandleExW(
-			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-			reinterpret_cast<LPCWSTR>(&PinWorkerModule),
-			&module);
-	}
-
 	HYDRAHOOK_ERROR RetainEngine(const std::shared_ptr<spdlog::logger>& logger, const char* reason)
 	{
 		g_hookDestructorDetachSuppressed = true;
-		PinWorkerModule();
+		HydraHookPinWorkerModule();
 		if (logger)
 			logger->warn("{}", reason);
 		return HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE;
 	}
+}
+
+
+bool HydraHookPinWorkerModule()
+{
+	// PIN cannot be undone. The worker's code stays mapped for the process lifetime.
+	HMODULE module = nullptr;
+	return GetModuleHandleExW(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+		reinterpret_cast<LPCWSTR>(&HydraHookPinWorkerModule),
+		&module) != FALSE;
 }
 
 
@@ -317,6 +318,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED;
 	}
 
+	HydraHookIpcCreate(engine);
+
 	logger->info("HydraHook engine initialized, attempting to launch main thread");
 
 	//
@@ -342,6 +345,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			engine->CrashHandlerInstalled = FALSE;
 		}
 		CloseHandle(engine->EngineCancellationEvent);
+		HydraHookIpcClose(engine);
 		if (!HydraHookCrashHandlerReferencesEngine(engine))
 			delete engine;
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
@@ -359,6 +363,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			}
 			CloseHandle(engine->EngineCancellationEvent);
 			CloseHandle(engine->EngineThread);
+			HydraHookIpcClose(engine);
 			if (!HydraHookCrashHandlerReferencesEngine(engine))
 				delete engine;
 			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
@@ -374,6 +379,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			}
 			CloseHandle(engine->EngineCancellationEvent);
 			CloseHandle(engine->EngineThread);
+			HydraHookIpcClose(engine);
 			if (!HydraHookCrashHandlerReferencesEngine(engine))
 				delete engine;
 			return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
@@ -421,14 +427,20 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 
 	// DllMain cannot wait: the worker may need the loader lock. A finished
 	// cleanup flag is not enough, because Unhook sets it before the worker exits.
-	const bool onWorker = engine->EngineThread != nullptr
-		&& GetThreadId(engine->EngineThread) == GetCurrentThreadId();
-	bool workerExited = engine->EngineThread == nullptr;
-	if (!workerExited && !onWorker)
-		workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
+	// Rehook closes and replaces EngineThread under this lock, so the read stays inside it.
+	{
+		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
+		if (!lifecycle)
+			return RetainEngine(logger, "Engine kept alive; lifecycle lock is busy");
 
-	if (!workerExited)
-		return RetainEngine(logger, "Engine kept alive; worker is still running");
+		const bool onWorker = engine->EngineThread != nullptr
+			&& GetThreadId(engine->EngineThread) == GetCurrentThreadId();
+		bool workerExited = engine->EngineThread == nullptr;
+		if (!workerExited && !onWorker)
+			workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
+		if (!workerExited)
+			return RetainEngine(logger, "Engine kept alive; worker is still running");
+	}
 
 	// TerminateThread can signal the worker before it closes the tracker.
 	// A false DrainIncomplete flag is not a drain. Shut the tracker first so a
@@ -436,6 +448,21 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	HookActivityTracker::shutdown();
 	if (!HookActivityTracker::drain(0))
 		return RetainEngine(logger, "Engine kept alive; hook callbacks are still running");
+
+	{
+		// A rehook callback takes this lock while it replaces the worker. Trying
+		// again here, after the exited-worker check, catches that replacement.
+		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
+		if (!lifecycle)
+			return RetainEngine(logger, "Engine kept alive; lifecycle lock is busy");
+
+		if (!HydraHookIpcAbandonRehookWait(engine))
+			return RetainEngine(logger, "Engine kept alive; rehook callback is running");
+
+		if (engine->EngineThread != nullptr
+			&& WaitForSingleObject(engine->EngineThread, 0) == WAIT_TIMEOUT)
+			return RetainEngine(logger, "Engine kept alive; worker is still running");
+	}
 
 	g_hookDestructorDetachSuppressed = false;
 
@@ -466,6 +493,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		HydraHookCrashHandlerUninstall(engine);
 		engine->CrashHandlerInstalled = FALSE;
 	}
+
+	HydraHookIpcClose(engine);
 
 	if (engine->EngineCancellationEvent)
 	{
@@ -581,6 +610,10 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	}
 
 	LifecycleGuard lifecycle(&Engine->LifecycleLock);
+	HydraHookIpcDisarmRehookWait(Engine);
+	// Destroy sets this flag under the same lock. Do not start a worker after that.
+	if (Engine->RehookDisabled.load(std::memory_order_acquire))
+		return HYDRAHOOK_ERROR_NONE;
 
 	if (Engine->EngineThread)
 	{
@@ -613,6 +646,13 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	Engine->EventsD3D12 = Engine->SavedEventsD3D12;
 	Engine->EventsARC = Engine->SavedEventsARC;
 
+	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
+	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
+	Engine->LastShutdownOrigin.store(HydraHookIpcShutdownOriginNone, std::memory_order_release);
+	Engine->IpcGeneration.fetch_add(1, std::memory_order_acq_rel);
+	HydraHookIpcPublish(Engine, HydraHookIpcStateInitializing, HydraHookIpcShutdownOriginNone, 0, 0);
+
 	Engine->EngineThread = CreateThread(
 		nullptr,
 		0,
@@ -625,6 +665,17 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	if (!Engine->EngineThread)
 	{
 		Engine->ShutdownCleanupDone.store(true);
+		const std::uint32_t flags = Engine->RehookDisabled.load(std::memory_order_acquire) || !Engine->RehookWait
+			                            ? 0u
+			                            : HydraHookIpcFlagRehookSupported;
+		HydraHookIpcPublish(Engine, HydraHookIpcStateStopped, HydraHookIpcShutdownOriginNone, 0, flags);
+		// The rehook callback arms after this returns. Arming here would drop InCallback first,
+		// and that later call would use a freed engine.
+		const std::int32_t phase = Engine->RehookWaitPhase.load(std::memory_order_acquire);
+		if (flags != 0
+			&& phase != HydraHookIpcPhaseInCallback
+			&& phase != HydraHookIpcPhaseInCallbackExternal)
+			HydraHookIpcArmRehookWait(Engine);
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
 	}
 
