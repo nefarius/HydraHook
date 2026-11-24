@@ -26,6 +26,35 @@ permissions:
   contents: read
 
 jobs:
+  line-endings:
+    name: Line Endings
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Verify normalized index line endings
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files --eol | grep -E '^i/(crlf|mixed)[[:space:]]' || true)
+          if [ -n "$bad" ]; then
+            echo "Found tracked text files stored with CRLF in the git index:" >&2
+            echo "$bad" >&2
+            echo "Run 'git add --renormalize .' and commit the result." >&2
+            exit 1
+          fi
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "Working tree is dirty immediately after checkout (likely line-ending drift):" >&2
+            echo "$dirty" >&2
+            exit 1
+          fi
+
   core:
     name: Core & Tests (${{ matrix.artifact }})
     runs-on: windows-2025-vs2026
