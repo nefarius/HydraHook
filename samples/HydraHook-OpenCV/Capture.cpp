@@ -315,6 +315,7 @@ static void WorkerThreadProc(OpenCVContext* ctx)
 }
 
 static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle);
+static bool Capture_Revive(ContextBlock& block);
 
 void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSION GameVersion)
 {
@@ -335,14 +336,21 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 		const int state = block->state.load(std::memory_order_acquire);
 		if (state == ContextInitializing)
 			return;
-		if (state != ContextReady || block->ctx.shutdownDone.load())
+		if (state != ContextReady)
 		{
-			if (!Capture_TryFinalize(EngineHandle))
+			// Never constructed: no callback can have been registered against it.
+			Capture_TryFinalize(EngineHandle);
+			block = nullptr;
+		}
+		else if (block->ctx.shutdownDone.load())
+		{
+			// Retained after an unconfirmed unhook. Callbacks are live again after a rehook and may
+			// already hold this context, so it is revived in place and never destroyed here.
+			if (!Capture_Revive(*block))
 			{
 				HydraHookEngineLogError("HydraHook-OpenCV: previous context could not be released yet; capture stays inactive");
 				return;
 			}
-			block = nullptr;
 		}
 	}
 
@@ -437,6 +445,72 @@ void Capture_PreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 		ctx->workerThread.join();
 }
 
+// Shuts down the window hook, ImGui and every GPU resource of a stopped context. The caller
+// holds renderMutex. Returns false, leaving everything allocated, when the window hook has not
+// drained, the GPU is not idle or D3D12 resources remain.
+static bool Capture_ReleaseResourcesLocked(OpenCVContext& ctx)
+{
+	const bool windowDrained = Overlay_UnhookWindowProc();
+	const bool gpuIdle = D3D12_WaitForGpu(ctx, 2000);
+	if (!windowDrained || !gpuIdle)
+	{
+		HydraHookEngineLogError(
+			"HydraHook-OpenCV: leaving ImGui and GPU resources allocated (window drain %d, gpu idle %d)",
+			windowDrained ? 1 : 0,
+			gpuIdle ? 1 : 0);
+		return false;
+	}
+
+	if (ctx.d3d11.imguiInitialized)
+	{
+		ImGui_ImplDX11_Shutdown();
+		ctx.d3d11.imguiInitialized = false;
+	}
+#ifdef _WIN64
+	if (ctx.d3d12.imguiInitialized)
+	{
+		ImGui_ImplDX12_Shutdown();
+		ctx.d3d12.imguiInitialized = false;
+	}
+#endif
+	if (ImGui::GetCurrentContext())
+	{
+		ImGui_ImplWin32_Shutdown();
+		ImGui::DestroyContext();
+	}
+	ctx.d3d12.initialized = false;
+	if (ctx.d3d11.mainRTV)
+	{
+		ctx.d3d11.mainRTV->Release();
+		ctx.d3d11.mainRTV = nullptr;
+	}
+	D3D11_ReleaseCaptureResources(ctx);
+	D3D12_CleanupInitResources(ctx);
+
+	if (ctx.d3d12.pDevice)
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: D3D12 resources remain allocated; keeping context alive");
+		return false;
+	}
+	return true;
+}
+
+// Brings a stopped, retained context back to life without destroying it: render callbacks that
+// obtained the pointer after a rehook only ever wait on renderMutex and then see a clean context.
+static bool Capture_Revive(ContextBlock& block)
+{
+	OpenCVContext& ctx = block.ctx;
+	std::lock_guard<std::mutex> lock(ctx.renderMutex);
+	if (!ctx.shutdownDone.load())
+		return true;
+	if (!Capture_ReleaseResourcesLocked(ctx))
+		return false;
+
+	ctx.workerRunning = true;
+	ctx.workerThread = std::thread(WorkerThreadProc, &ctx);
+	ctx.shutdownDone.store(false);
+	return true;
+}
 // Stops the worker, then frees ImGui, GPU resources and the context. That needs all of: the
 // engine's callback drain completed, the window hook drained and the GPU idle. Otherwise
 // everything stays allocated (a later setup retries, and the engine frees the memory when it
@@ -468,48 +542,8 @@ static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle)
 	OpenCVContext* ctx = &block->ctx;
 	{
 		std::lock_guard<std::mutex> lock(ctx->renderMutex);
-		const bool windowDrained = Overlay_UnhookWindowProc();
-		const bool gpuIdle = D3D12_WaitForGpu(*ctx, 2000);
-		if (!windowDrained || !gpuIdle)
-		{
-			HydraHookEngineLogError(
-				"HydraHook-OpenCV: leaving ImGui and GPU resources allocated (window drain %d, gpu idle %d)",
-				windowDrained ? 1 : 0,
-				gpuIdle ? 1 : 0);
+		if (!Capture_ReleaseResourcesLocked(*ctx))
 			return false;
-		}
-
-		if (ctx->d3d11.imguiInitialized)
-		{
-			ImGui_ImplDX11_Shutdown();
-			ctx->d3d11.imguiInitialized = false;
-		}
-#ifdef _WIN64
-		if (ctx->d3d12.imguiInitialized)
-		{
-			ImGui_ImplDX12_Shutdown();
-			ctx->d3d12.imguiInitialized = false;
-		}
-#endif
-		if (ImGui::GetCurrentContext())
-		{
-			ImGui_ImplWin32_Shutdown();
-			ImGui::DestroyContext();
-		}
-		ctx->d3d12.initialized = false;
-		if (ctx->d3d11.mainRTV)
-		{
-			ctx->d3d11.mainRTV->Release();
-			ctx->d3d11.mainRTV = nullptr;
-		}
-		D3D11_ReleaseCaptureResources(*ctx);
-		D3D12_CleanupInitResources(*ctx);
-
-		if (ctx->d3d12.pDevice)
-		{
-			HydraHookEngineLogError("HydraHook-OpenCV: D3D12 resources remain allocated; keeping context alive");
-			return false;
-		}
 	}
 
 	ctx->~OpenCVContext();
