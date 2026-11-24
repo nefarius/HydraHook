@@ -121,6 +121,7 @@ jobs:
             'HydraHookEngineAllocCustomContext',
             'HydraHookEngineFreeCustomContext',
             'HydraHookEngineGetCustomContext',
+            'HydraHookEngineAreCallbacksDrained',
             'HydraHookEngineSetD3D9EventCallbacks',
             'HydraHookEngineGetHandleFromD3D9Device',
             'HydraHookEngineGetHandleFromD3D9ExDevice',

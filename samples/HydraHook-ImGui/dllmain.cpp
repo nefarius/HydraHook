@@ -512,6 +512,14 @@ void EvtHydraHookGameUnhooked(
 		return;
 	}
 
+	// A render callback that outlived the engine's drain timeout may still hold the context.
+	// Leave ImGui and the context allocated; the engine releases the memory when it is destroyed.
+	if (!HydraHookEngineAreCallbacksDrained(EngineHandle))
+	{
+		HydraHookEngineLogError("Render callbacks did not drain; leaving the ImGui context alive");
+		return;
+	}
+
 	{
 		ImGuiScope imguiShutdown(*ctx);
 

@@ -30,8 +30,10 @@ class WindowProcHook
 public:
 	using MessageHandler = LRESULT(*)(HWND, UINT, WPARAM, LPARAM);
 	// Variant that receives the pointer given to SetMessageHandler, so a handler can reach its
-	// owner without a global. The pointer is not owned or validated; it must stay valid until
-	// UnhookAll returns true (or the handler is replaced).
+	// owner without a global. The pointer is not owned or validated. Replacing the handler does
+	// not wait for calls that already started with the old pointer: keep it valid until those
+	// calls have returned. A successful UnhookAll() before replacing (or freeing) is one way to
+	// guarantee that.
 	using MessageHandlerEx = LRESULT(*)(void*, HWND, UINT, WPARAM, LPARAM);
 	using ErrorLogger = void(*)(const char*);
 

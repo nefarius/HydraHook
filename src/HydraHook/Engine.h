@@ -130,6 +130,22 @@ typedef struct _HYDRAHOOK_ENGINE
 } HYDRAHOOK_ENGINE;
 
 /**
+ * @brief Publishes a RenderPipeline pointer. Render threads write it while other threads look
+ *        engines up by it (HydraHookEngineGetHandleFrom*), so every access goes through these.
+ */
+template <typename T, typename U>
+inline void StoreRenderPipelinePtr(T*& slot, U* value)
+{
+    std::atomic_ref<T*>(slot).store(value, std::memory_order_release);
+}
+
+template <typename T>
+inline T* LoadRenderPipelinePtr(T*& slot)
+{
+    return std::atomic_ref<T*>(slot).load(std::memory_order_acquire);
+}
+
+/**
  * @brief Lock-free tracker for in-flight hook lambda invocations.
  *
  * Allows the engine thread to wait for all render-thread callbacks to

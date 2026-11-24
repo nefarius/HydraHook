@@ -734,6 +734,16 @@ HYDRAHOOK_API PVOID HydraHookEngineGetCustomContext(PHYDRAHOOK_ENGINE Engine)
 	return Engine->CustomContext;
 }
 
+HYDRAHOOK_API BOOL HydraHookEngineAreCallbacksDrained(PHYDRAHOOK_ENGINE Engine)
+{
+	if (!Engine)
+	{
+		return FALSE;
+	}
+
+	return Engine->DrainIncomplete.load(std::memory_order_acquire) ? FALSE : TRUE;
+}
+
 #ifndef HYDRAHOOK_NO_D3D9
 
 HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine,
@@ -753,7 +763,7 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9Device == Device)
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pD3D9Device) == Device)
 		{
 			return engine;
 		}
@@ -769,7 +779,7 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIREC
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pD3D9ExDevice == Device)
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pD3D9ExDevice) == Device)
 		{
 			return engine;
 		}
@@ -802,10 +812,17 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D10SwapChain(IDXGI
 	{
 		const auto& engine = kv.second;
 
-		if (engine->RenderPipeline.pSwapChain == SwapChain)
+		if (LoadRenderPipelinePtr(engine->RenderPipeline.pSwapChain) == SwapChain)
 		{
 			return engine;
 		}
+	}
+
+	// A game can own several swap chains and only the latest presented one is tracked. This
+	// module normally hosts one engine, which then is the only candidate.
+	if (g_EngineHostInstances.size() == 1)
+	{
+		return g_EngineHostInstances.begin()->second;
 	}
 
 	return nullptr;

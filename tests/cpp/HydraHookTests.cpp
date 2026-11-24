@@ -218,6 +218,11 @@ namespace
 
         Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device", __FILE__, __LINE__);
+        Check(HydraHookEngineAreCallbacksDrained(nullptr) == FALSE, "null engine is not drained", __FILE__, __LINE__);
+        engine->DrainIncomplete.store(true);
+        Check(HydraHookEngineAreCallbacksDrained(engine) == FALSE, "incomplete drain reported", __FILE__, __LINE__);
+        engine->DrainIncomplete.store(false);
+        Check(HydraHookEngineAreCallbacksDrained(engine) == TRUE, "complete drain reported", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D10SwapChain(nullptr) == nullptr, "null d3d10 swap chain", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D10SwapChain(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(0x10))) == nullptr,
               "untracked d3d10 swap chain", __FILE__, __LINE__);

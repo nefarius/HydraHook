@@ -149,16 +149,40 @@ struct RenderGate
 	}
 };
 
+// The engine hands out a zeroed block. `state` sits in front of the context so that
+// Capture_SetupCallbacks and Capture_PreUnhook can agree on who wins before OpenCVContext is
+// constructed. Only `ctx` is ever constructed or destroyed; `state` is a zero-initialized atomic.
+enum ContextState : int
+{
+	ContextUninitialized = 0, // Allocated by the engine, nothing constructed.
+	ContextInitializing = 1,  // Setup is constructing the context and starting the worker.
+	ContextReady = 2,         // ctx is constructed (it may have been stopped, see shutdownDone).
+	ContextAborted = 3        // Unhook began before setup; nothing was constructed.
+};
+
+struct ContextBlock
+{
+	std::atomic<int> state;
+	OpenCVContext ctx;
+};
+
+static_assert(alignof(ContextBlock) <= alignof(std::max_align_t),
+	"malloc-backed engine context cannot satisfy this alignment");
+
+static ContextBlock* BlockFromEngine(PHYDRAHOOK_ENGINE Engine)
+{
+	return static_cast<ContextBlock*>(HydraHookEngineGetCustomContext(Engine));
+}
+
 static OpenCVContext* ContextFromExtension(PHYDRAHOOK_EVT_PRE_EXTENSION Extension)
 {
-	return Extension ? static_cast<OpenCVContext*>(Extension->Context) : nullptr;
+	return Extension && Extension->Context ? &static_cast<ContextBlock*>(Extension->Context)->ctx : nullptr;
 }
 
 static OpenCVContext* ContextFromExtension(PHYDRAHOOK_EVT_POST_EXTENSION Extension)
 {
-	return Extension ? static_cast<OpenCVContext*>(Extension->Context) : nullptr;
+	return Extension && Extension->Context ? &static_cast<ContextBlock*>(Extension->Context)->ctx : nullptr;
 }
-
 static bool D3D11_CreateCaptureResources(OpenCVContext& ctx, ID3D11Device* pDevice, UINT width, UINT height);
 static void D3D11_ReleaseCaptureResources(OpenCVContext& ctx);
 static void D3D12_CleanupOverlayResources(OpenCVContext& ctx);
@@ -290,6 +314,8 @@ static void WorkerThreadProc(OpenCVContext* ctx)
 	}
 }
 
+static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle);
+
 void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSION GameVersion)
 {
 	HydraHookEngineLogInfo("HydraHook-OpenCV: Loading");
@@ -300,24 +326,50 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 		return;
 	}
 
-	// The same renderer can be announced more than once, and a context kept alive after an
-	// incomplete teardown must not be replaced while callbacks may still reference it.
-	if (HydraHookEngineGetCustomContext(EngineHandle) != nullptr)
-		return;
-
-	OpenCVContext* ctx = nullptr;
-	if (HydraHookEngineAllocCustomContext(EngineHandle, reinterpret_cast<PVOID*>(&ctx), sizeof(OpenCVContext))
-		!= HYDRAHOOK_ERROR_NONE || !ctx)
+	// Each renderer is announced separately and may be announced more than once, so a live
+	// context is reused. A stopped one (earlier unhook) is replaced, but only once nothing can
+	// still reference it.
+	ContextBlock* block = BlockFromEngine(EngineHandle);
+	if (block)
 	{
-		HydraHookEngineLogError("HydraHook-OpenCV: Failed to allocate custom context");
-		return;
+		const int state = block->state.load(std::memory_order_acquire);
+		if (state == ContextInitializing)
+			return;
+		if (state != ContextReady || block->ctx.shutdownDone.load())
+		{
+			if (!Capture_TryFinalize(EngineHandle))
+			{
+				HydraHookEngineLogError("HydraHook-OpenCV: previous context could not be released yet; capture stays inactive");
+				return;
+			}
+			block = nullptr;
+		}
 	}
 
-	// Placement new: the context has non-trivial members.
-	new (ctx) OpenCVContext();
+	if (!block)
+	{
+		PVOID memory = nullptr;
+		if (HydraHookEngineAllocCustomContext(EngineHandle, &memory, sizeof(ContextBlock)) != HYDRAHOOK_ERROR_NONE || !memory)
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: Failed to allocate custom context");
+			return;
+		}
+		block = static_cast<ContextBlock*>(memory);
 
-	ctx->workerRunning = true;
-	ctx->workerThread = std::thread(WorkerThreadProc, ctx);
+		// The engine already published the block. If pre-unhook ran first it marked it aborted.
+		int expected = ContextUninitialized;
+		if (!block->state.compare_exchange_strong(expected, ContextInitializing, std::memory_order_acq_rel))
+		{
+			HydraHookEngineLogWarning("HydraHook-OpenCV: unhook started during setup; capture stays inactive");
+			return;
+		}
+
+		// Placement new: the context has non-trivial members.
+		new (&block->ctx) OpenCVContext();
+		block->ctx.workerRunning = true;
+		block->ctx.workerThread = std::thread(WorkerThreadProc, &block->ctx);
+		block->state.store(ContextReady, std::memory_order_release);
+	}
 
 	switch (GameVersion)
 	{
@@ -350,10 +402,22 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 // allocated: Present callbacks that were already running may still reference it.
 void Capture_PreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 {
-	auto* ctx = static_cast<OpenCVContext*>(HydraHookEngineGetCustomContext(EngineHandle));
-	if (!ctx)
+	ContextBlock* block = BlockFromEngine(EngineHandle);
+	if (!block)
 		return;
 
+	// Setup may still be between allocation and construction. Either mark the block aborted so
+	// setup never starts a worker, or wait for setup to finish so there is a worker to stop.
+	int state = block->state.load(std::memory_order_acquire);
+	if (state == ContextUninitialized
+		&& block->state.compare_exchange_strong(state, ContextAborted, std::memory_order_acq_rel))
+		return;
+	while (block->state.load(std::memory_order_acquire) == ContextInitializing)
+		std::this_thread::yield();
+	if (block->state.load(std::memory_order_acquire) != ContextReady)
+		return;
+
+	OpenCVContext* ctx = &block->ctx;
 	if (ctx->shutdownDone.exchange(true))
 		return;
 
@@ -373,17 +437,35 @@ void Capture_PreUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 		ctx->workerThread.join();
 }
 
-// Runs after the hooks are removed and the callbacks drained. Frees ImGui, GPU resources and
-// the context only when the window hook drained and the GPU is idle; otherwise everything
-// stays allocated so a straggling message handler or GPU job never sees freed memory.
-void Capture_PostUnhook(PHYDRAHOOK_ENGINE EngineHandle)
+// Stops the worker, then frees ImGui, GPU resources and the context. That needs all of: the
+// engine's callback drain completed, the window hook drained and the GPU idle. Otherwise
+// everything stays allocated (a later setup retries, and the engine frees the memory when it
+// is destroyed). Returns true when no context remains.
+static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle)
 {
-	auto* ctx = static_cast<OpenCVContext*>(HydraHookEngineGetCustomContext(EngineHandle));
-	if (!ctx)
-		return;
+	ContextBlock* block = BlockFromEngine(EngineHandle);
+	if (!block)
+		return true;
 
 	Capture_PreUnhook(EngineHandle); // No-op when it already ran.
 
+	const int state = block->state.load(std::memory_order_acquire);
+	if (state == ContextInitializing)
+		return false;
+	if (state != ContextReady)
+	{
+		// Nothing was ever constructed in this block.
+		HydraHookEngineFreeCustomContext(EngineHandle);
+		return true;
+	}
+
+	if (!HydraHookEngineAreCallbacksDrained(EngineHandle))
+	{
+		HydraHookEngineLogError("HydraHook-OpenCV: render callbacks did not drain; keeping context alive");
+		return false;
+	}
+
+	OpenCVContext* ctx = &block->ctx;
 	{
 		std::lock_guard<std::mutex> lock(ctx->renderMutex);
 		const bool windowDrained = Overlay_UnhookWindowProc();
@@ -394,7 +476,7 @@ void Capture_PostUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 				"HydraHook-OpenCV: leaving ImGui and GPU resources allocated (window drain %d, gpu idle %d)",
 				windowDrained ? 1 : 0,
 				gpuIdle ? 1 : 0);
-			return;
+			return false;
 		}
 
 		if (ctx->d3d11.imguiInitialized)
@@ -426,14 +508,20 @@ void Capture_PostUnhook(PHYDRAHOOK_ENGINE EngineHandle)
 		if (ctx->d3d12.pDevice)
 		{
 			HydraHookEngineLogError("HydraHook-OpenCV: D3D12 resources remain allocated; keeping context alive");
-			return;
+			return false;
 		}
 	}
 
 	ctx->~OpenCVContext();
 	HydraHookEngineFreeCustomContext(EngineHandle);
+	return true;
 }
 
+// Runs after the hooks are removed and the callbacks drained (or the drain timed out).
+void Capture_PostUnhook(PHYDRAHOOK_ENGINE EngineHandle)
+{
+	Capture_TryFinalize(EngineHandle);
+}
 #pragma region D3D11
 
 static bool D3D11_CreateCaptureResources(OpenCVContext& ctx, ID3D11Device* pDevice, UINT width, UINT height)
@@ -1177,16 +1265,21 @@ static void EvtHydraHookD3D12PrePresent(
 		const UINT prevIdx = (d.frameCounter - 1) % CAPTURE_NUM_BUFFERS;
 		{
 			std::lock_guard<std::mutex> lock(ctx.pending.mutex);
-			// A readback the worker has not picked up yet is superseded; drop its reference.
-			if (ctx.pending.d3d12Readback)
-				ctx.pending.d3d12Readback->Release();
-			ctx.pending.api = 12;
-			ctx.pending.d3d12FenceValue = d.fenceValueForReadback[prevIdx];
-			ctx.pending.d3d12Readback = d.readback[prevIdx];
-			if (ctx.pending.d3d12Readback) ctx.pending.d3d12Readback->AddRef();
-			ctx.pending.d3d12RowPitch = d.captureRowPitch;
-			ctx.pending.width = d.captureWidth;
-			ctx.pending.height = d.captureHeight;
+			// Pre-unhook clears the slot under this lock after stopping the worker. Publishing
+			// after that point would leave a reference nobody releases.
+			if (ctx.workerRunning)
+			{
+				// A readback the worker has not picked up yet is superseded; drop its reference.
+				if (ctx.pending.d3d12Readback)
+					ctx.pending.d3d12Readback->Release();
+				ctx.pending.api = 12;
+				ctx.pending.d3d12FenceValue = d.fenceValueForReadback[prevIdx];
+				ctx.pending.d3d12Readback = d.readback[prevIdx];
+				if (ctx.pending.d3d12Readback) ctx.pending.d3d12Readback->AddRef();
+				ctx.pending.d3d12RowPitch = d.captureRowPitch;
+				ctx.pending.width = d.captureWidth;
+				ctx.pending.height = d.captureHeight;
+			}
 		}
 		ctx.pending.cv.notify_one();
 	}

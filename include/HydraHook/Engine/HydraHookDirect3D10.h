@@ -124,7 +124,8 @@ extern "C" {
  *
  * Direct3D 10 callbacks carry no extension, so this is the way to reach
  * HydraHookEngineGetCustomContext() from them. The engine tracks the swap chain of the most
- * recent D3D10 Present or Present1 it dispatched.
+ * recent D3D10 Present or Present1 it dispatched. When that does not match (the game owns
+ * several swap chains) and the module hosts exactly one engine, that engine is returned.
  *
  * @param[in] SwapChain Swap chain received by the callback.
  * @return Engine handle, or NULL if @p SwapChain is NULL or not tracked by any engine.
