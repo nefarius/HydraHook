@@ -218,6 +218,9 @@ namespace
 
         Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device", __FILE__, __LINE__);
         Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device", __FILE__, __LINE__);
+        Check(HydraHookEngineGetHandleFromD3D10SwapChain(nullptr) == nullptr, "null d3d10 swap chain", __FILE__, __LINE__);
+        Check(HydraHookEngineGetHandleFromD3D10SwapChain(reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(0x10))) == nullptr,
+              "untracked d3d10 swap chain", __FILE__, __LINE__);
         Check(HydraHookEngineGetD3D12CommandQueue(nullptr) == nullptr, "null d3d12 queue", __FILE__, __LINE__);
         using SetD3D12Callbacks = void (*)(PHYDRAHOOK_ENGINE, PHYDRAHOOK_D3D12_EVENT_CALLBACKS);
         using GetD3D12Queue = ID3D12CommandQueue* (*)(IDXGISwapChain*);
@@ -986,6 +989,29 @@ namespace
         g_handlerCalls = 0;
         SendMessageW(w1, WM_APP + 1, 0, 0);
         Check(g_handlerCalls.load() == 0, "unhooked window bypasses handler", __FILE__, __LINE__);
+
+        // Handler with user data receives the registered pointer and replaces the plain handler
+        {
+            static std::atomic<void*> seenUserData{ nullptr };
+            int marker = 0;
+            seenUserData = nullptr;
+            hook.SetMessageHandler([](void* userData, HWND, UINT msg, WPARAM, LPARAM) -> LRESULT
+            {
+                if (msg != WM_APP + 20)
+                    return 0;
+                seenUserData = userData;
+                return 0x55;
+            }, &marker);
+            g_handlerCalls = 0;
+            Check(SendMessageW(w2, WM_APP + 20, 0, 0) == 0x55, "user-data handler result", __FILE__, __LINE__);
+            Check(seenUserData.load() == &marker, "user-data handler gets its pointer", __FILE__, __LINE__);
+            Check(g_handlerCalls.load() == 0, "plain handler replaced by user-data handler", __FILE__, __LINE__);
+
+            hook.SetMessageHandler(TestHandler);
+            seenUserData = nullptr;
+            SendMessageW(w2, WM_APP + 20, 0, 0);
+            Check(seenUserData.load() == nullptr, "user-data handler replaced by plain handler", __FILE__, __LINE__);
+        }
 
         // Destroy messages reach the original and clean up
         g_origDestroy = 0;

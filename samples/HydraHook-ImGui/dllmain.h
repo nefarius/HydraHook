@@ -26,6 +26,7 @@ SOFTWARE.
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <cstddef>
 #include <imgui.h>
 
 #include <HydraHook/Engine/HydraHookCore.h>
@@ -36,8 +37,6 @@ SOFTWARE.
 #include <HydraHook/Engine/HydraHookDirect3D12.h>
 #endif
 
-void HookWindowProc(HWND hWnd);
-bool UnhookWindowProc();
 // Scene contract implemented by each sample that links the shared host (dllmain.cpp).
 struct OverlayFrameState
 {
@@ -45,13 +44,25 @@ struct OverlayFrameState
 	bool acceptInput; // Forward mouse and keyboard messages to ImGui.
 };
 
+// Per-engine state of a scene. Each scene file defines this type. The host places it in the
+// same engine custom-context allocation as its own state, so a scene keeps no globals or
+// function-local statics.
+struct OverlaySceneContext;
+
+// Size in bytes of the scene's context. Its alignment must not exceed alignof(std::max_align_t).
+size_t OverlaySceneContextSize();
+// Placement-constructs the context in zeroed memory of OverlaySceneContextSize() bytes.
+void OverlaySceneConstruct(OverlaySceneContext* scene);
+// Destroys the context without freeing its memory.
+void OverlaySceneDestroy(OverlaySceneContext* scene);
+
 // Called once per Present, before ImGui::NewFrame(). Not under the ImGui lock; may run on any render thread.
-OverlayFrameState UpdateOverlayState();
+OverlayFrameState UpdateOverlayState(OverlaySceneContext* scene);
 // Called right after ImGui::CreateContext() and the default style are set up.
-void OnOverlayContextCreated(ImGuiIO& io);
+void OnOverlayContextCreated(OverlaySceneContext* scene, ImGuiIO& io);
 // Called after the backends are shut down and just before the host forgets the renderer (unhook).
-void OnOverlayShutdown();
-void RenderScene();
+void OnOverlayShutdown(OverlaySceneContext* scene);
+void RenderScene(OverlaySceneContext* scene);
 
 IMGUI_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 

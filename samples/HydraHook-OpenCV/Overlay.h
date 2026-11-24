@@ -28,9 +28,10 @@ SOFTWARE.
 #include <Windows.h>
 
 #include "Perception.h"
+#include "../HydraHook-ImGui/KeyToggle.h"
 
 void Overlay_Render(float displayWidth, float displayHeight, const PerceptionResults& res);
 void Overlay_DrawDebugHUD(const PerceptionResults& res);
 void Overlay_HookWindowProc(HWND hWnd);
 bool Overlay_UnhookWindowProc(void);
-void Overlay_ToggleState(int key, bool& toggle);
+void Overlay_ToggleState(KeyToggle& keyToggle, int key, bool& toggle);

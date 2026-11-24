@@ -15,6 +15,8 @@ On each Present the sample copies the back buffer into a staging resource (D3D11
 
 An ImGui debug HUD draws the trail and feature counts. Press `F12` to toggle it. The D3D12 hook and ImGui overlay are x64-only; the x86 build enables D3D11 only. D3D11 works on x86 and x64.
 
+Sample state (capture resources, worker thread, perception pipeline, `F12` toggle) lives in the engine's custom context memory, not in globals. It is constructed on first hook and destroyed in `EvtHydraHookGamePostUnhook`, after the worker is stopped.
+
 ## Building
 
 1. Initialize submodules with `git submodule update --init --recursive`, then run `prepare-deps.bat` from the repository root so vcpkg installs `opencv4`. The [root build steps](../../README.md#build-steps) cover the same prerequisite.

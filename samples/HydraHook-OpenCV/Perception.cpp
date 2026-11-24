@@ -35,20 +35,23 @@ SOFTWARE.
 
 #include <algorithm>
 
-void RunPerceptionPipeline(cv::Mat& frame, PerceptionResults& out)
+void RunPerceptionPipeline(PerceptionState& state, cv::Mat& frame, PerceptionResults& out)
 {
 	const int minFeatures = 8;
 	const int maxPoseTrailLen = 100;
 
 	out.valid = false;
 
-	/* Static locals (prevGray, currGray, prevPts, currPts, orb, poseTrail, needReinit) are intentionally
-	   non-reentrant; RunPerceptionPipeline must only be called from the single Capture worker thread. */
-	static cv::Mat prevGray, currGray;
-	static std::vector<cv::Point2f> prevPts, currPts;
-	static cv::Ptr<cv::ORB> orb = cv::ORB::create(500);
-	static std::vector<cv::Vec3f> poseTrail;
-	static bool needReinit = true;
+	/* State is not reentrant; RunPerceptionPipeline must only be called from the single Capture worker thread. */
+	cv::Mat& prevGray = state.prevGray;
+	cv::Mat& currGray = state.currGray;
+	std::vector<cv::Point2f>& prevPts = state.prevPts;
+	std::vector<cv::Point2f>& currPts = state.currPts;
+	std::vector<cv::Vec3f>& poseTrail = state.poseTrail;
+	bool& needReinit = state.needReinit;
+	if (!state.orb)
+		state.orb = cv::ORB::create(500);
+	cv::Ptr<cv::ORB>& orb = state.orb;
 
 	if (frame.empty() || !frame.isContinuous())
 	{

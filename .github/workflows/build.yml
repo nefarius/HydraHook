@@ -125,6 +125,7 @@ jobs:
             'HydraHookEngineGetHandleFromD3D9Device',
             'HydraHookEngineGetHandleFromD3D9ExDevice',
             'HydraHookEngineSetD3D10EventCallbacks',
+            'HydraHookEngineGetHandleFromD3D10SwapChain',
             'HydraHookEngineSetD3D11EventCallbacks',
             'HydraHookEngineSetD3D12EventCallbacks',
             'HydraHookEngineGetD3D12CommandQueue',

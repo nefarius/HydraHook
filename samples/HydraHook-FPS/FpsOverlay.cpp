@@ -5,42 +5,52 @@
 
 #include <cstdio>
 #include <mutex>
+#include <new>
 
 // F12 shows or hides the counter. Shift+F12 opens the settings menu, which takes mouse and
 // keyboard input only while it is open. Both shortcuts come from HydraHook-FPS.ini (see FpsConfigStore).
 
+// Per-engine state of the FPS scene. Lives in the engine's custom context memory next to the host's.
+struct OverlaySceneContext
+{
+	std::mutex mutex; // Guards everything below it. Always taken after the host's ImGui lock, never before.
+	FpsConfig config;
+	FpsConfigStore store;
+	KeyToggle counterToggle;
+	KeyToggle menuToggle;
+	bool menuOpen = false;
+	bool focusMenu = false;
+	bool dirty = false;
+	bool cursorDirty = false;     // One more frame is needed to apply io.MouseDrawCursor.
+	ULONGLONG retryAt = 0;        // Earliest tick of the next save attempt after a failure.
+
+	// Cached readout, refreshed by RenderScene.
+	FrameRate counter;
+	char label[64] = {};
+};
+
 namespace
 {
-	std::mutex g_mutex; // Guards everything below. Always taken after the host's ImGui lock, never before.
-	FpsConfig g_config;
-	FpsConfigStore g_store;
-	KeyToggle g_counterToggle;
-	KeyToggle g_menuToggle;
-	bool g_menuOpen = false;
-	bool g_focusMenu = false;
-	bool g_dirty = false;
-	bool g_cursorDirty = false;     // One more frame is needed to apply io.MouseDrawCursor.
-	ULONGLONG g_retryAt = 0;        // Earliest tick of the next save attempt after a failure.
 	constexpr ULONGLONG kSaveRetryMs = 5000;
 
-	void MarkDirtyLocked()
+	void MarkDirtyLocked(OverlaySceneContext& scene)
 	{
-		g_dirty = true;
-		g_retryAt = 0;
+		scene.dirty = true;
+		scene.retryAt = 0;
 	}
 
-	// A failed save keeps g_dirty and backs off, so unwritable locations do not cost file I/O per frame.
-	void FlushLocked(bool force = false)
+	// A failed save keeps dirty and backs off, so unwritable locations do not cost file I/O per frame.
+	void FlushLocked(OverlaySceneContext& scene, bool force = false)
 	{
-		if (!g_dirty)
+		if (!scene.dirty)
 			return;
 		const ULONGLONG now = ::GetTickCount64();
-		if (!force && now < g_retryAt)
+		if (!force && now < scene.retryAt)
 			return;
-		if (g_store.Save(g_config))
-			g_dirty = false;
+		if (scene.store.Save(scene.config))
+			scene.dirty = false;
 		else
-			g_retryAt = now + kSaveRetryMs;
+			scene.retryAt = now + kSaveRetryMs;
 	}
 
 	void DrawCounter(const FpsConfig& config, const ImGuiIO& io, const char* label)
@@ -112,14 +122,29 @@ namespace
 	}
 }
 
-OverlayFrameState UpdateOverlayState()
+size_t OverlaySceneContextSize()
+{
+	return sizeof(OverlaySceneContext);
+}
+
+void OverlaySceneConstruct(OverlaySceneContext* scene)
+{
+	new (scene) OverlaySceneContext();
+}
+
+void OverlaySceneDestroy(OverlaySceneContext* scene)
+{
+	scene->~OverlaySceneContext();
+}
+
+OverlayFrameState UpdateOverlayState(OverlaySceneContext* scene)
 {
 	FpsHotkey counterKey;
 	FpsHotkey menuKey;
 	{
-		std::lock_guard<std::mutex> lock(g_mutex);
-		counterKey = g_config.counterKey;
-		menuKey = g_config.menuKey;
+		std::lock_guard<std::mutex> lock(scene->mutex);
+		counterKey = scene->config.counterKey;
+		menuKey = scene->config.menuKey;
 	}
 
 	// One snapshot, so two chords that share a primary key see the same modifiers and key state.
@@ -131,28 +156,28 @@ OverlayFrameState UpdateOverlayState()
 		counterDown = KeyToggle::IsKeyDown(counterKey.vk);
 	if (foreground && menuKey.vk != 0)
 		menuDown = menuKey.vk == counterKey.vk ? counterDown : KeyToggle::IsKeyDown(menuKey.vk);
-	const bool toggleCounter = g_counterToggle.Update(counterDown, modifiers, counterKey.modifiers);
-	const bool toggleMenu = g_menuToggle.Update(menuDown, modifiers, menuKey.modifiers);
+	const bool toggleCounter = scene->counterToggle.Update(counterDown, modifiers, counterKey.modifiers);
+	const bool toggleMenu = scene->menuToggle.Update(menuDown, modifiers, menuKey.modifiers);
 
-	std::lock_guard<std::mutex> lock(g_mutex);
+	std::lock_guard<std::mutex> lock(scene->mutex);
 	if (toggleCounter)
 	{
-		g_config.showCounter = !g_config.showCounter;
-		MarkDirtyLocked();
+		scene->config.showCounter = !scene->config.showCounter;
+		MarkDirtyLocked(*scene);
 	}
 	if (toggleMenu)
 	{
-		g_menuOpen = !g_menuOpen;
-		g_focusMenu = g_menuOpen;
-		g_cursorDirty = true;
+		scene->menuOpen = !scene->menuOpen;
+		scene->focusMenu = scene->menuOpen;
+		scene->cursorDirty = true;
 	}
-	if (!g_menuOpen)
-		FlushLocked();
+	if (!scene->menuOpen)
+		FlushLocked(*scene);
 	// Render one more frame after the menu closes so RenderScene can clear io.MouseDrawCursor.
-	return { g_config.showCounter || g_menuOpen || g_cursorDirty, g_menuOpen };
+	return { scene->config.showCounter || scene->menuOpen || scene->cursorDirty, scene->menuOpen };
 }
 
-void OnOverlayContextCreated(ImGuiIO& io)
+void OnOverlayContextCreated(OverlaySceneContext* scene, ImGuiIO& io)
 {
 	io.IniFilename = nullptr; // No stray imgui.ini in the game directory.
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -165,71 +190,69 @@ void OnOverlayContextCreated(ImGuiIO& io)
 		reinterpret_cast<LPCWSTR>(&OnOverlayContextCreated), &self))
 		FpsDirectoryOfModule(self, dllDir);
 
-	std::lock_guard<std::mutex> lock(g_mutex);
-	g_config = FpsConfig();
-	g_store.Init(processDir, dllDir, L"HydraHook-FPS.ini");
-	if (g_store.Load(g_config))
-		HydraHookEngineLogInfo("FPS settings loaded from %ls", g_store.ActivePath());
-	g_menuOpen = false;
-	g_focusMenu = false;
-	g_dirty = false;
-	g_cursorDirty = false;
-	g_retryAt = 0;
-	g_counterToggle.Reset();
-	g_menuToggle.Reset();
+	std::lock_guard<std::mutex> lock(scene->mutex);
+	scene->config = FpsConfig();
+	scene->store.Init(processDir, dllDir, L"HydraHook-FPS.ini");
+	if (scene->store.Load(scene->config))
+		HydraHookEngineLogInfo("FPS settings loaded from %ls", scene->store.ActivePath());
+	scene->menuOpen = false;
+	scene->focusMenu = false;
+	scene->dirty = false;
+	scene->cursorDirty = false;
+	scene->retryAt = 0;
+	scene->counterToggle.Reset();
+	scene->menuToggle.Reset();
 }
 
-void OnOverlayShutdown()
+void OnOverlayShutdown(OverlaySceneContext* scene)
 {
-	std::lock_guard<std::mutex> lock(g_mutex);
-	FlushLocked(true);
-	g_menuOpen = false;
-	g_cursorDirty = false;
-	g_counterToggle.Reset();
-	g_menuToggle.Reset();
+	std::lock_guard<std::mutex> lock(scene->mutex);
+	FlushLocked(*scene, true);
+	scene->menuOpen = false;
+	scene->cursorDirty = false;
+	scene->counterToggle.Reset();
+	scene->menuToggle.Reset();
 }
 
 // The shared ImGui host calls this once per visible frame on every backend.
-void RenderScene()
+void RenderScene(OverlaySceneContext* scene)
 {
-	static FrameRate counter;
-	static char label[64];
-	if (counter.Sample(FrameRate::Clock::now()))
+	if (scene->counter.Sample(FrameRate::Clock::now()))
 	{
-		const double frameMs = counter.AverageMilliseconds();
+		const double frameMs = scene->counter.AverageMilliseconds();
 		if (frameMs > 0.0)
-			std::snprintf(label, sizeof(label), "%.0f FPS  |  %.1f ms", 1000.0 / frameMs, frameMs);
+			std::snprintf(scene->label, sizeof(scene->label), "%.0f FPS  |  %.1f ms", 1000.0 / frameMs, frameMs);
 		else
-			std::snprintf(label, sizeof(label), "-- FPS");
+			std::snprintf(scene->label, sizeof(scene->label), "-- FPS");
 	}
 
 	ImGuiIO& io = ImGui::GetIO();
 	{
-		std::lock_guard<std::mutex> lock(g_mutex);
-		FpsConfig config = g_config;
+		std::lock_guard<std::mutex> lock(scene->mutex);
+		FpsConfig config = scene->config;
 		if (config.showCounter)
-			DrawCounter(config, io, label);
+			DrawCounter(config, io, scene->label);
 
 		// The host's game cursor is usually hidden; draw ImGui's own while the menu is open.
-		io.MouseDrawCursor = g_menuOpen;
-		g_cursorDirty = false;
-		if (g_menuOpen)
+		io.MouseDrawCursor = scene->menuOpen;
+		scene->cursorDirty = false;
+		if (scene->menuOpen)
 		{
-			const bool focus = g_focusMenu;
-			g_focusMenu = false;
+			const bool focus = scene->focusMenu;
+			scene->focusMenu = false;
 			if (!DrawMenu(config, focus))
 			{
-				g_menuOpen = false;
-				g_cursorDirty = true; // Next frame clears the cursor flag.
+				scene->menuOpen = false;
+				scene->cursorDirty = true; // Next frame clears the cursor flag.
 			}
-			if (!(config == g_config))
+			if (!(config == scene->config))
 			{
-				g_config = config;
-				MarkDirtyLocked();
+				scene->config = config;
+				MarkDirtyLocked(*scene);
 			}
 			// Write when no widget is held, and when the menu closes.
-			if (!ImGui::IsAnyItemActive() || !g_menuOpen)
-				FlushLocked();
+			if (!ImGui::IsAnyItemActive() || !scene->menuOpen)
+				FlushLocked(*scene);
 		}
 	}
 	ImGui::Render();

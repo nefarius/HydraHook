@@ -792,6 +792,25 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D10EventCallbacks(PHYDRAHOOK_ENGINE Engin
 	}
 }
 
+HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D10SwapChain(IDXGISwapChain* SwapChain)
+{
+	if (SwapChain == nullptr)
+		return nullptr;
+
+	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
+	for (const auto& kv : g_EngineHostInstances)
+	{
+		const auto& engine = kv.second;
+
+		if (engine->RenderPipeline.pSwapChain == SwapChain)
+		{
+			return engine;
+		}
+	}
+
+	return nullptr;
+}
+
 #endif
 
 #ifndef HYDRAHOOK_NO_D3D11

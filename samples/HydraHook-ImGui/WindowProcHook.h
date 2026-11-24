@@ -29,6 +29,10 @@ class WindowProcHook
 {
 public:
 	using MessageHandler = LRESULT(*)(HWND, UINT, WPARAM, LPARAM);
+	// Variant that receives the pointer given to SetMessageHandler, so a handler can reach its
+	// owner without a global. The pointer is not owned or validated; it must stay valid until
+	// UnhookAll returns true (or the handler is replaced).
+	using MessageHandlerEx = LRESULT(*)(void*, HWND, UINT, WPARAM, LPARAM);
 	using ErrorLogger = void(*)(const char*);
 
 	static WindowProcHook& Instance()
@@ -41,6 +45,17 @@ public:
 	{
 		std::lock_guard<std::recursive_mutex> lock(mutex_);
 		messageHandler_ = handler;
+		messageHandlerEx_ = nullptr;
+		userData_ = nullptr;
+	}
+
+	// Replaces any handler set before. Passing a null handler clears the user data too.
+	void SetMessageHandler(MessageHandlerEx handler, void* userData)
+	{
+		std::lock_guard<std::recursive_mutex> lock(mutex_);
+		messageHandler_ = nullptr;
+		messageHandlerEx_ = handler;
+		userData_ = handler != nullptr ? userData : nullptr;
 	}
 
 	void SetErrorLogger(ErrorLogger logger)
@@ -438,6 +453,8 @@ private:
 
 		WNDPROC original = nullptr;
 		MessageHandler handler = nullptr;
+		MessageHandlerEx handlerEx = nullptr;
+		void* userData = nullptr;
 		bool found = false;
 		char destroyError[160] = {};
 		{
@@ -453,7 +470,9 @@ private:
 				if (!destroy && self.dispatchEnabled_ && !it->second.passthrough && !it->second.retired)
 				{
 					handler = self.messageHandler_;
-					if (handler)
+					handlerEx = self.messageHandlerEx_;
+					userData = self.userData_;
+					if (handler || handlerEx)
 						handlerGuard.arm();
 				}
 				if (destroy)
@@ -495,10 +514,11 @@ private:
 		LRESULT result;
 		if (!found)
 			result = ::DefWindowProcW(hWnd, msg, wParam, lParam);
-		else if (handler)
+		else if (handler || handlerEx)
 		{
 			handlerGuard.enterDepth();
-			const LRESULT handled = handler(hWnd, msg, wParam, lParam);
+			const LRESULT handled = handlerEx ? handlerEx(userData, hWnd, msg, wParam, lParam)
+				: handler(hWnd, msg, wParam, lParam);
 			handlerGuard.leave();
 			result = handled != 0
 				? handled
@@ -517,6 +537,8 @@ private:
 	std::recursive_mutex mutex_;
 	std::unordered_map<HWND, Entry> windows_;
 	MessageHandler messageHandler_ = nullptr;
+	MessageHandlerEx messageHandlerEx_ = nullptr;
+	void* userData_ = nullptr;
 	ErrorLogger errorLogger_ = nullptr;
 	bool dispatchEnabled_ = false;
 	bool removing_ = false;

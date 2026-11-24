@@ -1025,6 +1025,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							{
 							{
 
+						                           // Keep the lookup current if the game swaps its swap chain.
+						                           engine->RenderPipeline.pSwapChain = chain;
 						                           g_announce.present10.call([&pChain = chain]()
 						                           {
 							                           spdlog::get("HYDRAHOOK")->clone("d3d10")->info(
@@ -1428,6 +1430,8 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 							{
 							{
 
+						                            // Keep the lookup current if the game swaps its swap chain.
+						                            engine->RenderPipeline.pSwapChain = chain;
 						                            g_announce.present10.call([&pChain = chain]()
 						                            {
 							                            spdlog::get("HYDRAHOOK")->clone("d3d10")->info(

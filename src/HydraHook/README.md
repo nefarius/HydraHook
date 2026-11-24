@@ -214,6 +214,7 @@ The status block (`HydraHookIpcStatus` in [EngineIpc.h](EngineIpc.h)) is version
 
 - Call `HydraHookEngineAllocCustomContext` before hooks run (e.g. in `EvtHydraHookGameHooked`).
 - Access from callbacks via `HydraHookEngineGetCustomContext(Engine)` or `Extension->Context` in D3D11/12/ARC callbacks.
+- D3D9 and D3D10 callbacks have no extension. Resolve the engine with `HydraHookEngineGetHandleFromD3D9Device` / `HydraHookEngineGetHandleFromD3D9ExDevice` (device argument) or `HydraHookEngineGetHandleFromD3D10SwapChain` (swap chain argument), then call `HydraHookEngineGetCustomContext`. The D3D10 lookup matches the swap chain of the most recent D3D10 `Present`/`Present1`.
 - Free with `HydraHookEngineFreeCustomContext` before engine destroy.
 
 ## Exception Handling

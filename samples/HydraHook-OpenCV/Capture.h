@@ -27,8 +27,10 @@ SOFTWARE.
 #include "Perception.h"
 #include <HydraHook/Engine/HydraHookCore.h>
 
+// Allocates the engine-bound context (all runtime state of this sample), starts the worker
+// and registers the render callbacks for the detected D3D version.
 void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSION GameVersion);
-void Capture_Shutdown();
-void Capture_GetResults(PerceptionResults& out);
-bool Capture_GetShowOverlay();
-void Capture_SetShowOverlay(bool show);
+// Pre-unhook: stops the worker and makes in-flight render callbacks skip their work.
+void Capture_PreUnhook(PHYDRAHOOK_ENGINE EngineHandle);
+// Post-unhook: releases ImGui, GPU resources and the context once it is safe to do so.
+void Capture_PostUnhook(PHYDRAHOOK_ENGINE EngineHandle);

@@ -53,15 +53,8 @@ bool Overlay_UnhookWindowProc(void)
 	return WindowProcHook::Instance().UnhookAll();
 }
 
-void Overlay_ToggleState(int key, bool& toggle)
+void Overlay_ToggleState(KeyToggle& keyToggle, int key, bool& toggle)
 {
-	static KeyToggle keyToggle;
-	static int trackedKey = 0;
-	if (trackedKey != key)
-	{
-		keyToggle.Reset();
-		trackedKey = key;
-	}
 	if (keyToggle.Poll(key))
 		toggle = !toggle;
 }
