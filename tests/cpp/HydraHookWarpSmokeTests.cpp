@@ -272,6 +272,9 @@ int main()
                          static_cast<unsigned long>(waited));
             TerminateProcess(GetCurrentProcess(), 1);
         }
+        DWORD unloadExitCode = 0;
+        Check(GetExitCodeThread(unloadThread, &unloadExitCode) != 0 && unloadExitCode != 0,
+              "FreeLibrary unload thread exits non-zero (TRUE)");
         CloseHandle(unloadThread);
     }
     Check(GetModuleHandleW(L"HydraHookTestHost.dll") == nullptr, "host unloaded");
