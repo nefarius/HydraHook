@@ -1858,6 +1858,7 @@ DWORD WINAPI HydraHookMainThread(LPVOID Params)
 	const bool manualUnhook = ipcOrigin == HydraHookIpcShutdownOriginManualUnhook;
 	const bool postQuit = ipcOrigin == HydraHookIpcShutdownOriginPostQuitMessage;
 	const bool rehookAllowed = !engine->RehookDisabled.load(std::memory_order_acquire)
+		&& engine->RehookWait != nullptr
 		&& (manualUnhook || (postQuit && HydraHookPinWorkerModule()));
 	if (rehookAllowed)
 		ipcFlags |= HydraHookIpcFlagRehookSupported;

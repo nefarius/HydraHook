@@ -605,6 +605,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 
 	LifecycleGuard lifecycle(&Engine->LifecycleLock);
 	HydraHookIpcDisarmRehookWait(Engine);
+	// Destroy sets this flag under the same lock. Do not start a worker after that.
+	if (Engine->RehookDisabled.load(std::memory_order_acquire))
+		return HYDRAHOOK_ERROR_NONE;
 
 	if (Engine->EngineThread)
 	{
@@ -656,7 +659,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	if (!Engine->EngineThread)
 	{
 		Engine->ShutdownCleanupDone.store(true);
-		const std::uint32_t flags = Engine->RehookDisabled.load(std::memory_order_acquire)
+		const std::uint32_t flags = Engine->RehookDisabled.load(std::memory_order_acquire) || !Engine->RehookWait
 			                            ? 0u
 			                            : HydraHookIpcFlagRehookSupported;
 		HydraHookIpcPublish(Engine, HydraHookIpcStateStopped, HydraHookIpcShutdownOriginNone, 0, flags);
