@@ -285,19 +285,49 @@ void HydraHookIpcArmRehookWait(PHYDRAHOOK_ENGINE engine)
 	const std::int32_t observed = engine->RehookWaitPhase.load(std::memory_order_acquire);
 	if (!ownedByCallback && CallbackOwnsPhase(observed))
 	{
+		// Publish the phase before registering. A signal that arrives while the phase is still
+		// InCallback is consumed once and then dropped if leave() stores Idle first.
+		std::int32_t owned = HydraHookIpcPhaseInCallback;
+		const bool markedExternal =
+			engine->RehookWaitPhase.compare_exchange_strong(owned, HydraHookIpcPhaseInCallbackExternal);
+		if (!markedExternal)
+		{
+			if (owned != HydraHookIpcPhaseIdle)
+				return;
+			if (!engine->RehookWaitPhase.compare_exchange_strong(owned, HydraHookIpcPhaseArmed))
+				return;
+			if (engine->RehookDisabled.load(std::memory_order_acquire))
+			{
+				std::int32_t armed = HydraHookIpcPhaseArmed;
+				engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+				return;
+			}
+		}
+		else if (engine->RehookDisabled.load(std::memory_order_acquire))
+		{
+			std::int32_t external = HydraHookIpcPhaseInCallbackExternal;
+			engine->RehookWaitPhase.compare_exchange_strong(external, HydraHookIpcPhaseInCallback);
+			return;
+		}
+
 		ResetEvent(engine->RehookEvent);
 		SetThreadpoolWait(engine->RehookWait, engine->RehookEvent, nullptr);
 		if (engine->RehookDisabled.load(std::memory_order_acquire)
 			&& SetThreadpoolWaitEx(engine->RehookWait, nullptr, nullptr, nullptr))
-			return;
-
-		std::int32_t owned = HydraHookIpcPhaseInCallback;
-		if (engine->RehookWaitPhase.compare_exchange_strong(owned, HydraHookIpcPhaseInCallbackExternal)
-			|| owned == HydraHookIpcPhaseInCallbackExternal)
-			return;
-
-		if (owned == HydraHookIpcPhaseIdle)
-			engine->RehookWaitPhase.compare_exchange_strong(owned, HydraHookIpcPhaseArmed);
+		{
+			if (markedExternal)
+			{
+				std::int32_t external = HydraHookIpcPhaseInCallbackExternal;
+				if (!engine->RehookWaitPhase.compare_exchange_strong(external, HydraHookIpcPhaseInCallback)
+					&& external == HydraHookIpcPhaseArmed)
+					engine->RehookWaitPhase.compare_exchange_strong(external, HydraHookIpcPhaseIdle);
+			}
+			else
+			{
+				std::int32_t armed = HydraHookIpcPhaseArmed;
+				engine->RehookWaitPhase.compare_exchange_strong(armed, HydraHookIpcPhaseIdle);
+			}
+		}
 		return;
 	}
 
