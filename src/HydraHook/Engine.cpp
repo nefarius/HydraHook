@@ -758,6 +758,11 @@ HYDRAHOOK_API VOID HydraHookEngineSetD3D9EventCallbacks(PHYDRAHOOK_ENGINE Engine
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3DDEVICE9 Device)
 {
+	if (Device == nullptr)
+	{
+		return nullptr;
+	}
+
 	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{
@@ -781,6 +786,11 @@ HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9Device(LPDIRECT3
 
 HYDRAHOOK_API PHYDRAHOOK_ENGINE HydraHookEngineGetHandleFromD3D9ExDevice(LPDIRECT3DDEVICE9EX Device)
 {
+	if (Device == nullptr)
+	{
+		return nullptr;
+	}
+
 	std::lock_guard<std::mutex> lock(g_EngineHostInstancesMutex);
 	for (const auto& kv : g_EngineHostInstances)
 	{

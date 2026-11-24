@@ -253,6 +253,17 @@ namespace
         Check(createdError == HYDRAHOOK_ERROR_NONE, "create with logging disabled", __FILE__, __LINE__);
         if (createdError == HYDRAHOOK_ERROR_NONE)
         {
+            // One registered engine: lookups with an untracked identity fall back to it; null never does.
+            const auto fakeDevice = reinterpret_cast<LPDIRECT3DDEVICE9>(static_cast<uintptr_t>(0x20));
+            const auto fakeDeviceEx = reinterpret_cast<LPDIRECT3DDEVICE9EX>(static_cast<uintptr_t>(0x30));
+            const auto fakeChain = reinterpret_cast<IDXGISwapChain*>(static_cast<uintptr_t>(0x40));
+            Check(HydraHookEngineGetHandleFromD3D9Device(fakeDevice) == created, "d3d9 lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9ExDevice(fakeDeviceEx) == created, "d3d9ex lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D10SwapChain(fakeChain) == created, "d3d10 lookup falls back to the only engine", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9Device(nullptr) == nullptr, "null d3d9 device never matches", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D9ExDevice(nullptr) == nullptr, "null d3d9ex device never matches", __FILE__, __LINE__);
+            Check(HydraHookEngineGetHandleFromD3D10SwapChain(nullptr) == nullptr, "null d3d10 swap chain never matches", __FILE__, __LINE__);
+
             std::string longMessage(300, 'A');
             HydraHookEngineLogInfo("%s", longMessage.c_str());
             Check(HydraHookEngineUnhook(created) == HYDRAHOOK_ERROR_NONE, "unhook disabled logger", __FILE__, __LINE__);
