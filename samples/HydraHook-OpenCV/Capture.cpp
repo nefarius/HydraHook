@@ -317,6 +317,27 @@ static void WorkerThreadProc(OpenCVContext* ctx)
 static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle);
 static bool Capture_Revive(ContextBlock& block);
 
+// Claims an unconstructed block (fresh or aborted by pre-unhook), constructs the context in
+// place and starts the worker. Returns false when pre-unhook got there first or setup is
+// already running.
+static bool Capture_StartContext(ContextBlock& block)
+{
+	int expected = ContextUninitialized;
+	if (!block.state.compare_exchange_strong(expected, ContextInitializing, std::memory_order_acq_rel))
+	{
+		expected = ContextAborted;
+		if (!block.state.compare_exchange_strong(expected, ContextInitializing, std::memory_order_acq_rel))
+			return false;
+	}
+
+	// Placement new: the context has non-trivial members.
+	new (&block.ctx) OpenCVContext();
+	block.ctx.workerRunning = true;
+	block.ctx.workerThread = std::thread(WorkerThreadProc, &block.ctx);
+	block.state.store(ContextReady, std::memory_order_release);
+	return true;
+}
+
 void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSION GameVersion)
 {
 	HydraHookEngineLogInfo("HydraHook-OpenCV: Loading");
@@ -336,27 +357,6 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 	// context is reused. A stopped one (earlier unhook) is replaced, but only once nothing can
 	// still reference it.
 	ContextBlock* block = BlockFromEngine(EngineHandle);
-	if (block)
-	{
-		const int state = block->state.load(std::memory_order_acquire);
-		if (state != ContextReady)
-		{
-			// Never constructed: no callback can have been registered against it.
-			Capture_TryFinalize(EngineHandle);
-			block = nullptr;
-		}
-		else if (block->ctx.shutdownDone.load())
-		{
-			// Retained after an unconfirmed unhook. Callbacks are live again after a rehook and may
-			// already hold this context, so it is revived in place and never destroyed here.
-			if (!Capture_Revive(*block))
-			{
-				HydraHookEngineLogError("HydraHook-OpenCV: previous context could not be released yet; capture stays inactive");
-				return;
-			}
-		}
-	}
-
 	if (!block)
 	{
 		PVOID memory = nullptr;
@@ -366,20 +366,27 @@ void Capture_SetupCallbacks(PHYDRAHOOK_ENGINE EngineHandle, HYDRAHOOK_D3D_VERSIO
 			return;
 		}
 		block = static_cast<ContextBlock*>(memory);
+	}
 
-		// The engine already published the block. If pre-unhook ran first it marked it aborted.
-		int expected = ContextUninitialized;
-		if (!block->state.compare_exchange_strong(expected, ContextInitializing, std::memory_order_acq_rel))
+	if (block->state.load(std::memory_order_acquire) != ContextReady)
+	{
+		// Fresh or aborted block (pre-unhook can win the race against setup). Nothing is
+		// constructed in it, and it is never freed here: another thread may still hold the pointer.
+		if (!Capture_StartContext(*block))
 		{
 			HydraHookEngineLogWarning("HydraHook-OpenCV: unhook started during setup; capture stays inactive");
 			return;
 		}
-
-		// Placement new: the context has non-trivial members.
-		new (&block->ctx) OpenCVContext();
-		block->ctx.workerRunning = true;
-		block->ctx.workerThread = std::thread(WorkerThreadProc, &block->ctx);
-		block->state.store(ContextReady, std::memory_order_release);
+	}
+	else if (block->ctx.shutdownDone.load())
+	{
+		// Retained after an unconfirmed unhook. Callbacks are live again after a rehook and may
+		// already hold this context, so it is revived in place and never destroyed here.
+		if (!Capture_Revive(*block))
+		{
+			HydraHookEngineLogError("HydraHook-OpenCV: previous context could not be released yet; capture stays inactive");
+			return;
+		}
 	}
 
 	switch (GameVersion)
@@ -531,8 +538,8 @@ static bool Capture_TryFinalize(PHYDRAHOOK_ENGINE EngineHandle)
 		return false;
 	if (state != ContextReady)
 	{
-		// Nothing was ever constructed in this block.
-		HydraHookEngineFreeCustomContext(EngineHandle);
+		// Nothing was constructed. Setup may still be running on another thread with this
+		// pointer, so the block stays allocated; the engine frees it on destroy.
 		return true;
 	}
 
@@ -975,6 +982,9 @@ static void D3D12_CleanupInitResources(OpenCVContext& ctx)
 static bool D3D12_CreateOverlayResources(OpenCVContext& ctx, IDXGISwapChain* pSwapChain)
 {
 	auto& d = ctx.d3d12;
+	// A resize can reach a revived context before the next Present has created the device.
+	if (!d.pDevice)
+		return false;
 	ID3D12Resource* pBackBuffer = nullptr;
 	if (FAILED(D3D12_BACKBUFFER_FROM_SWAPCHAIN(pSwapChain, &pBackBuffer, 0)))
 	{
