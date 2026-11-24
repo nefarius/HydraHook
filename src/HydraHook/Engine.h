@@ -39,6 +39,8 @@ SOFTWARE.
 #include <atomic>
 #include <mutex>
 
+#include "EngineIpc.h"
+
 /**
  * @brief Once-per-hook announcement guard that can be re-armed.
  *
@@ -103,6 +105,14 @@ typedef struct _HYDRAHOOK_ENGINE
     BOOL CrashHandlerInstalled = FALSE;      /**< TRUE if this instance enabled the crash handler. */
     std::atomic<bool> ShutdownCleanupDone{false};   /**< Set when PerformShutdownCleanup has run; skip on re-entry (e.g. DllMainProcessDetach after FreeLibraryHook). */
     std::atomic<bool> FreeLibraryHookActive{false}; /**< TRUE when shutdown was initiated by the FreeLibrary hook; engine thread must not call FreeLibraryAndExitThread. */
+    HANDLE IpcStateMap = nullptr;            /**< Pagefile-backed status section. */
+    PVOID IpcStateView = nullptr;            /**< Writable view of @c HydraHookIpcStatus. */
+    HANDLE RehookEvent = nullptr;            /**< Auto-reset event signaled by an external rehook request. */
+    PTP_WAIT RehookWait = nullptr;           /**< Thread-pool wait armed only while stopped and recoverable. */
+    std::atomic<int32_t> RehookWaitPhase{HydraHookIpcPhaseIdle}; /**< Idle, armed, or inside the rehook callback. */
+    std::atomic<bool> RehookDisabled{false}; /**< Destroy won the race; the callback must not restart the worker. */
+    std::atomic<uint32_t> IpcGeneration{0};  /**< Copied into the status block. Starts at 1. */
+    std::atomic<uint32_t> LastShutdownOrigin{HydraHookIpcShutdownOriginNone}; /**< Last @c PerformShutdownCleanup origin. */
 
     union
     {
@@ -196,6 +206,8 @@ struct HookActivityTracker
 #define INVOKE_HYDRAHOOK_GAME_HOOKED(_engine_, _version_)    \
     do {                                                     \
         (_engine_)->GameVersion = (_version_);              \
+        HydraHookIpcPublish((_engine_), HydraHookIpcStateHooked, HydraHookIpcShutdownOriginNone, \
+                            static_cast<std::uint32_t>(_version_), 0); \
         if ((_engine_)->EngineConfig.EvtHydraHookGameHooked) \
             (_engine_)->EngineConfig.EvtHydraHookGameHooked((_engine_), (_version_)); \
     } while (0)

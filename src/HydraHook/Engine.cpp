@@ -317,6 +317,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 		return HYDRAHOOK_ERROR_CREATE_EVENT_FAILED;
 	}
 
+	HydraHookIpcCreate(engine);
+
 	logger->info("HydraHook engine initialized, attempting to launch main thread");
 
 	//
@@ -342,6 +344,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			engine->CrashHandlerInstalled = FALSE;
 		}
 		CloseHandle(engine->EngineCancellationEvent);
+		HydraHookIpcClose(engine);
 		if (!HydraHookCrashHandlerReferencesEngine(engine))
 			delete engine;
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
@@ -359,6 +362,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			}
 			CloseHandle(engine->EngineCancellationEvent);
 			CloseHandle(engine->EngineThread);
+			HydraHookIpcClose(engine);
 			if (!HydraHookCrashHandlerReferencesEngine(engine))
 				delete engine;
 			return HYDRAHOOK_ERROR_ENGINE_ALREADY_ALLOCATED;
@@ -374,6 +378,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineCreate(HMODULE HostInstance, PHYDRA
 			}
 			CloseHandle(engine->EngineCancellationEvent);
 			CloseHandle(engine->EngineThread);
+			HydraHookIpcClose(engine);
 			if (!HydraHookCrashHandlerReferencesEngine(engine))
 				delete engine;
 			return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
@@ -437,6 +442,9 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 	if (!HookActivityTracker::drain(0))
 		return RetainEngine(logger, "Engine kept alive; hook callbacks are still running");
 
+	if (!HydraHookIpcAbandonRehookWait(engine))
+		return RetainEngine(logger, "Engine kept alive; rehook callback is running");
+
 	g_hookDestructorDetachSuppressed = false;
 
 	bool lastEngine = false;
@@ -466,6 +474,8 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 		HydraHookCrashHandlerUninstall(engine);
 		engine->CrashHandlerInstalled = FALSE;
 	}
+
+	HydraHookIpcClose(engine);
 
 	if (engine->EngineCancellationEvent)
 	{
@@ -581,6 +591,7 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	}
 
 	LifecycleGuard lifecycle(&Engine->LifecycleLock);
+	HydraHookIpcDisarmRehookWait(Engine);
 
 	if (Engine->EngineThread)
 	{
@@ -613,6 +624,13 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	Engine->EventsD3D12 = Engine->SavedEventsD3D12;
 	Engine->EventsARC = Engine->SavedEventsARC;
 
+	ZeroMemory(&Engine->RenderPipeline, sizeof(Engine->RenderPipeline));
+	ZeroMemory(&Engine->CoreAudio, sizeof(Engine->CoreAudio));
+	Engine->GameVersion = HydraHookDirect3DVersionUnknown;
+	Engine->LastShutdownOrigin.store(HydraHookIpcShutdownOriginNone, std::memory_order_release);
+	Engine->IpcGeneration.fetch_add(1, std::memory_order_acq_rel);
+	HydraHookIpcPublish(Engine, HydraHookIpcStateInitializing, HydraHookIpcShutdownOriginNone, 0, 0);
+
 	Engine->EngineThread = CreateThread(
 		nullptr,
 		0,
@@ -625,6 +643,12 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineRehook(PHYDRAHOOK_ENGINE Engine)
 	if (!Engine->EngineThread)
 	{
 		Engine->ShutdownCleanupDone.store(true);
+		const std::uint32_t flags = Engine->RehookDisabled.load(std::memory_order_acquire)
+			                            ? 0u
+			                            : HydraHookIpcFlagRehookSupported;
+		HydraHookIpcPublish(Engine, HydraHookIpcStateStopped, HydraHookIpcShutdownOriginNone, 0, flags);
+		if (flags != 0)
+			HydraHookIpcArmRehookWait(Engine);
 		return HYDRAHOOK_ERROR_CREATE_THREAD_FAILED;
 	}
 

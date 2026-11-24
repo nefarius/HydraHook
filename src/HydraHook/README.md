@@ -155,10 +155,21 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 `HydraHookEngineUnhook(Engine)` and `HydraHookEngineRehook(Engine)` run a hook, unhook, rehook cycle in one loaded DLL. Neither may be called under the loader lock, from a hook callback, or from the worker thread.
 
 - **Unhook**: runs the ManualUnhook shutdown above and never calls `TerminateThread`. It waits for the worker to exit (also when another shutdown path already claimed cleanup) and for in-flight callbacks to drain; if either fails it returns `HYDRAHOOK_ERROR_UNHOOK_INCOMPLETE` and keeps the worker handle and state so it can be retried. On success it closes the worker handle and clears the render pipeline pointers and `GameVersion`. It is idempotent.
-- **Rehook**: calls `HookActivityTracker::reset()`, clears `ShutdownCleanupDone`, `FreeLibraryHookActive` and `SkipDllUnloadOnExit`, resets the cancellation event, restores `Events*` from `SavedEvents*`, and starts a new `HydraHookMainThread`. It is a no-op while a worker is running.
+- **Rehook**: calls `HookActivityTracker::reset()`, clears `ShutdownCleanupDone`, `FreeLibraryHookActive` and `SkipDllUnloadOnExit`, resets the cancellation event, restores `Events*` from `SavedEvents*`, clears the render pipeline and `GameVersion`, increments the IPC generation, and starts a new `HydraHookMainThread`. It is a no-op while a worker is running. A stopped engine whose status block has `RehookSupported` can also be restarted by signaling its rehook event.
 - **Callback tables**: `HydraHookEngineSet*EventCallbacks` writes both the live table and a saved copy. The worker zeroes the live tables on unhook; rehook restores the saved copies before `EvtHydraHookGameHooked` fires again.
 - **Announcements**: the once-per-hook announcements are `ResettableOnce` members of `g_announce` in `Game.cpp`. The worker re-arms all of them and the engine pointer at the start of each run.
 - **Serialization**: `LifecycleLock` (SRW lock in the engine struct) serializes unhook and rehook.
+
+## Live State IPC
+
+Every engine publishes a 64-byte pagefile-backed section and a companion auto-reset event in the session namespace. Both names include the process id and the host `HMODULE` as 16 uppercase hex digits:
+
+- `Local\HydraHook.State.<pid>.<hostInstance>`
+- `Local\HydraHook.Rehook.<pid>.<hostInstance>`
+
+The status block (`HydraHookIpcStatus` in [EngineIpc.h](EngineIpc.h)) is version 1, magic `0x534B4848`. `State` is `Initializing`, `Running` (hooks installed), `Hooked` (a render API is active), `ShuttingDown`, or `Stopped`. `ShutdownOrigin` records `ExitProcess`, `PostQuitMessage`, `FreeLibrary`, `DllMainDetach`, or `ManualUnhook`. `Generation` starts at 1 and increments on every rehook. `Flags` reports `RehookSupported` and `DrainIncomplete`. `State` is stored last so a reader that samples it twice sees one transition.
+
+Creating the section or the event is best-effort: a failure is logged and hooking continues. The kernel releases both objects when the engine closes them or the process exits. `PostQuitMessage` and `HydraHookEngineUnhook` arm a thread-pool wait on the rehook event after the worker has stopped, which restarts that same engine via `HydraHookEngineRehook`. `ExitProcess`, `FreeLibrary`, and `DllMain` detach do not arm it. `HydraHookEngineDestroy` cancels the wait without waiting for a callback that has already started; if one is running, the engine stays allocated so the callback is not unmapped.
 
 ## Build Configuration
 
@@ -177,7 +188,7 @@ To avoid DLL unload races and loader-lock issues, HydraHook hooks `ExitProcess`,
 
 `tests/cpp/` builds three projects, wired into `HydraHook.slnx` under the `tests` folder. They build with the `Debug_LIB` and `Release_LIB` solution configurations and link the static library (the smoke host does; the smoke runner loads that host).
 
-- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks (null config, null context, logging disabled), `Hook` apply/remove/`remove_nothrow` including a rejected second apply, `HookActivityTracker`, utility functions (environment expansion does not keep a trailing NUL), exception types, crash-handler refcounting and snapshot promotion, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
+- `HydraHookTests` covers the C API init helpers, engine handle and custom-context checks (null config, null context, logging disabled), `Hook` apply/remove/`remove_nothrow` including a rejected second apply, `HookActivityTracker`, utility functions (environment expansion does not keep a trailing NUL), exception types, crash-handler refcounting and snapshot promotion, the per-thread SEH translator, `FrameRate`, and the ImGui sample's `ResettableInitGuard` (once-only init, reset, retry-on-failure, concurrent callers) and `WindowProcHook` (validation, forwarding, destroy cleanup, external subclass chaining, re-entrancy, cross-thread hook churn). `HookActivityTracker::reset`, `ResettableOnce`, `Hook` re-apply, and the `HydraHookEngineUnhook`/`HydraHookEngineRehook` handle checks are covered too. The IPC test creates an engine, reads `Local\HydraHook.State.*` through `Running` and a manual-unhook `Stopped`, signals `Local\HydraHook.Rehook.*`, and checks that generation 2 reaches `Running` before destroy removes both objects. No test exercises a real game hook/unhook/rehook cycle; the WARP smoke test covers a synthetic D3D11 one.
 - `HydraHookTestHost` is a small DLL that enables D3D10/D3D11/D3D12 hooking and exports shared counters plus the engine `GameVersion`.
 - `HydraHookWarpSmokeTests` loads `d3d12.dll` alongside `d3d11.dll`, creates a hidden window and a `D3D_DRIVER_TYPE_WARP` device, loads the host, and asserts the game-hooked callback, `GameVersion`, Present, Present1 (no second announcement), and ResizeBuffers callbacks. It then runs a full cycle on the same DLL and swap chain: `HydraHookEngineUnhook` (pre/post-unhook callbacks fire once, the DLL stays loaded, Present and ResizeBuffers still succeed without firing callbacks, a second unhook is a no-op), then `HydraHookEngineRehook` (the game-hooked callback fires again and Present and ResizeBuffers callbacks resume). Finally it calls `FreeLibrary` from a worker thread so the FreeLibrary hook can unload the DLL and asserts that the unload thread exits non-zero.
 
@@ -221,6 +232,7 @@ All are caught in `Game.cpp` with `logger->error` or `logger->warn`; the engine 
 |------|-------------|
 | [Engine.cpp](Engine.cpp) | C API implementation: create, destroy, context, callbacks, logging |
 | [Engine.h](Engine.h) | Internal engine struct, callback invocation macros, HookActivityTracker |
+| [EngineIpc.h](EngineIpc.h), [EngineIpc.cpp](EngineIpc.cpp) | Shared-memory status block and rehook event |
 | [Game/Game.cpp](Game/Game.cpp) | Main thread: hook installation, shutdown, D3D/Audio wiring |
 | [Game/Game.h](Game/Game.h) | `HydraHookMainThread` declaration, `GetD3D12CommandQueueForSwapChain` |
 | [Game/Shutdown.h](Game/Shutdown.h) | `ShutdownOrigin`, `PerformShutdownCleanup` |
