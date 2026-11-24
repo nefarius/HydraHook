@@ -1517,6 +1517,17 @@ namespace
         delete engine;
     }
 
+    HANDLE g_rehookHoldReached = nullptr;
+    HANDLE g_rehookHoldRelease = nullptr;
+
+    void RehookHoldForOverlapTest(PHYDRAHOOK_ENGINE)
+    {
+        if (g_rehookHoldReached)
+            SetEvent(g_rehookHoldReached);
+        if (g_rehookHoldRelease)
+            WaitForSingleObject(g_rehookHoldRelease, 10000);
+    }
+
     bool ReadEngineIpc(HMODULE host, HydraHookIpcStatus* out)
     {
         wchar_t stateName[96] = {};
@@ -1602,6 +1613,75 @@ namespace
             Sleep(10);
         } while (GetTickCount64() < deadline);
         Check(restarted, "signaling rehook publishes generation 2 and Running", __FILE__, __LINE__);
+
+        HANDLE holdReached = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE holdRelease = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_rehookHoldReached = holdReached;
+        g_rehookHoldRelease = holdRelease;
+        HydraHookIpcRehookHoldForTest = RehookHoldForOverlapTest;
+        Check(HydraHookEngineUnhook(engine) == HYDRAHOOK_ERROR_NONE,
+              "unhook before overlap rehook", __FILE__, __LINE__);
+        Check(WaitForEngineIpc(self, HydraHookIpcStateStopped, &status, 5000),
+              "overlap setup publishes Stopped", __FILE__, __LINE__);
+        const HANDLE overlap = OpenEventW(EVENT_MODIFY_STATE, FALSE, rehookName);
+        Check(overlap != nullptr, "overlap rehook event is openable", __FILE__, __LINE__);
+        if (overlap)
+        {
+            Check(SetEvent(overlap) != FALSE, "overlap rehook event signals", __FILE__, __LINE__);
+            CloseHandle(overlap);
+        }
+        const bool held = holdReached && WaitForSingleObject(holdReached, 5000) == WAIT_OBJECT_0;
+        Check(held, "rehook callback holds before releasing the phase", __FILE__, __LINE__);
+        if (held)
+        {
+            Check(engine->RehookWaitPhase.load() == HydraHookIpcPhaseInCallback,
+                  "creating callback still owns the phase", __FILE__, __LINE__);
+            Check(HydraHookEngineUnhook(engine) == HYDRAHOOK_ERROR_NONE,
+                  "replacement worker stops while the callback owns the phase", __FILE__, __LINE__);
+            Check(engine->RehookWaitPhase.load() == HydraHookIpcPhaseInCallbackExternal,
+                  "worker publishes the external wait before the callback leaves", __FILE__, __LINE__);
+        }
+        if (holdRelease)
+            SetEvent(holdRelease);
+        HydraHookIpcRehookHoldForTest = nullptr;
+        const ULONGLONG armedDeadline = GetTickCount64() + 5000;
+        bool armed = false;
+        do
+        {
+            if (engine->RehookWaitPhase.load() == HydraHookIpcPhaseArmed)
+            {
+                armed = true;
+                break;
+            }
+            Sleep(10);
+        } while (GetTickCount64() < armedDeadline);
+        Check(armed, "callback leaves the worker registration armed", __FILE__, __LINE__);
+        const HANDLE again = OpenEventW(EVENT_MODIFY_STATE, FALSE, rehookName);
+        Check(again != nullptr, "armed rehook event is openable", __FILE__, __LINE__);
+        if (again)
+        {
+            Check(SetEvent(again) != FALSE, "armed rehook event signals", __FILE__, __LINE__);
+            CloseHandle(again);
+        }
+        const ULONGLONG thirdDeadline = GetTickCount64() + 5000;
+        bool third = false;
+        do
+        {
+            if (ReadEngineIpc(self, &status) && status.Generation == 4
+                && (status.State == HydraHookIpcStateRunning || status.State == HydraHookIpcStateHooked))
+            {
+                third = true;
+                break;
+            }
+            Sleep(10);
+        } while (GetTickCount64() < thirdDeadline);
+        Check(third, "the preserved registration restarts the engine", __FILE__, __LINE__);
+        if (holdReached)
+            CloseHandle(holdReached);
+        if (holdRelease)
+            CloseHandle(holdRelease);
+        g_rehookHoldReached = nullptr;
+        g_rehookHoldRelease = nullptr;
 
         Check(HydraHookEngineUnhook(engine) == HYDRAHOOK_ERROR_NONE, "unhook after rehook", __FILE__, __LINE__);
         const HYDRAHOOK_ERROR destroyed = HydraHookEngineDestroy(self);

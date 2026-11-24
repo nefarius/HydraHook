@@ -92,6 +92,11 @@ inline void HydraHookIpcFormatNames(DWORD pid, std::uintptr_t host, wchar_t* sta
 	           static_cast<unsigned long long>(host));
 }
 
+using HydraHookIpcRehookHold = void (*)(PHYDRAHOOK_ENGINE engine);
+
+/** Test seam. Invoked after a successful rehook callback starts the worker and before it releases the phase. */
+extern HydraHookIpcRehookHold HydraHookIpcRehookHoldForTest;
+
 void HydraHookIpcCreate(PHYDRAHOOK_ENGINE engine);
 void HydraHookIpcPublish(PHYDRAHOOK_ENGINE engine, std::uint32_t state, std::uint32_t origin, std::uint32_t gameVersion,
                          std::uint32_t flags);

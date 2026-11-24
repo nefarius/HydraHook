@@ -23,6 +23,8 @@
 
 #include <cstring>
 
+HydraHookIpcRehookHold HydraHookIpcRehookHoldForTest = nullptr;
+
 namespace
 {
 	void LogIpc(const char* message, DWORD error)
@@ -165,6 +167,9 @@ namespace
 			HydraHookIpcArmRehookWait(target);
 			return;
 		}
+
+		if (HydraHookIpcRehookHoldForTest)
+			HydraHookIpcRehookHoldForTest(target);
 
 		leave();
 	}
