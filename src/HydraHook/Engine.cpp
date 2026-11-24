@@ -427,14 +427,20 @@ HYDRAHOOK_API HYDRAHOOK_ERROR HydraHookEngineDestroy(HMODULE HostInstance)
 
 	// DllMain cannot wait: the worker may need the loader lock. A finished
 	// cleanup flag is not enough, because Unhook sets it before the worker exits.
-	const bool onWorker = engine->EngineThread != nullptr
-		&& GetThreadId(engine->EngineThread) == GetCurrentThreadId();
-	bool workerExited = engine->EngineThread == nullptr;
-	if (!workerExited && !onWorker)
-		workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
+	// Rehook closes and replaces EngineThread under this lock, so the read stays inside it.
+	{
+		LifecycleTryGuard lifecycle(&engine->LifecycleLock);
+		if (!lifecycle)
+			return RetainEngine(logger, "Engine kept alive; lifecycle lock is busy");
 
-	if (!workerExited)
-		return RetainEngine(logger, "Engine kept alive; worker is still running");
+		const bool onWorker = engine->EngineThread != nullptr
+			&& GetThreadId(engine->EngineThread) == GetCurrentThreadId();
+		bool workerExited = engine->EngineThread == nullptr;
+		if (!workerExited && !onWorker)
+			workerExited = WaitForSingleObject(engine->EngineThread, 0) == WAIT_OBJECT_0;
+		if (!workerExited)
+			return RetainEngine(logger, "Engine kept alive; worker is still running");
+	}
 
 	// TerminateThread can signal the worker before it closes the tracker.
 	// A false DrainIncomplete flag is not a drain. Shut the tracker first so a
